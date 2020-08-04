@@ -32,27 +32,27 @@ if (UNIX AND
 endif()
 
 add_library (earnest
-  src/fd.cc
-  src/txfile.cc
-  src/sequence.cc
-  src/detail/replacement_map.cc
-  src/detail/tx_sequencer.cc
-  src/detail/wal.cc
-  src/db_errc.cc
   src/db.cc
+  src/db_errc.cc
+  src/fd.cc
+  src/sequence.cc
   src/tree.cc
   src/tree_error.cc
-  src/detail/tree_cfg.cc
   src/tx_aware_data.cc
+  src/txfile.cc
   src/detail/commit_manager.cc
   src/detail/commit_manager_impl.cc
-  src/detail/txfile_allocator.cc
-  src/detail/txfile_allocator_log.cc
   src/detail/db_cache.cc
   src/detail/layout_domain.cc
-  src/detail/tx_op.cc
-  src/detail/tree_page_leaf_elems.cc
+  src/detail/replacement_map.cc
+  src/detail/tree_cfg.cc
   src/detail/tree_page.cc
+  src/detail/tree_page_leaf_elems.cc
+  src/detail/tx_op.cc
+  src/detail/tx_sequencer.cc
+  src/detail/txfile_allocator.cc
+  src/detail/txfile_allocator_log.cc
+  src/detail/wal.cc
 )
 target_include_directories (earnest PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -77,45 +77,45 @@ endif()
 
 install (TARGETS earnest DESTINATION lib)
 install (FILES
-  include/earnest/txfile.h
-  include/earnest/txfile-inl.h
-  include/earnest/sequence.h
-  include/earnest/db_errc.h
-  include/earnest/db.h
   include/earnest/db-inl.h
-  include/earnest/tree.h
+  include/earnest/db.h
+  include/earnest/db_errc.h
+  include/earnest/fd.h
+  include/earnest/sequence.h
+  include/earnest/shared_resource_allocator.h
   include/earnest/tree-inl.h
+  include/earnest/tree.h
   include/earnest/tree_error.h
   include/earnest/tx_aware_data.h
-  include/earnest/shared_resource_allocator.h
-  include/earnest/fd.h
+  include/earnest/txfile-inl.h
+  include/earnest/txfile.h
   DESTINATION include/earnest)
 install (FILES
-  include/earnest/detail/export_.h
   include/earnest/detail/buffered_read_stream_at.h
   include/earnest/detail/buffered_write_stream_at.h
   include/earnest/detail/cheap_fn_ref.h
-  include/earnest/detail/replacement_map.h
-  include/earnest/detail/tx_sequencer.h
-  include/earnest/detail/wal.h
-  include/earnest/detail/tree_spec.h
-  include/earnest/detail/tree_page.h
-  include/earnest/detail/tree_page-inl.h
-  include/earnest/detail/tree_cfg.h
-  include/earnest/detail/commit_manager.h
   include/earnest/detail/commit_manager-inl.h
-  include/earnest/detail/commit_manager_impl.h
+  include/earnest/detail/commit_manager.h
   include/earnest/detail/commit_manager_impl-inl.h
-  include/earnest/detail/txfile_allocator.h
-  include/earnest/detail/txfile_allocator-inl.h
-  include/earnest/detail/txfile_allocator_log.h
+  include/earnest/detail/commit_manager_impl.h
   include/earnest/detail/db_cache.h
+  include/earnest/detail/export_.h
   include/earnest/detail/layout_domain.h
-  include/earnest/detail/tx_op.h
-  include/earnest/detail/tx_op-inl.h
+  include/earnest/detail/replacement_map.h
   include/earnest/detail/stop_continue.h
-  include/earnest/detail/tree_page_leaf_elems.h
+  include/earnest/detail/tree_cfg.h
+  include/earnest/detail/tree_page-inl.h
+  include/earnest/detail/tree_page.h
   include/earnest/detail/tree_page_leaf_elems-inl.h
+  include/earnest/detail/tree_page_leaf_elems.h
+  include/earnest/detail/tree_spec.h
+  include/earnest/detail/tx_op-inl.h
+  include/earnest/detail/tx_op.h
+  include/earnest/detail/tx_sequencer.h
+  include/earnest/detail/txfile_allocator-inl.h
+  include/earnest/detail/txfile_allocator.h
+  include/earnest/detail/txfile_allocator_log.h
+  include/earnest/detail/wal.h
   DESTINATION include/earnest/detail)
 
 add_subdirectory (tests)
