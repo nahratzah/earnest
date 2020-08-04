@@ -304,12 +304,12 @@ auto replacement_map::write_at_with_overwrite_(fd::offset_type off, reader_intf_
 
   // Reserve at least some bytes into the vector.
   while (r.size() > 0) {
-    std::unique_ptr<std::uint8_t[]> vector;
+    unique_alloc_ptr<std::uint8_t[], shared_resource_allocator<std::uint8_t>> vector;
     std::size_t to_reserve = r.size();
 
     for (;;) {
       try {
-        vector = std::make_unique<std::uint8_t[]>(to_reserve);
+        vector = allocate_unique<std::uint8_t[]>(shared_resource_allocator<std::uint8_t>(alloc_), to_reserve);
         break;
       } catch (...) {
         if (to_reserve <= 1) throw;
@@ -363,11 +363,11 @@ auto replacement_map::write_at_without_overwrite_(fd::offset_type off, reader_in
     assert(write_end_off <= end_off);
 
     while (off < write_end_off) {
-      std::unique_ptr<std::uint8_t[]> vector;
+      unique_alloc_ptr<std::uint8_t[], shared_resource_allocator<std::uint8_t>> vector;
       std::size_t to_reserve = write_end_off - off;
       for (;;) {
         try {
-          vector = std::make_unique<std::uint8_t[]>(to_reserve);
+          vector = allocate_unique<std::uint8_t[]>(shared_resource_allocator<std::uint8_t>(alloc_), to_reserve);
           break;
         } catch (const std::bad_alloc&) {
           if (to_reserve <= 1u) throw;
