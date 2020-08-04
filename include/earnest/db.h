@@ -6,9 +6,11 @@
 #include <earnest/detail/commit_manager.h>
 #include <earnest/detail/db_cache.h>
 #include <earnest/detail/layout_domain.h>
+#include <earnest/detail/tx_op.h>
 #include <earnest/shared_resource_allocator.h>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
@@ -141,10 +143,12 @@ class earnest_export_ db::transaction {
   friend db;
 
   public:
+  using allocator_type = shared_resource_allocator<std::byte>;
+
   transaction(const transaction&) = delete;
   transaction& operator=(const transaction&) = delete;
 
-  transaction() = default;
+  explicit transaction(allocator_type alloc = allocator_type());
   transaction(transaction&&) noexcept;
   transaction& operator=(transaction&&) noexcept;
   ~transaction() noexcept;
@@ -153,7 +157,7 @@ class earnest_export_ db::transaction {
   auto on(cycle_ptr::cycle_gptr<T> v) -> cycle_ptr::cycle_gptr<typename T::tx_object>;
 
   private:
-  transaction(detail::commit_manager::commit_id seq, bool read_only, db& self) noexcept;
+  transaction(detail::commit_manager::commit_id seq, bool read_only, db& self, allocator_type alloc = allocator_type());
 
   public:
   auto seq() const noexcept -> detail::commit_manager::commit_id { return seq_; }
@@ -168,6 +172,24 @@ class earnest_export_ db::transaction {
   auto active() const noexcept -> bool { return active_; }
   auto read_only() const noexcept -> bool { return read_only_; }
   auto read_write() const noexcept -> bool { return !read_only(); }
+
+  ///\brief Add an on-commit operation.
+  template<typename CommitFn>
+  auto on_commit(CommitFn&& commit_fn) -> transaction&;
+
+  ///\brief Add an on-rollback operation.
+  template<typename RollbackFn>
+  auto on_rollback(RollbackFn&& rollback_fn) -> transaction&;
+
+  ///\brief Add an on-commit and an on-rollback operation.
+  template<typename CommitFn, typename RollbackFn>
+  auto on_complete(CommitFn&& commit_fn, RollbackFn&& rollback_fn) -> transaction&;
+
+  ///\brief Add sequence of on-commit/on-rollback operations.
+  auto operator+=(earnest::detail::tx_op_collection&& new_ops) -> transaction&;
+
+  ///\brief Get the allocator of this transaction.
+  auto get_allocator() const -> allocator_type;
 
   private:
   ///\brief Lock all transaction_obj layouts.
@@ -188,18 +210,40 @@ class earnest_export_ db::transaction {
   ///\brief Rollback all transaction objects.
   void rollback_() noexcept;
 
+  using callbacks_map = std::unordered_map<
+      cycle_ptr::cycle_gptr<db_obj>,
+      cycle_ptr::cycle_gptr<transaction_obj>,
+      std::hash<cycle_ptr::cycle_gptr<db_obj>>,
+      std::equal_to<cycle_ptr::cycle_gptr<db_obj>>,
+      std::allocator_traits<allocator_type>::rebind_alloc<
+          std::pair<
+              const cycle_ptr::cycle_gptr<db_obj>,
+              cycle_ptr::cycle_gptr<transaction_obj>
+          >
+      >
+  >;
+
+  using tx_aware_data_set = std::unordered_set<
+      cycle_ptr::cycle_gptr<tx_aware_data>,
+      std::hash<cycle_ptr::cycle_gptr<tx_aware_data>>,
+      std::equal_to<cycle_ptr::cycle_gptr<tx_aware_data>>,
+      std::allocator_traits<allocator_type>::rebind_alloc<cycle_ptr::cycle_gptr<tx_aware_data>>
+  >;
+
   detail::commit_manager::commit_id seq_;
   bool read_only_;
   bool active_ = false;
-  std::unordered_map<cycle_ptr::cycle_gptr<db_obj>, cycle_ptr::cycle_gptr<transaction_obj>> callbacks_;
+  callbacks_map callbacks_;
   std::weak_ptr<db> self_;
 
   ///\brief Set of objects that are being deleted.
-  std::unordered_set<cycle_ptr::cycle_gptr<tx_aware_data>> deleted_set_;
+  tx_aware_data_set deleted_set_;
   ///\brief Set of objects that are being created.
-  std::unordered_set<cycle_ptr::cycle_gptr<tx_aware_data>> created_set_;
+  tx_aware_data_set created_set_;
   ///\brief Set of objects that must not be deleted/modified.
-  std::unordered_set<cycle_ptr::cycle_gptr<tx_aware_data>> require_set_;
+  tx_aware_data_set require_set_;
+  ///\brief Transaction on-commit/on-rollback operation queue.
+  earnest::detail::tx_op_collection ops_;
 };
 
 

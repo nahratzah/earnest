@@ -218,6 +218,7 @@ void db::transaction::commit() {
         },
         [this, &tx]() noexcept {
           commit_phase2_(tx.seq());
+          ops_.commit();
         });
   }
 
@@ -230,6 +231,7 @@ void db::transaction::rollback() noexcept {
   assert(self_.lock() != nullptr);
 
   rollback_();
+  ops_.rollback();
   active_ = false;
 }
 
