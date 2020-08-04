@@ -93,6 +93,9 @@ class earnest_export_ txfile {
 
   ///\brief Create a new txfile object that does not point at a file.
   txfile() noexcept = default;
+  ///\brief Create a new txfile object that does not point at a file.
+  ///\param alloc Allocator. (The allocator is actually ignored.)
+  explicit txfile([[maybe_unused]] allocator_type alloc) : txfile() {}
 
   /**
    * \brief Open an existing txfile.
