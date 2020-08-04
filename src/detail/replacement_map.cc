@@ -1,6 +1,7 @@
 #include <earnest/detail/replacement_map.h>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <boost/asio/read_at.hpp>
 #include <boost/asio/completion_condition.hpp>
 
@@ -8,13 +9,47 @@ namespace earnest::detail {
 namespace {
 
 
-auto replacement_map_clone(const replacement_map::value_type& r) -> replacement_map::value_type* {
-  return new replacement_map::value_type(r);
-}
+class replacement_map_dispose {
+  public:
+  using allocator_type = replacement_map::allocator_type;
 
-void replacement_map_dispose(replacement_map::value_type* ptr) {
-  delete ptr;
-}
+  explicit replacement_map_dispose(allocator_type& alloc)
+  : alloc_(alloc)
+  {}
+
+  void operator()(replacement_map::value_type* ptr) {
+    std::allocator_traits<allocator_type>::destroy(alloc_, ptr);
+    std::allocator_traits<allocator_type>::deallocate(alloc_, ptr, 1);
+  }
+
+  private:
+  allocator_type& alloc_;
+};
+
+class replacement_map_clone {
+  public:
+  using allocator_type = replacement_map::allocator_type;
+
+  explicit replacement_map_clone(allocator_type& alloc)
+  : alloc_(alloc)
+  {}
+
+  template<typename... Args>
+  auto operator()(Args&&... args) -> replacement_map::value_type* {
+    replacement_map::value_type*const ptr =
+        std::allocator_traits<allocator_type>::allocate(alloc_, 1);
+    try {
+      std::allocator_traits<allocator_type>::construct(alloc_, ptr, std::forward<Args>(args)...);
+    } catch (...) {
+      std::allocator_traits<allocator_type>::deallocate(alloc_, ptr, 1);
+      throw;
+    }
+    return ptr;
+  }
+
+  private:
+  allocator_type& alloc_;
+};
 
 
 }
@@ -114,12 +149,12 @@ class replacement_map::fd_reader_
 
 
 replacement_map::replacement_map(const replacement_map& y)
-: replacement_map() // So the destructor will be invoked on exception.
+: replacement_map(y.get_allocator()) // So the destructor will be invoked on exception.
 {
   map_.clone_from(
       y.map_,
-      &replacement_map_clone,
-      &replacement_map_dispose);
+      replacement_map_clone(alloc_),
+      replacement_map_dispose(alloc_));
 }
 
 auto replacement_map::operator=(const replacement_map& y) -> replacement_map& {
@@ -128,24 +163,27 @@ auto replacement_map::operator=(const replacement_map& y) -> replacement_map& {
 
   map_.clone_from(
       y.map_,
-      &replacement_map_clone,
-      &replacement_map_dispose);
+      replacement_map_clone(alloc_),
+      replacement_map_dispose(alloc_));
 
   return *this;
 }
 
 auto replacement_map::operator=(replacement_map&& y) noexcept -> replacement_map& {
+  using std::swap;
+
+  swap(alloc_, y.alloc_);
   map_.swap(y.map_);
-  y.map_.clear_and_dispose(&replacement_map_dispose);
+  y.map_.clear_and_dispose(replacement_map_dispose(y.alloc_));
   return *this;
 }
 
 replacement_map::~replacement_map() noexcept {
-  map_.clear_and_dispose(&replacement_map_dispose);
+  map_.clear_and_dispose(replacement_map_dispose(alloc_));
 }
 
 void replacement_map::clear() noexcept {
-  map_.clear_and_dispose(&replacement_map_dispose);
+  map_.clear_and_dispose(replacement_map_dispose(alloc_));
 }
 
 void replacement_map::truncate(fd::size_type new_size) noexcept {
@@ -154,7 +192,7 @@ void replacement_map::truncate(fd::size_type new_size) noexcept {
   assert(iter == map_.end() || iter->begin_offset() >= new_size);
   assert(iter == map_.begin() || std::prev(iter)->begin_offset() < new_size);
 
-  map_.erase_and_dispose(iter, map_.end(), &replacement_map_dispose);
+  map_.erase_and_dispose(iter, map_.end(), replacement_map_dispose(alloc_));
 
   if (!map_.empty()) {
     auto& back = *map_.rbegin();
@@ -215,8 +253,8 @@ auto replacement_map::write_at_with_overwrite_(fd::offset_type off, reader_intf_
   const fd::offset_type end_off = off + r.size();
   if (end_off < off) throw std::overflow_error("replacement_map: off + nbytes");
 
-  tx t;
-  t.map_ = &map_;
+  tx t(alloc_);
+  t.rm_ = this;
   std::size_t bytes_from_pred = 0, bytes_from_succ = 0;
 
   // Find the first region *after* off.
@@ -252,14 +290,14 @@ auto replacement_map::write_at_with_overwrite_(fd::offset_type off, reader_intf_
 
   // Prepare a replacement for pred.
   if (bytes_from_pred > 0u) {
-    auto new_pred = std::make_unique<value_type>(*pred);
+    auto new_pred = allocate_unique<value_type>(alloc_, *pred);
     new_pred->keep_front(bytes_from_pred);
     t.to_insert_.emplace_back(std::move(new_pred));
   }
 
   // Prepare a replacement for succ.
   if (bytes_from_succ > 0u) {
-    auto new_succ = std::make_unique<value_type>(*succ);
+    auto new_succ = allocate_unique<value_type>(alloc_, *succ);
     new_succ->keep_back(bytes_from_succ);
     t.to_insert_.emplace_back(std::move(new_succ));
   }
@@ -282,7 +320,7 @@ auto replacement_map::write_at_with_overwrite_(fd::offset_type off, reader_intf_
     r.read(vector.get(), to_reserve);
     r += to_reserve;
 
-    t.to_insert_.emplace_back(std::make_unique<value_type>(off, std::move(vector), to_reserve));
+    t.to_insert_.emplace_back(allocate_unique<value_type>(alloc_, off, std::move(vector), to_reserve));
     off += to_reserve;
   }
 
@@ -293,8 +331,8 @@ auto replacement_map::write_at_without_overwrite_(fd::offset_type off, reader_in
   const fd::offset_type end_off = off + r.size();
   if (end_off < off) throw std::overflow_error("replacement_map: off + nbytes");
 
-  tx t;
-  t.map_ = &map_;
+  tx t(alloc_);
+  t.rm_ = this;
 
   /* We only write in the gaps, so we position 'iter' and 'iter_succ' such that
    * they are the delimiters of the first gap at/after 'off'.
@@ -338,7 +376,7 @@ auto replacement_map::write_at_without_overwrite_(fd::offset_type off, reader_in
       }
 
       r.read(vector.get(), to_reserve);
-      t.to_insert_.emplace_back(std::make_unique<value_type>(off, std::move(vector), to_reserve));
+      t.to_insert_.emplace_back(allocate_unique<value_type>(alloc_, off, std::move(vector), to_reserve));
       off += to_reserve;
       r += to_reserve;
     }
@@ -396,31 +434,31 @@ auto replacement_map::value_type::keep_back(size_type n) -> value_type& {
 replacement_map::tx::~tx() noexcept = default;
 
 void replacement_map::tx::commit() noexcept {
-  assert(map_ != nullptr);
+  assert(rm_ != nullptr);
 
   std::for_each(
       std::move_iterator(to_erase_.begin()),
       std::move_iterator(to_erase_.end()),
       [this](map_type::iterator&& iter) {
-        map_->erase_and_dispose(iter, &replacement_map_dispose);
+        rm_->map_.erase_and_dispose(iter, replacement_map_dispose(rm_->alloc_));
       });
 
   std::for_each(
       std::move_iterator(to_insert_.begin()),
       std::move_iterator(to_insert_.end()),
-      [this](std::unique_ptr<value_type>&& entry) {
+      [this](unique_alloc_ptr<value_type, allocator_type>&& entry) {
         bool inserted = false;
         map_type::iterator ipos;
-        std::tie(ipos, inserted) = map_->insert(*entry);
+        std::tie(ipos, inserted) = rm_->map_.insert(*entry);
         assert(inserted);
         entry.release();
 
         // Assert the inserted element causes no overlap.
-        assert(ipos == map_->begin() || std::prev(ipos)->end_offset() <= ipos->begin_offset());
-        assert(std::next(ipos) == map_->end() || std::next(ipos)->begin_offset() >= ipos->end_offset());
+        assert(ipos == rm_->map_.begin() || std::prev(ipos)->end_offset() <= ipos->begin_offset());
+        assert(std::next(ipos) == rm_->map_.end() || std::next(ipos)->begin_offset() >= ipos->end_offset());
       });
 
-  map_ = nullptr;
+  rm_ = nullptr;
   to_erase_.clear();
   to_insert_.clear();
 }

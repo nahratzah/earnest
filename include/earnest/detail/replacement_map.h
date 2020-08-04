@@ -11,6 +11,8 @@
 #include <boost/intrusive/set.hpp>
 #include <boost/intrusive/options.hpp>
 #include <earnest/fd.h>
+#include <earnest/shared_resource_allocator.h>
+#include <earnest/detail/unique_alloc_ptr.h>
 
 namespace earnest::detail {
 
@@ -33,14 +35,16 @@ class earnest_export_ replacement_map {
 
 #if __cpp_lib_shared_ptr_arrays >= 201611
     public:
-    value_type(fd::offset_type first, std::unique_ptr<std::uint8_t[]>&& data, size_type size)
+    template<typename Deleter>
+    value_type(fd::offset_type first, std::unique_ptr<std::uint8_t[], Deleter>&& data, size_type size)
     : first(first),
       data_(std::move(data)),
       size_(size)
     {}
 #else
     public:
-    value_type(fd::offset_type first, std::unique_ptr<std::uint8_t[]>&& data, size_type size)
+    template<typename Deleter>
+    value_type(fd::offset_type first, std::unique_ptr<std::uint8_t[], Deleter>&& data, size_type size)
     : first(first),
       data_(data.get(), data.get_deleter()),
       size_(size)
@@ -106,6 +110,8 @@ class earnest_export_ replacement_map {
     size_type size_ = 0;
   };
 
+  using allocator_type = shared_resource_allocator<value_type>;
+
   private:
   struct entry_key_extractor_ {
     using type = fd::offset_type;
@@ -125,7 +131,7 @@ class earnest_export_ replacement_map {
   using iterator = const_iterator;
   class tx;
 
-  replacement_map() = default;
+  explicit replacement_map(allocator_type alloc = allocator_type()) : alloc_(alloc) {}
   replacement_map(const replacement_map& y);
 
   replacement_map(replacement_map&& y) noexcept
@@ -224,6 +230,9 @@ class earnest_export_ replacement_map {
    */
   auto write_at_from_file(fd::offset_type off, fd& file, fd::offset_type file_off, std::size_t nbytes, bool overwrite = true) -> tx;
 
+  ///\brief Get the allocator for this replacement map.
+  auto get_allocator() const -> allocator_type { return alloc_; }
+
   private:
   class reader_intf_;
   class buf_reader_;
@@ -234,6 +243,7 @@ class earnest_export_ replacement_map {
   auto write_at_without_overwrite_(fd::offset_type off, reader_intf_&) -> tx;
 
   map_type map_;
+  allocator_type alloc_;
 };
 
 inline void swap(replacement_map& x, replacement_map& y) noexcept {
@@ -248,19 +258,24 @@ class earnest_export_ replacement_map::tx {
   friend replacement_map;
 
   public:
+  using allocator_type = shared_resource_allocator<value_type>;
+
   tx(const tx&) = delete;
   tx& operator=(const tx&) = delete;
 
-  tx() noexcept = default;
+  explicit tx(allocator_type alloc = allocator_type())
+  : to_erase_(alloc),
+    to_insert_(alloc)
+  {}
 
   tx(tx&& x) noexcept
-  : map_(std::exchange(x.map_, nullptr)),
+  : rm_(std::exchange(x.rm_, nullptr)),
     to_erase_(std::move(x.to_erase_)),
     to_insert_(std::move(x.to_insert_))
   {}
 
   tx& operator=(tx&& x) noexcept {
-    map_ = std::exchange(x.map_, nullptr);
+    rm_ = std::exchange(x.rm_, nullptr);
     to_erase_ = std::move(x.to_erase_);
     to_insert_ = std::move(x.to_insert_);
     return *this;
@@ -271,9 +286,9 @@ class earnest_export_ replacement_map::tx {
   void commit() noexcept;
 
   private:
-  map_type* map_ = nullptr; // No ownership.
-  std::vector<map_type::iterator> to_erase_;
-  std::vector<std::unique_ptr<value_type>> to_insert_;
+  replacement_map* rm_ = nullptr; // No ownership.
+  std::vector<map_type::iterator, std::allocator_traits<allocator_type>::rebind_alloc<map_type::iterator>> to_erase_;
+  std::vector<unique_alloc_ptr<value_type, allocator_type>, std::allocator_traits<allocator_type>::rebind_alloc<unique_alloc_ptr<value_type, allocator_type>>> to_insert_;
 };
 
 

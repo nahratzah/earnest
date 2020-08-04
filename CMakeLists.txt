@@ -115,6 +115,7 @@ install (FILES
   include/earnest/detail/txfile_allocator-inl.h
   include/earnest/detail/txfile_allocator.h
   include/earnest/detail/txfile_allocator_log.h
+  include/earnest/detail/unique_alloc_ptr.h
   include/earnest/detail/wal.h
   DESTINATION include/earnest/detail)
 
