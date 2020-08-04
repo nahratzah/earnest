@@ -18,12 +18,24 @@ txfile::txfile(std::string name, fd&& file, fd::offset_type off, fd::size_type l
 : pimpl_(std::make_shared<impl_>(std::move(name), std::move(file), off, len))
 {}
 
+txfile::txfile(std::string name, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc)
+: pimpl_(std::allocate_shared<impl_>(shared_resource_allocator<impl_>(alloc), std::move(name), std::move(file), off, len, alloc))
+{}
+
 txfile::txfile(std::string name, create_tag tag, fd&& file, fd::offset_type off, fd::size_type len)
 : pimpl_(std::make_shared<impl_>(std::move(name), tag, std::move(file), off, len))
 {}
 
+txfile::txfile(std::string name, create_tag tag, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc)
+: pimpl_(std::allocate_shared<impl_>(shared_resource_allocator<impl_>(alloc), std::move(name), tag, std::move(file), off, len, alloc))
+{}
+
 auto txfile::create(std::string name, fd&& file, fd::offset_type off, fd::size_type len) -> txfile {
   return txfile(std::move(name), create_tag(), std::move(file), off, len);
+}
+
+auto txfile::create(std::string name, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc) -> txfile {
+  return txfile(std::move(name), create_tag(), std::move(file), off, len, std::move(alloc));
 }
 
 
@@ -33,6 +45,14 @@ txfile::transaction::transaction(bool read_only, const std::shared_ptr<impl_>& o
   owner_(owner.get()),
   seq_(std::shared_ptr<detail::tx_sequencer>(owner, &owner->sequencer_), cb),
   wal_(std::shared_ptr<detail::wal_region>(owner, &owner->wal_))
+{}
+
+template<typename CB>
+txfile::transaction::transaction(bool read_only, const std::shared_ptr<impl_>& owner, CB&& cb, detail::wal_region::tx::allocator_type alloc)
+: read_only_(read_only),
+  owner_(owner.get()),
+  seq_(std::shared_ptr<detail::tx_sequencer>(owner, &owner->sequencer_), cb),
+  wal_(std::shared_ptr<detail::wal_region>(owner, &owner->wal_), std::move(alloc))
 {}
 
 void txfile::transaction::resize(size_type new_size) {
@@ -103,6 +123,10 @@ auto txfile::begin(bool read_only) -> transaction {
   return transaction(read_only, pimpl_, []() {});
 }
 
+auto txfile::begin(bool read_only, shared_resource_allocator<std::byte> alloc) -> transaction {
+  return transaction(read_only, pimpl_, []() {}, std::move(alloc));
+}
+
 auto txfile::begin(sequence& s, bool read_only) -> std::tuple<transaction, id_type> {
   id_type tx_id;
   auto tx = transaction(
@@ -114,8 +138,24 @@ auto txfile::begin(sequence& s, bool read_only) -> std::tuple<transaction, id_ty
   return std::make_tuple(std::move(tx), std::move(tx_id));
 }
 
+auto txfile::begin(sequence& s, bool read_only, shared_resource_allocator<std::byte> alloc) -> std::tuple<transaction, id_type> {
+  id_type tx_id;
+  auto tx = transaction(
+      read_only,
+      pimpl_,
+      [&tx_id, &s]() {
+        tx_id = s();
+      },
+      std::move(alloc));
+  return std::make_tuple(std::move(tx), std::move(tx_id));
+}
+
 auto txfile::begin() const -> transaction {
   return transaction(true, pimpl_, []() {});
+}
+
+auto txfile::begin(shared_resource_allocator<std::byte> alloc) const -> transaction {
+  return transaction(true, pimpl_, []() {}, std::move(alloc));
 }
 
 auto txfile::begin(sequence& s) const -> std::tuple<transaction, id_type> {
@@ -126,6 +166,18 @@ auto txfile::begin(sequence& s) const -> std::tuple<transaction, id_type> {
       [&tx_id, &s]() {
         tx_id = s();
       });
+  return std::make_tuple(std::move(tx), std::move(tx_id));
+}
+
+auto txfile::begin(sequence& s, shared_resource_allocator<std::byte> alloc) const -> std::tuple<transaction, id_type> {
+  id_type tx_id;
+  auto tx = transaction(
+      true,
+      pimpl_,
+      [&tx_id, &s]() {
+        tx_id = s();
+      },
+      std::move(alloc));
   return std::make_tuple(std::move(tx), std::move(tx_id));
 }
 

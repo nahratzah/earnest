@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 #include <earnest/fd.h>
 #include <earnest/detail/replacement_map.h>
@@ -184,6 +185,7 @@ class earnest_export_ wal_region {
   struct create {};
   class tx;
   using executor_type = fd::executor_type;
+  using allocator_type = shared_resource_allocator<std::byte>;
 
   private:
   ///\brief WAL segment sequence number type.
@@ -209,14 +211,16 @@ class earnest_export_ wal_region {
   ///\param[in] file The file in which to open the region.
   ///\param[in] off The offset in the file at which the WAL was created.
   ///\param[in] len The size of the WAL.
-  wal_region(std::string name, fd&& file, fd::offset_type off, fd::size_type len);
+  ///\param[in] alloc Allocator.
+  wal_region(std::string name, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc = allocator_type());
   ///\brief Create a WAL region from a newly initialized file.
   ///\param[in] name A name used for instrumentation.
   ///\param[in] c A tag type to distinguish between the constructors.
   ///\param[in] file The file in which to open the region.
   ///\param[in] off The offset in the file at which to create the WAL.
   ///\param[in] len The size of the WAL.
-  wal_region(std::string name, create c, fd&& file, fd::offset_type off, fd::size_type len);
+  ///\param[in] alloc Allocator.
+  wal_region(std::string name, create c, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc = allocator_type());
   wal_region(wal_region&&) noexcept = delete;
   wal_region(const wal_region&) = delete;
   wal_region& operator=(wal_region&&) noexcept = delete;
@@ -227,6 +231,9 @@ class earnest_export_ wal_region {
   auto wal_end_offset() const noexcept -> fd::offset_type {
     return off_ + len_;
   }
+
+  ///\brief Get the allocator used by this WAL region.
+  auto get_allocator() const -> allocator_type { return repl_.get_allocator(); }
 
   private:
   ///\brief Allocate a transaction ID.
@@ -390,15 +397,15 @@ class earnest_export_ wal_region {
 
   ///\brief Vector where tx_id is the index and bool indicates wether the transaction is in progress.
   ///\details A transaction that is in progress has been started, but has neither been committed, nor been rolled back.
-  std::vector<bool> tx_id_states_;
+  std::vector<bool, shared_resource_allocator<bool>> tx_id_states_;
   ///\brief List of transaction IDs that are available for allocation.
   ///\details
   ///These IDs are all marked as inactive.
-  std::priority_queue<wal_record::tx_id_type, std::vector<wal_record::tx_id_type>, std::greater<wal_record::tx_id_type>> tx_id_avail_;
+  std::priority_queue<wal_record::tx_id_type, std::vector<wal_record::tx_id_type, shared_resource_allocator<wal_record::tx_id_type>>, std::greater<wal_record::tx_id_type>> tx_id_avail_;
   ///\brief Number of completed transactions in tx_id_states_.
   ///\details
   ///This holds the value `std::count(tx_id_states_.cbegin(), tx_id_states_.cend(), false)`.
-  std::vector<bool>::size_type tx_id_completed_count_ = 0;
+  std::vector<bool, shared_resource_allocator<bool>>::size_type tx_id_completed_count_ = 0;
 
   ///\brief Mutex providing read/write access to the file, excluding the WAL.
   ///\details
@@ -434,14 +441,21 @@ class earnest_export_ wal_region {
  */
 class earnest_export_ wal_region::tx {
   public:
+  using allocator_type = replacement_map::allocator_type;
+
   tx() = default;
   tx(const tx&) = delete;
   tx(tx&&) noexcept = default;
   tx& operator=(const tx&) = delete;
   tx& operator=(tx&&) noexcept = default;
 
+  ///\brief Create not-a-transaction.
+  explicit tx(allocator_type alloc) : writes_(std::move(alloc)) {}
+
   ///\brief Start a new transaction.
-  tx(const std::shared_ptr<wal_region>& wal) noexcept;
+  explicit tx(const std::shared_ptr<wal_region>& wal);
+  ///\brief Start a new transaction.
+  tx(const std::shared_ptr<wal_region>& wal, allocator_type alloc);
 
   ///\brief Destructor.
   ~tx() noexcept;
@@ -589,6 +603,9 @@ class earnest_export_ wal_region::tx {
   ///\return The size of the file.
   ///\throws std::bad_weak_ptr if the transaction is invalid.
   auto size() const -> fd::size_type;
+
+  ///\brief Get the allocator used by this WAL region.
+  auto get_allocator() const -> allocator_type { return writes_.get_allocator(); }
 
   private:
   ///\brief Reference to the WAL.

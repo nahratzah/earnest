@@ -481,10 +481,13 @@ auto wal_record::make_resize(tx_id_type tx_id, std::uint64_t new_size) -> std::u
 }
 
 
-wal_region::wal_region(std::string name, class fd&& file, fd::offset_type off, fd::size_type len)
+wal_region::wal_region(std::string name, class fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc)
 : off_(off),
   len_(len),
+  tx_id_states_(alloc),
+  tx_id_avail_(alloc),
   fd_(std::move(file)),
+  repl_(alloc),
   commit_count_("monsoon.wal.commits", {{"name", name}}),
   write_ops_("monsoon.wal.writes", {{"name", name}}),
   compactions_("monsoon.wal.compactions", {{"name", name}}),
@@ -571,13 +574,16 @@ wal_region::wal_region(std::string name, class fd&& file, fd::offset_type off, f
   }
 }
 
-wal_region::wal_region(std::string name, [[maybe_unused]] create c, class fd&& file, fd::offset_type off, fd::size_type len)
+wal_region::wal_region(std::string name, [[maybe_unused]] create c, class fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc)
 : off_(off),
   len_(len),
   current_seq_(0),
   current_slot_(0),
+  tx_id_states_(alloc),
+  tx_id_avail_(alloc),
   fd_(std::move(file)),
   fd_size_(0),
+  repl_(alloc),
   commit_count_("monsoon.wal.commits", {{"name", name}}),
   write_ops_("monsoon.wal.writes", {{"name", name}}),
   compactions_("monsoon.wal.compactions", {{"name", name}}),
@@ -1051,8 +1057,13 @@ void wal_region::tx_rollback_(wal_record::tx_id_type tx_id) noexcept {
 }
 
 
-wal_region::tx::tx(const std::shared_ptr<wal_region>& wal) noexcept
-: wal_(wal)
+wal_region::tx::tx(const std::shared_ptr<wal_region>& wal)
+: tx(wal, (wal != nullptr ? allocator_type(wal->get_allocator()) : allocator_type()))
+{}
+
+wal_region::tx::tx(const std::shared_ptr<wal_region>& wal, allocator_type alloc)
+: wal_(wal),
+  writes_(std::move(alloc))
 {
   if (wal != nullptr)
     tx_id_ = wal->allocate_tx_id();

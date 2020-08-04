@@ -11,6 +11,7 @@
 #include <tuple>
 #include <utility>
 #include <earnest/fd.h>
+#include <earnest/shared_resource_allocator.h>
 #include <earnest/detail/tx_sequencer.h>
 #include <earnest/detail/wal.h>
 #include <earnest/detail/replacement_map.h>
@@ -85,6 +86,7 @@ class earnest_export_ txfile {
 
   class transaction;
   using executor_type = detail::wal_region::executor_type;
+  using allocator_type = detail::wal_region::allocator_type;
 
   txfile(const txfile&) = delete;
   txfile& operator=(const txfile&) = delete;
@@ -101,10 +103,21 @@ class earnest_export_ txfile {
    * \param[in] len The length in bytes of the WAL.
    */
   txfile(std::string name, fd&& file, fd::offset_type off, fd::size_type len);
+  /**
+   * \brief Open an existing txfile.
+   * \details Recovers the file.
+   * \param[in] name The name under which instrumentation is to be published.
+   * \param[in] file The file that is being opened.
+   * \param[in] off The offset at which the WAL is found.
+   * \param[in] len The length in bytes of the WAL.
+   * \param[in] alloc Allocator for this file.
+   */
+  txfile(std::string name, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc);
 
   private:
   using create_tag = detail::wal_region::create;
   txfile(std::string name, create_tag tag, fd&& file, fd::offset_type off, fd::size_type len);
+  txfile(std::string name, create_tag tag, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc);
 
   public:
   txfile(txfile&&) noexcept = default;
@@ -119,6 +132,16 @@ class earnest_export_ txfile {
    * \param[in] len The length in bytes of the WAL.
    */
   static auto create(std::string name, fd&& file, fd::offset_type off, fd::size_type len) -> txfile;
+  /**
+   * \brief Initialize a txfile.
+   * \details Initializes the txfile to an empty file.
+   * \param[in] name The name under which instrumentation is to be published.
+   * \param[in] file The file that is being initialized.
+   * \param[in] off The offset at which the WAL is found.
+   * \param[in] len The length in bytes of the WAL.
+   * \param[in] alloc Allocator for this file.
+   */
+  static auto create(std::string name, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc) -> txfile;
 
   /**
    * \brief Start a new transaction.
@@ -135,10 +158,31 @@ class earnest_export_ txfile {
    * Start a new transaction.
    * If the \p read_only parameter is omitted, the code defaults to a read-only transaction.
    * \param[in] read_only If set, the transaction shall be a read-only transaction.
+   * \param[in] alloc Allocator for this transaction.
+   * \return A new transaction.
+   */
+  auto begin(bool read_only, shared_resource_allocator<std::byte> alloc) -> transaction;
+  /**
+   * \brief Start a new transaction.
+   * \details
+   * Start a new transaction.
+   * If the \p read_only parameter is omitted, the code defaults to a read-only transaction.
+   * \param[in] read_only If set, the transaction shall be a read-only transaction.
    * \param[in] s A sequence for allocating a transaction ID.
    * \return A new transaction.
    */
   auto begin(sequence& s, bool read_only) -> std::tuple<transaction, id_type>;
+  /**
+   * \brief Start a new transaction.
+   * \details
+   * Start a new transaction.
+   * If the \p read_only parameter is omitted, the code defaults to a read-only transaction.
+   * \param[in] read_only If set, the transaction shall be a read-only transaction.
+   * \param[in] s A sequence for allocating a transaction ID.
+   * \param[in] alloc Allocator for this transaction.
+   * \return A new transaction.
+   */
+  auto begin(sequence& s, bool read_only, shared_resource_allocator<std::byte> alloc) -> std::tuple<transaction, id_type>;
   /**
    * \brief Start a new read-only transaction.
    * \details
@@ -152,13 +196,34 @@ class earnest_export_ txfile {
    * \details
    * Start a new transaction.
    * Because the txfile is const, only a read-only transaction can be started.
+   * \param[in] alloc Allocator for this transaction.
+   * \return A new read-only transaction.
+   */
+  auto begin(shared_resource_allocator<std::byte> alloc) const -> transaction;
+  /**
+   * \brief Start a new read-only transaction.
+   * \details
+   * Start a new transaction.
+   * Because the txfile is const, only a read-only transaction can be started.
    * \param[in] s A sequence for allocating a transaction ID.
    * \return A new read-only transaction.
    */
   auto begin(sequence& s) const -> std::tuple<transaction, id_type>;
+  /**
+   * \brief Start a new read-only transaction.
+   * \details
+   * Start a new transaction.
+   * Because the txfile is const, only a read-only transaction can be started.
+   * \param[in] s A sequence for allocating a transaction ID.
+   * \return A new read-only transaction.
+   */
+  auto begin(sequence& s, shared_resource_allocator<std::byte> alloc) const -> std::tuple<transaction, id_type>;
 
   ///\brief Get the executor for this txfile.
   auto get_executor() -> executor_type { return pimpl_->wal_.get_executor(); }
+
+  ///\brief Get the allocator for this txfile.
+  auto get_allocator() const -> allocator_type;
 
   private:
   struct earnest_local_ impl_ {
@@ -171,8 +236,16 @@ class earnest_export_ txfile {
     : wal_(std::move(name), std::move(file), off, len)
     {}
 
+    impl_(std::string name, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc)
+    : wal_(std::move(name), std::move(file), off, len, std::move(alloc))
+    {}
+
     impl_(std::string name, create_tag tag, fd&& file, fd::offset_type off, fd::size_type len)
     : wal_(std::move(name), tag, std::move(file), off, len)
+    {}
+
+    impl_(std::string name, create_tag tag, fd&& file, fd::offset_type off, fd::size_type len, allocator_type alloc)
+    : wal_(std::move(name), tag, std::move(file), off, len, std::move(alloc))
     {}
 
     ~impl_() noexcept;
@@ -195,6 +268,8 @@ class earnest_export_ txfile::transaction {
   friend sequence;
 
   public:
+  ///\brief Allocator for transaction resources.
+  using allocator_type = shared_resource_allocator<std::byte>;
   ///\brief The offset type for the file modeled by the transaction.
   using offset_type = fd::offset_type;
   ///\brief The size type for the file modeled by the transaction.
@@ -218,6 +293,12 @@ class earnest_export_ txfile::transaction {
    * The transaction is not started and can not have operations applied.
    */
   transaction() = default;
+  /**
+   * \brief Create an uninitialized, invalid transaction.
+   * \details
+   * The transaction is not started and can not have operations applied.
+   */
+  transaction(allocator_type alloc) : wal_(std::move(alloc)) {}
 
   /**
    * \brief Move construct a transaction.
@@ -252,6 +333,14 @@ class earnest_export_ txfile::transaction {
    */
   template<typename CB>
   transaction(bool read_only, const std::shared_ptr<impl_>& owner, CB&& cb);
+
+  /**
+   * \brief Internal transaction constructor.
+   * \details
+   * This constructor is used by txfile to begin a new transaction.
+   */
+  template<typename CB>
+  transaction(bool read_only, const std::shared_ptr<impl_>& owner, CB&& cb, detail::wal_region::tx::allocator_type alloc);
 
   public:
   /**
@@ -311,6 +400,9 @@ class earnest_export_ txfile::transaction {
   auto write_some_at(offset_type off, MB&& mb) -> std::size_t;
   template<typename MB>
   auto write_some_at(offset_type off, MB&& mb, boost::system::error_code& ec) -> std::size_t;
+
+  ///\brief Retrieve the allocator used for this transaction.
+  auto get_allocator() const -> allocator_type { return wal_.get_allocator(); }
 
   private:
   auto read_at_(offset_type off, void* buf, std::size_t nbytes, boost::system::error_code& ec) const -> std::size_t;

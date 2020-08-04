@@ -7,6 +7,12 @@
 namespace earnest {
 
 
+inline auto txfile::get_allocator() const -> allocator_type {
+  if (pimpl_ != nullptr) return pimpl_->wal_.get_allocator();
+  return {};
+}
+
+
 template<typename MB>
 inline auto txfile::transaction::read_some_at(offset_type off, MB&& mb) const -> std::size_t {
   boost::system::error_code ec;
