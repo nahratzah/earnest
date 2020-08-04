@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.3)
 project (earnest)
 
+option(BUILD_SHARED_LIBS "Build shared libraries" ON)
+
 set(EARNEST_VERSION_MAJOR 0 CACHE STRING "major version" FORCE)
 set(EARNEST_VERSION_MINOR 5 CACHE STRING "minor version" FORCE)
 set(EARNEST_VERSION ${EARNEST_VERSION_MAJOR}.${EARNEST_VERSION_MINOR} CACHE STRING "version" FORCE)
@@ -8,9 +10,10 @@ set(EARNEST_VERSION ${EARNEST_VERSION_MAJOR}.${EARNEST_VERSION_MINOR} CACHE STRI
 include (CheckFunctionExists)
 
 enable_testing()
-find_package (Boost COMPONENTS system REQUIRED)
+find_package (Boost COMPONENTS container filesystem system REQUIRED)
 find_package (instrumentation 1.0 REQUIRED)
 find_package (monsoon_cache 0.5 REQUIRED)
+find_package(objpipe 0.3 REQUIRED)
 find_package (cycle_ptr 0.4 REQUIRED)
 
 include (CheckCXXCompilerFlag)
@@ -62,6 +65,8 @@ target_link_libraries (earnest PUBLIC
   instrumentation
   monsoon_cache
   cycle_ptr
+  ${Boost_CONTAINER_LIBRARY}
+  ${Boost_FILESYSTEM_LIBRARY}
   ${Boost_SYSTEM_LIBRARY}
 )
 target_link_libraries (earnest PRIVATE
