@@ -60,6 +60,29 @@ inline auto txfile::transaction::write_some_at(offset_type off, MB&& mb, boost::
   return write_at(off, non_empty_buf->data(), non_empty_buf->size());
 }
 
+template<typename CommitFn>
+inline auto txfile::transaction::on_commit(CommitFn&& commit_fn) -> transaction& {
+  wal_.on_commit(std::forward<CommitFn>(commit_fn));
+  return *this;
+}
+
+template<typename RollbackFn>
+inline auto txfile::transaction::on_rollback(RollbackFn&& rollback_fn) -> transaction& {
+  wal_.on_rollback(std::forward<RollbackFn>(rollback_fn));
+  return *this;
+}
+
+template<typename CommitFn, typename RollbackFn>
+inline auto txfile::transaction::on_complete(CommitFn&& commit_fn, RollbackFn&& rollback_fn) -> transaction& {
+  wal_.on_complete(std::forward<CommitFn>(commit_fn), std::forward<RollbackFn>(rollback_fn));
+  return *this;
+}
+
+inline auto txfile::transaction::operator+=(earnest::detail::tx_op_collection&& new_ops) -> transaction& {
+  wal_ += std::move(new_ops);
+  return *this;
+}
+
 
 } /* namespace earnest */
 

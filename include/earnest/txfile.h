@@ -404,6 +404,21 @@ class earnest_export_ txfile::transaction {
   template<typename MB>
   auto write_some_at(offset_type off, MB&& mb, boost::system::error_code& ec) -> std::size_t;
 
+  ///\brief Add an on-commit operation.
+  template<typename CommitFn>
+  auto on_commit(CommitFn&& commit_fn) -> transaction&;
+
+  ///\brief Add an on-rollback operation.
+  template<typename RollbackFn>
+  auto on_rollback(RollbackFn&& rollback_fn) -> transaction&;
+
+  ///\brief Add an on-commit and an on-rollback operation.
+  template<typename CommitFn, typename RollbackFn>
+  auto on_complete(CommitFn&& commit_fn, RollbackFn&& rollback_fn) -> transaction&;
+
+  ///\brief Add sequence of on-commit/on-rollback operations.
+  auto operator+=(earnest::detail::tx_op_collection&& new_ops) -> transaction&;
+
   ///\brief Retrieve the allocator used for this transaction.
   auto get_allocator() const -> allocator_type { return wal_.get_allocator(); }
 
