@@ -1,10 +1,10 @@
-cmake_minimum_required(VERSION 3.3)
+cmake_minimum_required(VERSION 3.8)
 project (earnest)
 
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
 set(EARNEST_VERSION_MAJOR 0 CACHE STRING "major version" FORCE)
-set(EARNEST_VERSION_MINOR 5 CACHE STRING "minor version" FORCE)
+set(EARNEST_VERSION_MINOR 0 CACHE STRING "minor version" FORCE)
 set(EARNEST_VERSION ${EARNEST_VERSION_MAJOR}.${EARNEST_VERSION_MINOR} CACHE STRING "version" FORCE)
 
 include (CheckFunctionExists)
@@ -13,19 +13,8 @@ enable_testing()
 find_package (Boost COMPONENTS container filesystem system REQUIRED)
 find_package (instrumentation 1.0 REQUIRED)
 find_package (monsoon_cache 0.5 REQUIRED)
-find_package(objpipe 0.3 REQUIRED)
+find_package (objpipe 0.3 REQUIRED)
 find_package (cycle_ptr 0.4 REQUIRED)
-
-include (CheckCXXCompilerFlag)
-check_cxx_compiler_flag ("-std=c++17" STD_CXX17)
-check_cxx_compiler_flag ("-std=c++1z" STD_CXX1Z)
-if(STD_CXX17)
-  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
-elseif(STD_CXX1Z)
-  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++1z")
-else()
-  message(WARNING "Cannot figure out how to enable C++17 on compiler.")
-endif()
 
 # If using ninja and clang, enable colours.
 if (UNIX AND
@@ -66,14 +55,15 @@ target_link_libraries (earnest PUBLIC
   monsoon_cache
   cycle_ptr
   ${Boost_CONTAINER_LIBRARY}
-  ${Boost_FILESYSTEM_LIBRARY}
   ${Boost_SYSTEM_LIBRARY}
 )
 target_link_libraries (earnest PRIVATE
   objpipe
+  ${Boost_FILESYSTEM_LIBRARY}
 )
 set_property (TARGET earnest PROPERTY VERSION ${EARNEST_VERSION})
-set_property (TARGET earnest PROPERTY SOVERSION ${EARNEST_VERSION})
+target_compile_features (earnest PUBLIC cxx_std_17)
+set_target_properties (earnest PROPERTIES CXX_EXTENSIONS OFF)
 
 find_package (Threads REQUIRED)
 if(CMAKE_USE_PTHREADS_INIT)
