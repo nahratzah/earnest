@@ -35,7 +35,7 @@ auto make_tx_op(CommitFn&& commit_fn, RollbackFn&& rollback_fn) -> std::shared_p
 }
 
 
-inline tx_op_collection::tx_op_collection(allocator_type alloc)
+inline tx_op_collection::tx_op_collection(allocator_type alloc) noexcept
 : ops_(std::move(alloc))
 {}
 

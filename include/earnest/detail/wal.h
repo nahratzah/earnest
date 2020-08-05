@@ -20,6 +20,7 @@
 #include <earnest/fd.h>
 #include <earnest/detail/replacement_map.h>
 #include <earnest/detail/buffered_read_stream_at.h>
+#include <earnest/detail/tx_op.h>
 #include <instrumentation/counter.h>
 #include <boost/system/error_code.hpp>
 #include <boost/asio/buffer.hpp>
@@ -380,7 +381,7 @@ class earnest_export_ wal_region {
   ///\param[in] writes The writes done as part of this transaction.
   ///\param[in] new_file_size If present, a file size modification operation.
   ///\return A replacement_map recording for all replaced data in the file, what the before-commit contents was.
-  void tx_commit_(wal_record::tx_id_type tx_id, replacement_map&& writes, std::optional<fd::size_type> new_file_size, std::function<void(replacement_map)> undo_op_fn);
+  void tx_commit_(wal_record::tx_id_type tx_id, replacement_map&& writes, std::optional<fd::size_type> new_file_size, std::function<void(replacement_map)> undo_op_fn, tx_op_collection& ops);
   ///\brief Mark a transaction as canceled.
   void tx_rollback_(wal_record::tx_id_type tx_id) noexcept;
 
@@ -447,10 +448,10 @@ class earnest_export_ wal_region::tx {
   tx(const tx&) = delete;
   tx(tx&&) noexcept = default;
   tx& operator=(const tx&) = delete;
-  tx& operator=(tx&&) noexcept = default;
+  tx& operator=(tx&&) = default;
 
   ///\brief Create not-a-transaction.
-  explicit tx(allocator_type alloc) : writes_(std::move(alloc)) {}
+  explicit tx(allocator_type alloc) : writes_(alloc), ops_(alloc) {}
 
   ///\brief Start a new transaction.
   explicit tx(const std::shared_ptr<wal_region>& wal);
@@ -604,6 +605,21 @@ class earnest_export_ wal_region::tx {
   ///\throws std::bad_weak_ptr if the transaction is invalid.
   auto size() const -> fd::size_type;
 
+  ///\brief Add an on-commit operation.
+  template<typename CommitFn>
+  auto on_commit(CommitFn&& commit_fn) -> tx&;
+
+  ///\brief Add an on-rollback operation.
+  template<typename RollbackFn>
+  auto on_rollback(RollbackFn&& rollback_fn) -> tx&;
+
+  ///\brief Add an on-commit and an on-rollback operation.
+  template<typename CommitFn, typename RollbackFn>
+  auto on_complete(CommitFn&& commit_fn, RollbackFn&& rollback_fn) -> tx&;
+
+  ///\brief Add sequence of on-commit/on-rollback operations.
+  auto operator+=(earnest::detail::tx_op_collection&& new_ops) -> tx&;
+
   ///\brief Get the allocator used by this WAL region.
   auto get_allocator() const -> allocator_type { return writes_.get_allocator(); }
 
@@ -616,9 +632,13 @@ class earnest_export_ wal_region::tx {
   std::optional<fd::size_type> new_file_size_;
   ///\brief Internal transaction ID.
   wal_record::tx_id_type tx_id_;
+  ///\brief On-commit and on-rollback callbacks.
+  tx_op_collection ops_;
 };
 
 
 } /* namespace earnest::detail */
+
+#include "wal-inl.h"
 
 #endif /* EARNEST_DETAIL_WAL_H */

@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <type_traits>
+#include <utility>
 
 #if __has_include(<memory_resource>)
 # include <memory_resource>
@@ -49,8 +50,8 @@ class shared_resource_allocator {
   : mr_(y.mr_)
   {}
 
-  explicit shared_resource_allocator(std::shared_ptr<pmr::memory_resource> mr)
-  : mr_(mr)
+  explicit shared_resource_allocator(std::shared_ptr<pmr::memory_resource> mr) noexcept
+  : mr_(std::move(mr))
   {}
 
   auto allocate(std::size_t n, const void* hint = 0) -> value_type* {
@@ -94,8 +95,8 @@ class shared_resource_allocator<void> {
   : mr_(y.mr_)
   {}
 
-  explicit shared_resource_allocator(std::shared_ptr<pmr::memory_resource> mr)
-  : mr_(mr)
+  explicit shared_resource_allocator(std::shared_ptr<pmr::memory_resource> mr) noexcept
+  : mr_(std::move(mr))
   {}
 
   template<typename U>

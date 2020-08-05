@@ -924,7 +924,7 @@ void wal_region::tx_resize_(wal_record::tx_id_type tx_id, fd::size_type new_size
   log_write_(wal_record_resize(tx_id, new_size));
 }
 
-void wal_region::tx_commit_(wal_record::tx_id_type tx_id, replacement_map&& writes, std::optional<fd::size_type> new_file_size, std::function<void(replacement_map)> undo_op_fn) {
+void wal_region::tx_commit_(wal_record::tx_id_type tx_id, replacement_map&& writes, std::optional<fd::size_type> new_file_size, std::function<void(replacement_map)> undo_op_fn, tx_op_collection& ops) {
   // Create record of the commit.
   std::string xdr;
   wal_record_commit(tx_id).write(boost::asio::dynamic_buffer(xdr));
@@ -1043,6 +1043,8 @@ void wal_region::tx_commit_(wal_record::tx_id_type tx_id, replacement_map&& writ
   slot_off_ += xdr.size() - wal_record_end::XDR_SIZE;
 
   undo_op_fn(std::move(undo));
+  static_assert(noexcept(ops.commit()), "ops on-commit handlers may not throw");
+  ops.commit();
 
   ++commit_count_;
 }
@@ -1063,7 +1065,8 @@ wal_region::tx::tx(const std::shared_ptr<wal_region>& wal)
 
 wal_region::tx::tx(const std::shared_ptr<wal_region>& wal, allocator_type alloc)
 : wal_(wal),
-  writes_(std::move(alloc))
+  writes_(alloc),
+  ops_(alloc)
 {
   if (wal != nullptr)
     tx_id_ = wal->allocate_tx_id();
@@ -1120,7 +1123,7 @@ void wal_region::tx::resize(fd::size_type new_size) {
 }
 
 void wal_region::tx::commit(std::function<void(replacement_map)> undo_op_fn) {
-  std::shared_ptr<wal_region>(wal_)->tx_commit_(tx_id_, std::move(writes_), new_file_size_, std::move(undo_op_fn));
+  std::shared_ptr<wal_region>(wal_)->tx_commit_(tx_id_, std::move(writes_), new_file_size_, std::move(undo_op_fn), ops_);
   wal_.reset();
 }
 
@@ -1131,6 +1134,7 @@ void wal_region::tx::commit() {
 void wal_region::tx::rollback() noexcept {
   const auto wal = wal_.lock();
   if (wal != nullptr) wal->tx_rollback_(tx_id_);
+  ops_.rollback(); // Never throws.
   wal_.reset();
 }
 

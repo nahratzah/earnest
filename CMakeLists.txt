@@ -112,6 +112,7 @@ install (FILES
   include/earnest/detail/txfile_allocator_log.h
   include/earnest/detail/unique_alloc_ptr.h
   include/earnest/detail/wal.h
+  include/earnest/detail/wal-inl.h
   DESTINATION include/earnest/detail)
 
 add_subdirectory (tests)

@@ -78,7 +78,7 @@ class earnest_export_ tx_op_collection {
   using size_type = collection_type::size_type;
 
   tx_op_collection() = default;
-  explicit tx_op_collection(allocator_type alloc);
+  explicit tx_op_collection(allocator_type alloc) noexcept;
   tx_op_collection(const tx_op_collection&) = delete;
   tx_op_collection(tx_op_collection&&) = default;
   tx_op_collection& operator=(const tx_op_collection&) = delete;
