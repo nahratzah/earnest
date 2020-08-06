@@ -55,35 +55,35 @@ class shared_lock_ptr {
   shared_lock_ptr(const Ptr& p, [[maybe_unused]] std::try_to_lock_t t)
   : shared_lock_ptr(p, std::defer_lock)
   {
-    try_to_lock();
+    try_lock();
   }
 
   shared_lock_ptr(Ptr&& p, [[maybe_unused]] std::try_to_lock_t t)
   : shared_lock_ptr(std::move(p), std::defer_lock)
   {
-    try_to_lock();
+    try_lock();
   }
 
   shared_lock_ptr(const Ptr& p, [[maybe_unused]] std::adopt_lock_t t)
   : ptr_(p),
     locked_(true)
   {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
   }
 
   shared_lock_ptr(Ptr&& p, [[maybe_unused]] std::adopt_lock_t t)
   : ptr_(std::move(p)),
     locked_(true)
   {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
   }
 
   ~shared_lock_ptr() noexcept {
     ensure_unlocked_();
   }
 
-  void swap(shared_lock_ptr& o) noexcept(std::is_nothrow_swappable<Ptr>) {
-    if constexpr(std::is_nothrow_swappable<Ptr>) {
+  void swap(shared_lock_ptr& o) noexcept(std::is_nothrow_swappable_v<Ptr>) {
+    if constexpr(std::is_nothrow_swappable_v<Ptr>) {
       using std::swap;
 
       swap(ptr_, o.ptr_);
@@ -109,23 +109,23 @@ class shared_lock_ptr {
   }
 
   void lock() {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
-    if (locked_) throw std::system_error(std::errc::resource_deadlock_would_occur);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    if (locked_) throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
 
     ptr_->lock_shared();
     locked_ = true;
   }
 
   auto try_lock() -> bool {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
-    if (locked_) throw std::system_error(std::errc::resource_deadlock_would_occur);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    if (locked_) throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
 
-    locked_ = ptr_->try_lock_shared();
+    return locked_ = ptr_->try_lock_shared();
   }
 
   void unlock() {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
-    if (!locked_) throw std::system_error(std::errc::operation_not_permitted);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    if (!locked_) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
 
     ptr_->unlock_shared();
     locked_ = false;
@@ -138,7 +138,7 @@ class shared_lock_ptr {
   }
 
   private:
-  void ensure_unlocked_() noexcept(noexcept(std::declval<const Ptr&>()->unlock())) {
+  void ensure_unlocked_() noexcept(noexcept(std::declval<Ptr&>()->unlock_shared())) {
     if (locked_) {
       ptr_->unlock_shared();
       locked_ = false;
@@ -197,35 +197,35 @@ class unique_lock_ptr {
   unique_lock_ptr(const Ptr& p, [[maybe_unused]] std::try_to_lock_t t)
   : unique_lock_ptr(p, std::defer_lock)
   {
-    try_to_lock();
+    try_lock();
   }
 
   unique_lock_ptr(Ptr&& p, [[maybe_unused]] std::try_to_lock_t t)
   : unique_lock_ptr(std::move(p), std::defer_lock)
   {
-    try_to_lock();
+    try_lock();
   }
 
   unique_lock_ptr(const Ptr& p, [[maybe_unused]] std::adopt_lock_t t)
   : ptr_(p),
     locked_(true)
   {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
   }
 
   unique_lock_ptr(Ptr&& p, [[maybe_unused]] std::adopt_lock_t t)
   : ptr_(std::move(p)),
     locked_(true)
   {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
   }
 
   ~unique_lock_ptr() noexcept {
     ensure_unlocked_();
   }
 
-  void swap(unique_lock_ptr& o) noexcept(std::is_nothrow_swappable<Ptr>) {
-    if constexpr(std::is_nothrow_swappable<Ptr>) {
+  void swap(unique_lock_ptr& o) noexcept(std::is_nothrow_swappable_v<Ptr>) {
+    if constexpr(std::is_nothrow_swappable_v<Ptr>) {
       using std::swap;
 
       swap(ptr_, o.ptr_);
@@ -251,23 +251,23 @@ class unique_lock_ptr {
   }
 
   void lock() {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
-    if (locked_) throw std::system_error(std::errc::resource_deadlock_would_occur);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    if (locked_) throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
 
     ptr_->lock();
     locked_ = true;
   }
 
   auto try_lock() -> bool {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
-    if (locked_) throw std::system_error(std::errc::resource_deadlock_would_occur);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    if (locked_) throw std::system_error(std::make_error_code(std::errc::resource_deadlock_would_occur));
 
-    locked_ = ptr_->try_lock();
+    return locked_ = ptr_->try_lock();
   }
 
   void unlock() {
-    if (ptr_ == nullptr) throw std::system_error(std::errc::operation_not_permitted);
-    if (!locked_) throw std::system_error(std::errc::operation_not_permitted);
+    if (ptr_ == nullptr) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
+    if (!locked_) throw std::system_error(std::make_error_code(std::errc::operation_not_permitted));
 
     ptr_->unlock();
     locked_ = false;
@@ -280,7 +280,7 @@ class unique_lock_ptr {
   }
 
   private:
-  void ensure_unlocked_() noexcept(noexcept(std::declval<const Ptr&>()->unlock())) {
+  void ensure_unlocked_() noexcept(noexcept(std::declval<Ptr&>()->unlock())) {
     if (locked_) {
       ptr_->unlock();
       locked_ = false;
