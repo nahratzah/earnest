@@ -57,8 +57,8 @@ class earnest_export_ tx_op {
   void before_destroy_() noexcept;
 
   private:
-  virtual void commit_() noexcept = 0;
-  virtual void rollback_() noexcept = 0;
+  virtual void commit_() noexcept;
+  virtual void rollback_() noexcept;
 
   bool completed_ = false;
 };
@@ -140,7 +140,6 @@ class tx_op::impl_<CommitFn, std::nullptr_t>
 
   private:
   void commit_() noexcept override;
-  void rollback_() noexcept override;
 
   CommitFn commit_fn_;
 };
@@ -155,7 +154,6 @@ class tx_op::impl_<std::nullptr_t, RollbackFn>
   ~impl_() noexcept override;
 
   private:
-  void commit_() noexcept override;
   void rollback_() noexcept override;
 
   RollbackFn rollback_fn_;
@@ -169,10 +167,6 @@ class tx_op::impl_<std::nullptr_t, std::nullptr_t>
   public:
   impl_([[maybe_unused]] std::nullptr_t commit_fn, [[maybe_unused]] std::nullptr_t rollback_fn) noexcept {}
   ~impl_() noexcept override;
-
-  private:
-  void commit_() noexcept override;
-  void rollback_() noexcept override;
 };
 
 

@@ -120,9 +120,6 @@ inline void tx_op::impl_<CommitFn, std::nullptr_t>::commit_() noexcept {
   std::invoke(std::move(commit_fn_));
 }
 
-template<typename CommitFn>
-inline void tx_op::impl_<CommitFn, std::nullptr_t>::rollback_() noexcept {}
-
 
 template<typename RollbackFn>
 inline tx_op::impl_<std::nullptr_t, RollbackFn>::impl_([[maybe_unused]] std::nullptr_t commit_fn, RollbackFn rollback_fn)
@@ -133,9 +130,6 @@ template<typename RollbackFn>
 inline tx_op::impl_<std::nullptr_t, RollbackFn>::~impl_() noexcept {
   before_destroy_();
 }
-
-template<typename RollbackFn>
-inline void tx_op::impl_<std::nullptr_t, RollbackFn>::commit_() noexcept {}
 
 template<typename RollbackFn>
 inline void tx_op::impl_<std::nullptr_t, RollbackFn>::rollback_() noexcept {

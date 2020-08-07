@@ -24,6 +24,10 @@ void tx_op::before_destroy_() noexcept {
   if (!std::exchange(completed_, true)) rollback_();
 }
 
+void tx_op::commit_() noexcept {}
+
+void tx_op::rollback_() noexcept {}
+
 
 void tx_op_collection::reserve(size_type new_cap) {
   ops_.reserve(new_cap);
@@ -61,10 +65,6 @@ void tx_op_collection::rollback() noexcept {
 
 
 tx_op::impl_<std::nullptr_t, std::nullptr_t>::~impl_() noexcept = default;
-
-void tx_op::impl_<std::nullptr_t, std::nullptr_t>::commit_() noexcept {}
-
-void tx_op::impl_<std::nullptr_t, std::nullptr_t>::rollback_() noexcept {}
 
 
 } /* namespace earnest::detail */
