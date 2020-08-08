@@ -326,7 +326,7 @@ restart:
 #endif
 
   // This call mutates the data in 'template_name'.
-  native_handle_type handle = ::open(::mktemp(template_name.data()), fl);
+  native_handle_type handle = ::open(::mktemp(template_name.data()), fl, 0666);
   if (handle == -1) {
     if (errno == EEXIST) goto restart;
     ec = last_error_();
@@ -334,6 +334,7 @@ restart:
   }
 #endif // HAS_MKSTEMP
 
+  unlink(template_name.data());
   impl_.assign(handle);
 }
 
