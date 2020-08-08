@@ -394,6 +394,10 @@ class earnest_export_ txfile::transaction {
   auto write_at(offset_type off, const void* buf, std::size_t nbytes) -> std::size_t;
   void write_at_many(std::vector<offset_type> off, const void* buf, std::size_t nbytes);
 
+  void write_at_many(std::vector<offset_type> off, boost::asio::const_buffer buf) {
+    write_at_many(std::move(off), buf.data(), buf.size());
+  }
+
   template<typename MB>
   auto read_some_at(offset_type off, MB&& mb) const -> std::size_t;
   template<typename MB>
