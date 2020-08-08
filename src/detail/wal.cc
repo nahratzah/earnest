@@ -279,6 +279,7 @@ class wal_record_write_many
         in,
         boost::asio::mutable_buffer(&offsets_len, sizeof(offsets_len)),
         boost::asio::transfer_all());
+    boost::endian::big_to_native_inplace(offsets_len);
 
     std::vector<std::uint64_t> offsets;
     offsets.resize(offsets_len);
@@ -287,7 +288,7 @@ class wal_record_write_many
         boost::asio::mutable_buffer(offsets.data(), offsets.size() * sizeof(std::uint64_t)),
         boost::asio::transfer_all());
     std::for_each(offsets.begin(), offsets.end(),
-        [](std::uint64_t v) {
+        [](std::uint64_t& v) {
           boost::endian::big_to_native_inplace(v);
         });
 
@@ -336,11 +337,14 @@ class wal_record_write_many
         });
 
     const std::array<char, 4> zpad{ '\0', '\0', '\0', '\0' };
-    const auto zpad_len = (4u - (len % 4u)) % 4u;
+    const auto zpad_len = (len % 4u == 0u ? 0u : len % 4u);
 
+    clen = len;
+    boost::endian::native_to_big_inplace(clen);
     boost::asio::buffer_copy(
         dyn_grow(out, len + zpad_len),
-        std::array<boost::asio::const_buffer, 2>{
+        std::array<boost::asio::const_buffer, 3>{
+          boost::asio::buffer(&clen, sizeof(clen)),
           boost::asio::buffer(buf, len),
           boost::asio::buffer(zpad, zpad_len)
         });
@@ -707,6 +711,8 @@ auto wal_region::read_at_(fd::offset_type off, void* buf, std::size_t len) -> st
 }
 
 auto wal_region::read_at_(fd::offset_type off, void* buf, std::size_t len, boost::system::error_code& ec) -> std::size_t {
+  // Zero length reads are very easy.
+  if (len == 0) return 0;
   // Reads past the logic end of the file will fail.
   if (off >= fd_size_) {
     ec = boost::asio::stream_errc::eof;
@@ -714,8 +720,7 @@ auto wal_region::read_at_(fd::offset_type off, void* buf, std::size_t len, boost
   }
   // Clamp len, so we won't perform reads past-the-end.
   if (len > fd_size_ - off) len = fd_size_ - off;
-  // Zero length reads are very easy.
-  if (len == 0u) return 0u;
+  assert(len != 0u);
 
   // Try to read from the list of pending writes.
   const auto repl_rlen = repl_.read_at(off, buf, len); // May modify len.
@@ -723,15 +728,17 @@ auto wal_region::read_at_(fd::offset_type off, void* buf, std::size_t len, boost
   assert(len != 0u);
 
   // We have to fall back to the file.
-  const auto read_rlen = boost::asio::read_at(fd_, off + wal_end_offset(), boost::asio::mutable_buffer(buf, len));
-  if (read_rlen != 0u) [[likely]] return read_rlen;
-  assert(len != 0u);
-
-  // If the file-read failed, it means the file is really smaller.
-  // Pretend the file is zero-filled.
-  assert(off + wal_end_offset() >= fd_.size());
-  std::fill_n(reinterpret_cast<std::uint8_t*>(buf), len, std::uint8_t(0u));
-  return len;
+  const auto read_rlen = boost::asio::read_at(fd_, off + wal_end_offset(), boost::asio::mutable_buffer(buf, len), boost::asio::transfer_at_least(1), ec);
+  if (ec == boost::asio::stream_errc::eof) {
+    // If the file-read failed, it means the file is really smaller.
+    // Pretend the file is zero-filled.
+    ec.clear();
+    assert(off + wal_end_offset() >= fd_.size());
+    std::fill_n(reinterpret_cast<std::uint8_t*>(buf), len, std::uint8_t(0u));
+    assert(len != 0u);
+    return len;
+  }
+  return read_rlen;
 }
 
 void wal_region::log_write_(const wal_record& r) {

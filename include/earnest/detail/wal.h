@@ -549,18 +549,16 @@ class earnest_export_ wal_region::tx {
     }
 
     // Third, read directly from the WAL.
-    {
-      const auto wal_rlen = wal->read_at_(off, buf, len);
-      if (wal_rlen != 0u) return wal_rlen;
+    const auto wal_rlen = wal->read_at_(off, buf, len, ec);
+    if (ec == boost::asio::stream_errc::eof) {
+      // If nothing can provide data, pretend the file is zero-filled.
+      if (new_file_size_.has_value()) {
+        ec.clear();
+        std::fill_n(reinterpret_cast<std::uint8_t*>(buf), len, std::uint8_t(0u));
+        return len;
+      }
     }
-
-    // If nothing can provide data, pretend the file is zero-filled.
-    if (new_file_size_.has_value()) {
-      std::fill_n(reinterpret_cast<std::uint8_t*>(buf), len, std::uint8_t(0u));
-      return len;
-    }
-
-    return 0;
+    return wal_rlen;
   }
 
   ///\brief Read operation.
