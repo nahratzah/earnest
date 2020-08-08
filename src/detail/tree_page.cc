@@ -927,6 +927,9 @@ auto tree_page_leaf::local_split_(
     cycle_ptr::cycle_gptr<tree_page_leaf>,
     std::unique_lock<std::shared_mutex>
 > {
+  assert(false);
+  return {};
+#if 0
   assert(parent != nullptr);
   assert(parent->offset() == parent_off_);
   assert(lck.owns_lock() && is_my_mutex(lck.mutex()));
@@ -1033,6 +1036,7 @@ auto tree_page_leaf::local_split_(
       std::move(sibling_key),
       std::move(sibling),
       std::move(sibling_lck));
+#endif
 }
 
 auto tree_page_leaf::local_split_atp_(
