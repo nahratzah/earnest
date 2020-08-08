@@ -16,10 +16,9 @@ namespace earnest::detail {
 
 template<typename Source, typename Alloc = std::allocator<void>>
 class buffered_read_stream_at {
-  private:
-  using buf_alloc = typename std::allocator_traits<Alloc>::template rebind_alloc<char>;
-
   public:
+  using allocator_type = typename std::allocator_traits<Alloc>::template rebind_alloc<char>;
+
   buffered_read_stream_at() = default;
 
   buffered_read_stream_at(const buffered_read_stream_at&) = delete;
@@ -47,12 +46,21 @@ class buffered_read_stream_at {
     return *this;
   }
 
-  buffered_read_stream_at(Source& src, std::uint64_t off, std::uint64_t len, std::size_t bufsiz = 64 * 1024)
+  buffered_read_stream_at(Source& src, std::uint64_t off, std::uint64_t len, std::size_t bufsiz, allocator_type alloc = allocator_type())
   : src_(&src),
     off_(off),
     avl_(len),
+    buf_(alloc),
     cap_(bufsiz)
   {}
+
+  buffered_read_stream_at(Source& src, std::uint64_t off, std::uint64_t len, allocator_type alloc = allocator_type())
+  : buffered_read_stream_at(src, off, len, 64 * 1024, alloc)
+  {}
+
+  auto get_allocator() const -> allocator_type {
+    return buf_.get_allocator();
+  }
 
   template<typename MB>
   auto read_some(MB&& mb) -> std::size_t {
@@ -103,7 +111,7 @@ class buffered_read_stream_at {
   Source* src_ = nullptr;
   std::uint64_t off_ = 0;
   std::uint64_t avl_ = 0;
-  std::vector<char, buf_alloc> buf_;
+  std::vector<char, allocator_type> buf_;
   std::size_t buf_off_ = 0;
   std::size_t cap_;
 };

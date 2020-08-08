@@ -16,10 +16,9 @@ namespace earnest::detail {
 
 template<typename Sink, typename Alloc = std::allocator<void>>
 class buffered_write_stream_at {
-  private:
-  using buf_alloc = typename std::allocator_traits<Alloc>::template rebind_alloc<char>;
-
   public:
+  using allocator_type = typename std::allocator_traits<Alloc>::template rebind_alloc<char>;
+
   buffered_write_stream_at() = default;
 
   buffered_write_stream_at(const buffered_write_stream_at&) = delete;
@@ -45,12 +44,20 @@ class buffered_write_stream_at {
     return *this;
   }
 
-  buffered_write_stream_at(Sink& snk, std::uint64_t off, std::uint64_t len, std::size_t bufsiz = 64 * 1024)
+  buffered_write_stream_at(Sink& snk, std::uint64_t off, std::uint64_t len, std::size_t bufsiz, allocator_type alloc = allocator_type())
   : snk_(&snk),
     off_(off),
     avl_(len),
     cap_(bufsiz)
   {}
+
+  buffered_write_stream_at(Sink& snk, std::uint64_t off, std::uint64_t len, allocator_type alloc = allocator_type())
+  : buffered_write_stream_at(snk, off, len, 64 * 1024, alloc)
+  {}
+
+  auto get_allocator() const -> allocator_type {
+    return buf_.get_allocator();
+  }
 
   template<typename MB>
   auto write_some(MB&& mb) -> std::size_t {
@@ -150,7 +157,7 @@ class buffered_write_stream_at {
   Sink* snk_ = nullptr;
   std::uint64_t off_ = 0;
   std::uint64_t avl_ = 0;
-  std::vector<char, buf_alloc> buf_;
+  std::vector<char, allocator_type> buf_;
   std::size_t cap_;
 };
 
