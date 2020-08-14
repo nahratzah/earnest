@@ -11,7 +11,7 @@ class cfg;
 class loader;
 class abstract_tree;
 class abstract_page;
-class abstract_leaf;
+class leaf;
 class key_type;
 class value_type;
 class tx_aware_value_type;

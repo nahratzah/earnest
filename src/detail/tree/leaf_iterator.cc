@@ -37,7 +37,7 @@ auto leaf_iterator::operator++() -> leaf_iterator& {
     }
   }
 
-  abstract_leaf::shared_lock_ptr parent_page;
+  leaf::shared_lock_ptr parent_page;
   bool relocked;
   std::tie(parent_page, relocked) = value_type::parent_page_for_read(cur_lck);
 
@@ -60,8 +60,8 @@ auto leaf_iterator::operator++() -> leaf_iterator& {
     }
 
     // Load the next page.
-    parent_page = abstract_leaf::shared_lock_ptr(
-        boost::polymorphic_pointer_downcast<abstract_leaf>(
+    parent_page = leaf::shared_lock_ptr(
+        boost::polymorphic_pointer_downcast<leaf>(
             abstract_page::load_from_disk(parent_page->successor_off_, *loader_)));
 
     // Seek in the next page.
@@ -129,7 +129,7 @@ restart:
     }
   }
 
-  abstract_leaf::shared_lock_ptr parent_page;
+  leaf::shared_lock_ptr parent_page;
   bool relocked;
   std::tie(parent_page, relocked) = value_type::parent_page_for_read(cur_lck);
   cur_lck.unlock();
@@ -151,8 +151,8 @@ restart:
     }
 
     // Load the previous page.
-    parent_page = abstract_leaf::shared_lock_ptr(
-        boost::polymorphic_pointer_downcast<abstract_leaf>(
+    parent_page = leaf::shared_lock_ptr(
+        boost::polymorphic_pointer_downcast<leaf>(
             abstract_page::load_from_disk(parent_page->predecessor_off_, *loader_)));
 
     // Seek in the next page.

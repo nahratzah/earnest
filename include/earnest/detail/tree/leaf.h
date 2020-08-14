@@ -22,15 +22,15 @@
 namespace earnest::detail::tree {
 
 
-class earnest_export_ abstract_leaf final
+class earnest_export_ leaf final
 : public abstract_page
 {
   friend tx_aware_value_type;
   friend leaf_iterator;
 
   public:
-  using shared_lock_ptr = earnest::detail::shared_lock_ptr<cycle_ptr::cycle_gptr<const abstract_leaf>>;
-  using unique_lock_ptr = earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<abstract_leaf>>;
+  using shared_lock_ptr = earnest::detail::shared_lock_ptr<cycle_ptr::cycle_gptr<const leaf>>;
+  using unique_lock_ptr = earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<leaf>>;
 
   ///\brief Magic value of the header.
   static constexpr std::uint32_t magic = 0x2901'c28fU;
@@ -42,8 +42,8 @@ class earnest_export_ abstract_leaf final
   void init() override;
 
   public:
-  explicit abstract_leaf(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc = allocator_type());
-  virtual ~abstract_leaf() noexcept;
+  explicit leaf(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc = allocator_type());
+  virtual ~leaf() noexcept;
 
   /**
    * \brief Merge two pages together.
@@ -120,7 +120,7 @@ class earnest_export_ abstract_leaf final
 };
 
 
-struct earnest_export_ abstract_leaf::header {
+struct earnest_export_ leaf::header {
   static const std::size_t OFFSET_PARENT_PTR;
   static const std::size_t OFFSET_NEXT_SIBLING_PTR;
   static const std::size_t OFFSET_PREV_SIBLING_PTR;

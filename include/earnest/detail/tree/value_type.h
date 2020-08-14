@@ -17,7 +17,7 @@ namespace earnest::detail::tree {
 class earnest_export_ value_type
 : protected cycle_ptr::cycle_base
 {
-  friend abstract_leaf;
+  friend leaf;
   friend tx_aware_value_type;
   friend leaf_iterator;
 
@@ -51,19 +51,19 @@ class earnest_export_ value_type
 
   static auto parent_page_for_read(shared_lock_ptr& vptr)
   -> std::tuple<
-      earnest::detail::shared_lock_ptr<cycle_ptr::cycle_gptr<const abstract_leaf>>,
+      earnest::detail::shared_lock_ptr<cycle_ptr::cycle_gptr<const leaf>>,
       bool>;
   static auto parent_page_for_read(unique_lock_ptr& vptr)
   -> std::tuple<
-      earnest::detail::shared_lock_ptr<cycle_ptr::cycle_gptr<const abstract_leaf>>,
+      earnest::detail::shared_lock_ptr<cycle_ptr::cycle_gptr<const leaf>>,
       bool>;
   static auto parent_page_for_write(shared_lock_ptr& vptr)
   -> std::tuple<
-      earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<abstract_leaf>>,
+      earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<leaf>>,
       bool>;
   static auto parent_page_for_write(unique_lock_ptr& vptr)
   -> std::tuple<
-      earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<abstract_leaf>>,
+      earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<leaf>>,
       bool>;
 
   auto get_allocator() const -> allocator_type { return alloc_; }
@@ -85,7 +85,7 @@ class earnest_export_ value_type
   ///\brief Parent pointer.
   ///\note Protected by locking this.
   ///\note Can only be changed with (all involved) parents locked for write.
-  cycle_ptr::cycle_member_ptr<abstract_leaf> parent_{ *this };
+  cycle_ptr::cycle_member_ptr<leaf> parent_{ *this };
   ///\brief Slot index.
   ///\note Protected by locking this.
   ///\note Can only be changed with (all involved) parents locked for write.

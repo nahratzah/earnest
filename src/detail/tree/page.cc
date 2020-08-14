@@ -36,8 +36,8 @@ auto abstract_page::decode(
     default:
       ec = boost::asio::error::operation_not_supported;
       return page;
-    case abstract_leaf::magic:
-      page = allocate_page<abstract_leaf>(tree, std::move(alloc));
+    case leaf::magic:
+      page = allocate_page<leaf>(tree, std::move(alloc));
       break;
   }
 

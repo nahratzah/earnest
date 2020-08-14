@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-using earnest::detail::tree::abstract_leaf;
+using earnest::detail::tree::leaf;
 
 template<typename T>
 class pointer_vector {
@@ -90,10 +90,10 @@ struct fixture {
   {}
 
   auto leaf_bytes() const -> std::size_t {
-    return abstract_leaf::header::SIZE + cfg->key_bytes + cfg->items_per_leaf_page * (cfg->key_bytes + cfg->val_bytes);
+    return leaf::header::SIZE + cfg->key_bytes + cfg->items_per_leaf_page * (cfg->key_bytes + cfg->val_bytes);
   }
 
-  auto load_leaf(earnest::fd::offset_type offset) -> cycle_ptr::cycle_gptr<abstract_leaf> {
+  auto load_leaf(earnest::fd::offset_type offset) -> cycle_ptr::cycle_gptr<leaf> {
     auto tx = file.begin();
 
     boost::system::error_code ec;
@@ -101,14 +101,14 @@ struct fixture {
     REQUIRE CHECK(!ec);
     REQUIRE CHECK(page_ptr != nullptr);
 
-    REQUIRE CHECK(std::dynamic_pointer_cast<abstract_leaf>(page_ptr) != nullptr);
-    return std::dynamic_pointer_cast<abstract_leaf>(page_ptr);
+    REQUIRE CHECK(std::dynamic_pointer_cast<leaf>(page_ptr) != nullptr);
+    return std::dynamic_pointer_cast<leaf>(page_ptr);
   }
 
-  auto write_empty_leaf(earnest::fd::offset_type offset) -> cycle_ptr::cycle_gptr<abstract_leaf> {
+  auto write_empty_leaf(earnest::fd::offset_type offset) -> cycle_ptr::cycle_gptr<leaf> {
     auto tx = file.begin(false);
     if (tx.size() < offset + leaf_bytes()) tx.resize(offset + leaf_bytes());
-    auto magic = abstract_leaf::magic;
+    auto magic = leaf::magic;
     boost::endian::native_to_big_inplace(magic);
     boost::asio::write_at(tx, offset, boost::asio::buffer(&magic, sizeof(magic)));
     tx.commit();
@@ -117,12 +117,12 @@ struct fixture {
   }
 
   template<typename Vector>
-  auto write_leaf(earnest::fd::offset_type offset, const Vector& elems) -> cycle_ptr::cycle_gptr<abstract_leaf> {
-    abstract_leaf::unique_lock_ptr leaf(write_empty_leaf(offset));
+  auto write_leaf(earnest::fd::offset_type offset, const Vector& elems) -> cycle_ptr::cycle_gptr<leaf> {
+    leaf::unique_lock_ptr leaf(write_empty_leaf(offset));
 
     for (const auto& new_elem : elems) {
       auto tx = file.begin(false);
-      abstract_leaf::link(leaf, new_elem, nullptr, tx);
+      leaf::link(leaf, new_elem, nullptr, tx);
       tx.commit();
     }
 
@@ -260,8 +260,8 @@ struct fixture {
     mutable std::shared_mutex mtx_;
   };
 
-  static auto read_all_from_leaf(const abstract_leaf::shared_lock_ptr& leaf) -> pointer_vector<element_type> {
-    auto raw_value_types = abstract_leaf::get_elements(leaf);
+  static auto read_all_from_leaf(const leaf::shared_lock_ptr& leaf) -> pointer_vector<element_type> {
+    auto raw_value_types = leaf::get_elements(leaf);
 
     std::vector<cycle_ptr::cycle_gptr<element_type>> result;
     std::transform(raw_value_types.begin(), raw_value_types.end(), std::back_inserter(result),
@@ -273,8 +273,8 @@ struct fixture {
     return result;
   }
 
-  static auto read_all_from_leaf(const abstract_leaf::unique_lock_ptr& leaf) -> pointer_vector<element_type> {
-    auto raw_value_types = abstract_leaf::get_elements(leaf);
+  static auto read_all_from_leaf(const leaf::unique_lock_ptr& leaf) -> pointer_vector<element_type> {
+    auto raw_value_types = leaf::get_elements(leaf);
 
     std::vector<cycle_ptr::cycle_gptr<element_type>> result;
     std::transform(raw_value_types.begin(), raw_value_types.end(), std::back_inserter(result),
@@ -364,9 +364,9 @@ inline auto operator<<(std::ostream& out, const fixture::key_type& e) -> std::os
 SUITE(leaf) {
 
 TEST_FIXTURE(fixture, empty_page) {
-  auto leaf = abstract_leaf::shared_lock_ptr(write_empty_leaf(0));
+  auto leaf = leaf::shared_lock_ptr(write_empty_leaf(0));
   CHECK_EQUAL(cfg->items_per_leaf_page, leaf->max_size());
-  CHECK_EQUAL(0, abstract_leaf::size(leaf));
+  CHECK_EQUAL(0, leaf::size(leaf));
 
   CHECK_EQUAL(pointer_vector<element_type>(), fixture::read_all_from_leaf(leaf));
   CHECK_EQUAL(cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type>(nullptr), leaf->key());
@@ -375,10 +375,10 @@ TEST_FIXTURE(fixture, empty_page) {
 TEST_FIXTURE(fixture, append_first_element) {
   const auto new_elem = cycle_ptr::make_cycle<element_type>("key", "val");
 
-  auto leaf = abstract_leaf::unique_lock_ptr(write_empty_leaf(0));
+  auto leaf = leaf::unique_lock_ptr(write_empty_leaf(0));
 
   auto tx = file.begin(false);
-  abstract_leaf::link(leaf, new_elem, nullptr, tx);
+  leaf::link(leaf, new_elem, nullptr, tx);
 
   // Element don't appear until commit is called.
   CHECK_EQUAL(pointer_vector<element_type>(), fixture::read_all_from_leaf(leaf));
@@ -397,10 +397,10 @@ TEST_FIXTURE(fixture, append_many_elements) {
       cycle_ptr::make_cycle<element_type>("key4", "4"),
   };
 
-  auto leaf = abstract_leaf::unique_lock_ptr(write_empty_leaf(0));
+  auto leaf = leaf::unique_lock_ptr(write_empty_leaf(0));
   for (const auto& new_elem : elems) {
     auto tx = file.begin(false);
-    abstract_leaf::link(leaf, new_elem, nullptr, tx);
+    leaf::link(leaf, new_elem, nullptr, tx);
     tx.commit();
   }
 
@@ -410,7 +410,7 @@ TEST_FIXTURE(fixture, append_many_elements) {
 TEST_FIXTURE(fixture, read_back_empty) {
   write_empty_leaf(0);
 
-  CHECK_EQUAL(pointer_vector<element_type>(), fixture::read_all_from_leaf(abstract_leaf::shared_lock_ptr(load_leaf(0))));
+  CHECK_EQUAL(pointer_vector<element_type>(), fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
 }
 
 TEST_FIXTURE(fixture, read_back) {
@@ -422,7 +422,7 @@ TEST_FIXTURE(fixture, read_back) {
   };
   write_leaf(0, elems);
 
-  CHECK_EQUAL(elems, fixture::read_all_from_leaf(abstract_leaf::shared_lock_ptr(load_leaf(0))));
+  CHECK_EQUAL(elems, fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
 }
 
 TEST_FIXTURE(fixture, erase) {
@@ -431,10 +431,10 @@ TEST_FIXTURE(fixture, erase) {
   const auto key3 = cycle_ptr::make_cycle<element_type>("key3", "3");
   const auto key4 = cycle_ptr::make_cycle<element_type>("key4", "4");
 
-  abstract_leaf::unique_lock_ptr leaf(
+  leaf::unique_lock_ptr leaf(
       write_leaf(0, pointer_vector<element_type>{ key1, key2, key3, key4 }));
   auto tx = file.begin(false);
-  abstract_leaf::unlink(leaf, key2, tx);
+  leaf::unlink(leaf, key2, tx);
 
   // Unlink operation won't take effect until commited.
   CHECK_EQUAL((pointer_vector<element_type>{ key1, key2, key3, key4 }), fixture::read_all_from_leaf(leaf));
@@ -451,10 +451,10 @@ TEST_FIXTURE(fixture, read_back_erase) {
   const auto key4 = cycle_ptr::make_cycle<element_type>("key4", "4");
 
   {
-    abstract_leaf::unique_lock_ptr leaf(
+    leaf::unique_lock_ptr leaf(
         write_leaf(0, pointer_vector<element_type>{ key1, key2, key3, key4 }));
     auto tx = file.begin(false);
-    abstract_leaf::unlink(leaf, key2, tx);
+    leaf::unlink(leaf, key2, tx);
 
     // Unlink operation won't take effect until commited.
     CHECK_EQUAL((pointer_vector<element_type>{ key1, key2, key3, key4 }), fixture::read_all_from_leaf(leaf));
@@ -463,7 +463,7 @@ TEST_FIXTURE(fixture, read_back_erase) {
 
   CHECK_EQUAL(
       (pointer_vector<element_type>{ key1, key3, key4 }),
-      fixture::read_all_from_leaf(abstract_leaf::shared_lock_ptr(load_leaf(0))));
+      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
 }
 
 TEST_FIXTURE(fixture, merge) {
@@ -472,13 +472,13 @@ TEST_FIXTURE(fixture, merge) {
   const auto key3 = cycle_ptr::make_cycle<element_type>("key3", "3");
   const auto key4 = cycle_ptr::make_cycle<element_type>("key4", "4");
 
-  abstract_leaf::unique_lock_ptr first(
+  leaf::unique_lock_ptr first(
       write_leaf(0, pointer_vector<element_type>{ key1, key2 }));
-  abstract_leaf::unique_lock_ptr second(
+  leaf::unique_lock_ptr second(
       write_leaf(leaf_bytes(), pointer_vector<element_type>{ key3, key4 }));
 
   auto tx = file.begin(false);
-  abstract_leaf::merge(loader, first, second, tx);
+  leaf::merge(loader, first, second, tx);
 
   // No change is seen until transaction commit.
   CHECK_EQUAL(
@@ -500,14 +500,14 @@ TEST_FIXTURE(fixture, merge) {
   // Read-back test.
   CHECK_EQUAL(
       (pointer_vector<element_type>{ key1, key2, key3, key4 }),
-      fixture::read_all_from_leaf(abstract_leaf::shared_lock_ptr(load_leaf(0))));
+      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
   CHECK_EQUAL(
       cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type>(nullptr),
       load_leaf(0)->key());
 
   CHECK_EQUAL(
       pointer_vector<element_type>(),
-      fixture::read_all_from_leaf(abstract_leaf::shared_lock_ptr(load_leaf(leaf_bytes()))));
+      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(leaf_bytes()))));
 }
 
 TEST_FIXTURE(fixture, split) {
@@ -516,13 +516,13 @@ TEST_FIXTURE(fixture, split) {
   const auto key3 = cycle_ptr::make_cycle<element_type>("key3", "3");
   const auto key4 = cycle_ptr::make_cycle<element_type>("key4", "4");
 
-  abstract_leaf::unique_lock_ptr first(
+  leaf::unique_lock_ptr first(
       write_leaf(0, pointer_vector<element_type>{ key1, key2, key3, key4 }));
-  abstract_leaf::unique_lock_ptr second(
+  leaf::unique_lock_ptr second(
       write_empty_leaf(leaf_bytes()));
 
   auto tx = file.begin(false);
-  abstract_leaf::split(loader, first, second, tx);
+  leaf::split(loader, first, second, tx);
 
   // No change is seen until transaction commit.
   CHECK_EQUAL(
@@ -550,13 +550,13 @@ TEST_FIXTURE(fixture, split) {
   // Read-back test.
   CHECK_EQUAL(
       (pointer_vector<element_type>{ key1, key2 }),
-      fixture::read_all_from_leaf(abstract_leaf::shared_lock_ptr(load_leaf(0))));
+      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
   CHECK_EQUAL(
       cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type>(nullptr),
       load_leaf(0)->key());
   CHECK_EQUAL(
       (pointer_vector<element_type>{ key3, key4 }),
-      fixture::read_all_from_leaf(abstract_leaf::shared_lock_ptr(load_leaf(leaf_bytes()))));
+      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(leaf_bytes()))));
   CHECK_EQUAL(
       key_type("key3"),
       key_type::cast(load_leaf(leaf_bytes())->key()));

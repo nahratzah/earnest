@@ -18,13 +18,13 @@ namespace earnest::detail::tree {
 namespace {
 
 
-class abstract_leaf_sentinel final
+class leaf_sentinel final
 : public value_type
 {
   public:
   using value_type::value_type;
 
-  ~abstract_leaf_sentinel() noexcept override = default;
+  ~leaf_sentinel() noexcept override = default;
 
   void lock() override { mtx_.lock(); }
   auto try_lock() -> bool override { return mtx_.try_lock(); }
@@ -58,21 +58,21 @@ class abstract_leaf_sentinel final
 } /* namespace earnest::detail::tree::<unnamed> */
 
 
-void abstract_leaf::header::encode(boost::asio::mutable_buffer buf) const {
+void leaf::header::encode(boost::asio::mutable_buffer buf) const {
   assert(buf.size() >= SIZE);
-  assert(magic == abstract_leaf::magic);
+  assert(magic == leaf::magic);
 
   header tmp = *this;
   tmp.native_to_big_endian();
   boost::asio::buffer_copy(buf, boost::asio::const_buffer(&tmp, sizeof(tmp)));
 }
 
-const std::size_t abstract_leaf::header::OFFSET_PARENT_PTR = offsetof(header, parent_off);
-const std::size_t abstract_leaf::header::OFFSET_NEXT_SIBLING_PTR = offsetof(header, next_sibling_off);
-const std::size_t abstract_leaf::header::OFFSET_PREV_SIBLING_PTR = offsetof(header, prev_sibling_off);
+const std::size_t leaf::header::OFFSET_PARENT_PTR = offsetof(header, parent_off);
+const std::size_t leaf::header::OFFSET_NEXT_SIBLING_PTR = offsetof(header, next_sibling_off);
+const std::size_t leaf::header::OFFSET_PREV_SIBLING_PTR = offsetof(header, prev_sibling_off);
 
 
-void abstract_leaf::init() {
+void leaf::init() {
   abstract_page::init();
 
 #ifndef NDEBUG
@@ -84,15 +84,15 @@ void abstract_leaf::init() {
   sentinel_->pred_ = sentinel_->succ_ = sentinel_;
 }
 
-abstract_leaf::abstract_leaf(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc)
+leaf::leaf(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc)
 : abstract_page(std::move(tree), std::move(alloc)),
-  sentinel_(*this, cycle_ptr::allocate_cycle<abstract_leaf_sentinel>(this->alloc, cfg->items_per_leaf_page, this->alloc)),
+  sentinel_(*this, cycle_ptr::allocate_cycle<leaf_sentinel>(this->alloc, cfg->items_per_leaf_page, this->alloc)),
   key_(*this)
 {}
 
-abstract_leaf::~abstract_leaf() noexcept = default;
+leaf::~leaf() noexcept = default;
 
-void abstract_leaf::merge(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) {
+void leaf::merge(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) {
   using moved_vector_t = std::vector<value_type::unique_lock_ptr, shared_resource_allocator<value_type::unique_lock_ptr>>;
 
   assert(front.owns_lock() && back.owns_lock());
@@ -109,7 +109,7 @@ void abstract_leaf::merge(const loader& loader, const unique_lock_ptr& front, co
   unique_lock_ptr back_successor;
   if (back->successor_off_ != 0) {
     back_successor = unique_lock_ptr(
-        boost::polymorphic_pointer_downcast<abstract_leaf>(
+        boost::polymorphic_pointer_downcast<leaf>(
             load_from_disk(back->successor_off_, loader)));
   }
 
@@ -241,7 +241,7 @@ void abstract_leaf::merge(const loader& loader, const unique_lock_ptr& front, co
   }
 }
 
-void abstract_leaf::split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) {
+void leaf::split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) {
   assert(front.owns_lock() && back.owns_lock());
   assert(front.mutex() != back.mutex());
   assert(front->cfg == back->cfg);
@@ -263,7 +263,7 @@ void abstract_leaf::split(const loader& loader, const unique_lock_ptr& front, co
   unique_lock_ptr back_successor;
   if (back->successor_off_ != 0) {
     back_successor = unique_lock_ptr(
-        boost::polymorphic_pointer_downcast<abstract_leaf>(
+        boost::polymorphic_pointer_downcast<leaf>(
             load_from_disk(back->successor_off_, loader)));
   }
 
@@ -384,7 +384,7 @@ void abstract_leaf::split(const loader& loader, const unique_lock_ptr& front, co
   }
 }
 
-void abstract_leaf::unlink(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem, txfile::transaction& tx) {
+void leaf::unlink(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem, txfile::transaction& tx) {
   assert(self.owns_lock());
   assert(value_type::shared_lock_ptr(elem)->parent_ == self.mutex());
   assert(elem != self->sentinel_);
@@ -425,7 +425,7 @@ void abstract_leaf::unlink(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<va
       });
 }
 
-void abstract_leaf::link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem, cycle_ptr::cycle_gptr<value_type> pos, txfile::transaction& tx) {
+void leaf::link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem, cycle_ptr::cycle_gptr<value_type> pos, txfile::transaction& tx) {
   using lock_vector = std::vector<value_type::unique_lock_ptr, shared_resource_allocator<value_type::unique_lock_ptr>>;
 
   assert(self.owns_lock());
@@ -605,7 +605,7 @@ void abstract_leaf::link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<valu
       });
 }
 
-auto abstract_leaf::get_elements(const shared_lock_ptr& self) -> std::vector<cycle_ptr::cycle_gptr<value_type>> {
+auto leaf::get_elements(const shared_lock_ptr& self) -> std::vector<cycle_ptr::cycle_gptr<value_type>> {
   assert(self.owns_lock());
 
   std::vector<cycle_ptr::cycle_gptr<value_type>> r;
@@ -618,7 +618,7 @@ auto abstract_leaf::get_elements(const shared_lock_ptr& self) -> std::vector<cyc
   return r;
 }
 
-auto abstract_leaf::get_elements(const unique_lock_ptr& self) -> std::vector<cycle_ptr::cycle_gptr<value_type>> {
+auto leaf::get_elements(const unique_lock_ptr& self) -> std::vector<cycle_ptr::cycle_gptr<value_type>> {
   assert(self.owns_lock());
 
   std::vector<cycle_ptr::cycle_gptr<value_type>> r;
@@ -631,7 +631,7 @@ auto abstract_leaf::get_elements(const unique_lock_ptr& self) -> std::vector<cyc
   return r;
 }
 
-auto abstract_leaf::lock_elem_with_siblings_(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem) -> std::tuple<value_type::unique_lock_ptr, value_type::unique_lock_ptr, value_type::unique_lock_ptr> {
+auto leaf::lock_elem_with_siblings_(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem) -> std::tuple<value_type::unique_lock_ptr, value_type::unique_lock_ptr, value_type::unique_lock_ptr> {
   assert(self.owns_lock());
   assert(value_type::shared_lock_ptr(elem)->parent_ == self.mutex());
 
@@ -655,7 +655,7 @@ auto abstract_leaf::lock_elem_with_siblings_(const unique_lock_ptr& self, cycle_
   return r;
 }
 
-void abstract_leaf::decode_(const txfile::transaction& tx, offset_type off, boost::system::error_code& ec) {
+void leaf::decode_(const txfile::transaction& tx, offset_type off, boost::system::error_code& ec) {
   auto stream = buffered_read_stream_at<const txfile::transaction, shared_resource_allocator<void>>(tx, off, bytes_per_page_(), tx.get_allocator());
 
   header h;

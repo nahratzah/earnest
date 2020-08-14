@@ -39,23 +39,23 @@ inline earnest_local_ auto value_type::parent_page_for_x_(VPtr& vptr) -> std::tu
 }
 
 auto value_type::parent_page_for_read(shared_lock_ptr& vptr)
--> std::tuple<abstract_leaf::shared_lock_ptr, bool> {
-  return parent_page_for_x_<abstract_leaf::shared_lock_ptr>(vptr);
+-> std::tuple<leaf::shared_lock_ptr, bool> {
+  return parent_page_for_x_<leaf::shared_lock_ptr>(vptr);
 }
 
 auto value_type::parent_page_for_read(unique_lock_ptr& vptr)
--> std::tuple<abstract_leaf::shared_lock_ptr, bool> {
-  return parent_page_for_x_<abstract_leaf::shared_lock_ptr>(vptr);
+-> std::tuple<leaf::shared_lock_ptr, bool> {
+  return parent_page_for_x_<leaf::shared_lock_ptr>(vptr);
 }
 
 auto value_type::parent_page_for_write(shared_lock_ptr& vptr)
--> std::tuple<abstract_leaf::unique_lock_ptr, bool> {
-  return parent_page_for_x_<abstract_leaf::unique_lock_ptr>(vptr);
+-> std::tuple<leaf::unique_lock_ptr, bool> {
+  return parent_page_for_x_<leaf::unique_lock_ptr>(vptr);
 }
 
 auto value_type::parent_page_for_write(unique_lock_ptr& vptr)
--> std::tuple<abstract_leaf::unique_lock_ptr, bool> {
-  return parent_page_for_x_<abstract_leaf::unique_lock_ptr>(vptr);
+-> std::tuple<leaf::unique_lock_ptr, bool> {
+  return parent_page_for_x_<leaf::unique_lock_ptr>(vptr);
 }
 
 
