@@ -43,7 +43,7 @@ class earnest_export_ leaf final
 
   public:
   explicit leaf(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc = allocator_type());
-  virtual ~leaf() noexcept;
+  ~leaf() noexcept override;
 
   /**
    * \brief Merge two pages together.
