@@ -24,6 +24,15 @@ if (UNIX AND
 endif()
 
 add_library (earnest
+  src/detail/tree/cfg.cc
+  src/detail/tree/page.cc
+  src/detail/tree/leaf.cc
+  src/detail/tree/tree.cc
+  src/detail/tree/key_type.cc
+  src/detail/tree/value_type.cc
+  src/detail/tree/tx_aware_value_type.cc
+  src/detail/tree/loader.cc
+  src/detail/tree/leaf_iterator.cc
   src/db.cc
   src/db_errc.cc
   src/fd.cc
@@ -67,8 +76,18 @@ set_target_properties (earnest PROPERTIES CXX_EXTENSIONS OFF)
 
 find_package (Threads REQUIRED)
 if(CMAKE_USE_PTHREADS_INIT)
-  target_link_libraries(monsoon_cache INTERFACE ${CMAKE_THREAD_LIBS_INIT})
+  target_link_libraries(earnest PUBLIC ${CMAKE_THREAD_LIBS_INIT})
 endif()
+
+if (NOT WIN32)
+  CHECK_FUNCTION_EXISTS (mkstemp HAS_MKSTEMP)
+  mark_as_advanced (HAS_MKSTEMP)
+  if (HAS_MKSTEMP)
+    target_compile_definitions(earnest PRIVATE HAS_MKSTEMP)
+  else ()
+    message (WARNING "no mkstemp() function found")
+  endif ()
+endif ()
 
 install (TARGETS earnest DESTINATION lib)
 install (FILES
@@ -114,6 +133,19 @@ install (FILES
   include/earnest/detail/wal.h
   include/earnest/detail/wal-inl.h
   DESTINATION include/earnest/detail)
+install (FILES
+  include/earnest/detail/tree/fwd.h
+  include/earnest/detail/tree/loader.h
+  include/earnest/detail/tree/cfg.h
+  include/earnest/detail/tree/page.h
+  include/earnest/detail/tree/leaf.h
+  include/earnest/detail/tree/leaf-inl.h
+  include/earnest/detail/tree/key_type.h
+  include/earnest/detail/tree/value_type.h
+  include/earnest/detail/tree/tx_aware_value_type.h
+  include/earnest/detail/tree/leaf_iterator.h
+  include/earnest/detail/tree/leaf_iterator-inl.h
+  DESTINATION include/earnest/detail/tree)
 
 add_subdirectory (tests)
 
