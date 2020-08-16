@@ -118,6 +118,7 @@ restart:
     return {};
   };
 
+restart_search:
   // Seek backwards in this page.
   value_type::shared_lock_ptr cur_lck;
   {
@@ -151,9 +152,33 @@ restart:
     }
 
     // Load the previous page.
-    parent_page = leaf::shared_lock_ptr(
-        boost::polymorphic_pointer_downcast<leaf>(
-            abstract_page::load_from_disk(parent_page->predecessor_off_, *loader_)));
+    // This is slightly involved because we're going against the lock ordering.
+    {
+      leaf::shared_lock_ptr pred_page;
+      do {
+        pred_page = leaf::shared_lock_ptr(
+            boost::polymorphic_pointer_downcast<leaf>(
+                abstract_page::load_from_disk(parent_page->predecessor_off_, *loader_)),
+            std::try_to_lock);
+        if (!pred_page.owns_lock()) {
+          parent_page.unlock();
+          pred_page.lock();
+          parent_page.lock();
+
+          // During unlock, parent page may have been decomissioned.
+          // If that happens, we'll have to restart from scratch.
+          if (!leaf::valid(parent_page))
+            goto restart_search;
+          // During unlock, the predecessor that was once a valid predecessor,
+          // may not be valid anymore.
+          // If that happens, reject the predecessor that we have
+          // (causing the loop will retry).
+          if (!leaf::valid(pred_page) || pred_page->successor_off_ != parent_page->offset)
+            pred_page.unlock();
+        }
+      } while (!pred_page.owns_lock());
+      parent_page = std::move(pred_page);
+    }
 
     // Seek in the next page.
     cur_lck = seek_backwards_in_locked_page(parent_page->sentinel_);
