@@ -68,7 +68,8 @@ class tree
 
 
 class abstract_tree::abstract_tx_object
-: public db::transaction_obj
+: public db::transaction_obj,
+  public cycle_ptr::cycle_base
 {
   private:
   template<typename T>

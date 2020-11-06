@@ -113,9 +113,7 @@ class earnest_export_ db
  * \details
  * Interface for specific types that participate in a transaction.
  */
-class earnest_export_ db::transaction_obj
-: public cycle_ptr::cycle_base
-{
+class earnest_export_ db::transaction_obj {
   friend transaction;
 
   public:

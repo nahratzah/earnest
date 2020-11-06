@@ -10,7 +10,7 @@ using index_type = std::size_t;
 struct ops;
 struct cfg;
 class loader;
-class abstract_tree;
+class basic_tree;
 class abstract_page;
 class leaf;
 class branch;

@@ -3,7 +3,10 @@
 namespace earnest::detail::tree {
 
 
-abstract_tree::~abstract_tree() noexcept = default;
+basic_tree::~basic_tree() noexcept = default;
+
+
+basic_tree::tx_object::~tx_object() noexcept = default;
 
 
 } /* namespace earnest::detail::tree */
