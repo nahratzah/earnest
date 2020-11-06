@@ -6,6 +6,7 @@
 #include <earnest/detail/tree/loader.h>
 #include <earnest/detail/tree/key_type.h>
 #include <earnest/detail/tree/augmented_page_ref.h>
+#include <earnest/detail/tree/tree.h>
 #include <boost/asio/buffer.hpp>
 #include <boost/asio/write_at.hpp>
 #include <boost/polymorphic_pointer_cast.hpp>
@@ -16,22 +17,20 @@ namespace earnest::detail::tree {
 
 template<typename Child>
 auto ops::split_child_page_(
-    const loader& loader,
+    const cycle_ptr::cycle_gptr<basic_tree>& f,
     const unique_lock_ptr<cycle_ptr::cycle_gptr<branch>>& self,
-    const unique_lock_ptr<cycle_ptr::cycle_gptr<Child>>& child,
-    txfile& f,
-    db_cache& dbc)
+    const unique_lock_ptr<cycle_ptr::cycle_gptr<Child>>& child)
 -> unique_lock_ptr<cycle_ptr::cycle_gptr<Child>> {
   assert(branch::size(self) < self->max_size());
   assert(branch::size(self) > 0);
   assert(self->cfg == child->cfg);
 
   unique_lock_ptr<cycle_ptr::cycle_gptr<Child>> sibling; // Return value.
-  auto tx = f.begin(false);
-  [[maybe_unused]] auto dbc_val = dbc.get(
-      loader.allocate_disk_space(tx, child->bytes_per_page_()),
-      nullptr,
-      [&sibling, &tx, &self, &child, &loader](db_cache::allocator_type alloc, txfile::transaction::offset_type sibling_offset) -> cycle_ptr::cycle_gptr<Child> {
+  auto tx = f->txfile_begin(false);
+  [[maybe_unused]] auto dbc_val = f->obj_cache()->get(
+      f->loader->allocate_disk_space(tx, child->bytes_per_page_()),
+      f,
+      [&sibling, &tx, &self, &child, loader=f->loader.get()](db_cache::allocator_type alloc, txfile::transaction::offset_type sibling_offset) -> cycle_ptr::cycle_gptr<Child> {
         // Remember constants.
         const auto bytes_per_augmented_page_ref = self->bytes_per_augmented_page_ref_();
         const auto bytes_per_key = self->bytes_per_key_();
@@ -43,15 +42,15 @@ auto ops::split_child_page_(
         self->pages_.reserve(self->pages_.size() + 1u);
 
         sibling = unique_lock_ptr<cycle_ptr::cycle_gptr<Child>>(abstract_page::allocate_page<Child>(child->cfg, alloc));
-        sibling->offset = loader.allocate_disk_space(tx, sibling_offset);
+        sibling->offset = loader->allocate_disk_space(tx, sibling_offset);
 
-        cycle_ptr::cycle_gptr<const key_type> key = Child::split(loader, child, sibling, tx);
+        cycle_ptr::cycle_gptr<const key_type> key = Child::split(*loader, child, sibling, tx);
 
         // Compute augmentation for sibling.
-        cycle_ptr::cycle_gptr<augmented_page_ref> sibling_pgref = loader.allocate_augmented_page_ref(*sibling, sibling->get_allocator());
+        cycle_ptr::cycle_gptr<augmented_page_ref> sibling_pgref = loader->allocate_augmented_page_ref(*sibling, sibling->get_allocator());
         sibling_pgref->offset_ = sibling->offset;
         // Compute updated augmentation for child page.
-        cycle_ptr::cycle_gptr<augmented_page_ref> child_pgref = loader.allocate_augmented_page_ref(*sibling, sibling->get_allocator());
+        cycle_ptr::cycle_gptr<augmented_page_ref> child_pgref = loader->allocate_augmented_page_ref(*sibling, sibling->get_allocator());
         child_pgref->offset_ = child->offset;
 
         // Write updated size.

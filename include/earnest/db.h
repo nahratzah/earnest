@@ -259,11 +259,13 @@ class earnest_export_ db::db_obj {
   virtual ~db_obj() noexcept = 0;
 
   ///\brief The object cache of the database.
-  const cycle_ptr::cycle_gptr<detail::db_cache> obj_cache;
+  auto obj_cache() const -> cycle_ptr::cycle_gptr<detail::db_cache>;
   ///\brief Acquire the database pointer.
   auto db() const -> std::shared_ptr<class db>;
-  ///\brief Begin a txfile transaction.
+  ///\brief Begin a read-only txfile transaction.
   auto txfile_begin() const -> txfile::transaction;
+  ///\brief Begin a txfile transaction.
+  auto txfile_begin(bool read_only) const -> txfile::transaction;
 
   private:
   std::weak_ptr<class db> db_;

@@ -103,8 +103,7 @@ inline auto db::transaction::get_allocator() const -> allocator_type {
 
 
 inline db::db_obj::db_obj(std::shared_ptr<class db> db)
-: obj_cache(db->obj_cache_),
-  db_(db)
+: db_(db)
 {}
 
 
