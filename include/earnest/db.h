@@ -194,7 +194,7 @@ class earnest_export_ db::transaction {
   private:
   ///\brief Lock all transaction_obj layouts.
   ///\details Allows us to rely on tx_aware_data offsets to be stable.
-  auto lock_all_layouts_() const -> std::unordered_map<cycle_ptr::cycle_gptr<const detail::layout_obj>, std::shared_lock<std::shared_mutex>>;
+  auto lock_all_layouts_() const -> std::unordered_map<cycle_ptr::cycle_gptr<const detail::layout_obj>, detail::layout_lock>;
   ///\brief Execute phase 1 commit on all transaction_obj.
   ///\details This is the phase where writes to disk are prepared.
   void commit_phase1_(detail::commit_manager::write_id& tx);

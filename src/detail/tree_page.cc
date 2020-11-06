@@ -1078,9 +1078,11 @@ auto tree_page_leaf::offset_for_(const abstract_tree_elem& elem) const noexcept 
   return offset_for_idx_(elem.index());
 }
 
+#if 0
 auto tree_page_leaf::mtx_() const noexcept -> std::shared_mutex& {
   return layout_mtx;
 }
+#endif
 
 auto tree_page_leaf::get_layout_domain() const noexcept -> const layout_domain& {
   class layout_domain_impl final

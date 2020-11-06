@@ -5,6 +5,7 @@
 #include <earnest/detail/export_.h>
 #include <earnest/detail/db_cache.h>
 #include <boost/asio/buffer.hpp>
+#include <optional>
 
 namespace earnest::detail::tree {
 
@@ -22,6 +23,13 @@ class earnest_export_ key_type {
   virtual void decode(boost::asio::const_buffer buf) = 0;
 
   auto get_allocator() const -> allocator_type { return alloc_; }
+
+  /**
+   * \brief Polymorphic before test.
+   * \returns An optional containing true/false, which is the result of less-than comparison.
+   * Or an empty optional if the key types are a mismatch.
+   */
+  virtual auto before(const key_type& y) const -> std::optional<bool> = 0;
 
   private:
   ///\brief Allocator.

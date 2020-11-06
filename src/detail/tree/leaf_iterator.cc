@@ -55,7 +55,7 @@ auto leaf_iterator::operator++() -> leaf_iterator& {
   for (;;) {
     // If there are no more pages, install the sentinel.
     if (parent_page->successor_off_ == 0) {
-      value_ptr_ = parent_page->sentinel_;
+      value_ptr_ = parent_page->tail_sentinel_; // Last tail of the tree is always preserved.
       return *this;
     }
 
@@ -65,7 +65,7 @@ auto leaf_iterator::operator++() -> leaf_iterator& {
             abstract_page::load_from_disk(parent_page->successor_off_, *loader_)));
 
     // Seek in the next page.
-    cur_lck = value_type::shared_lock_ptr(parent_page->sentinel_);
+    cur_lck = value_type::shared_lock_ptr(parent_page->head_sentinel_);
     value_type::shared_lock_ptr succ = seek_forward(cur_lck);
     cur_lck.unlock();
     if (succ) {
@@ -147,7 +147,7 @@ restart_search:
   for (;;) {
     // If there are no more pages, install the sentinel.
     if (parent_page->predecessor_off_ == 0) {
-      value_ptr_ = parent_page->sentinel_;
+      value_ptr_ = parent_page->head_sentinel_; // First head of the tree is always preserved.
       return *this;
     }
 
@@ -181,7 +181,7 @@ restart_search:
     }
 
     // Seek in the next page.
-    cur_lck = seek_backwards_in_locked_page(parent_page->sentinel_);
+    cur_lck = seek_backwards_in_locked_page(parent_page->tail_sentinel_);
     if (cur_lck) {
       value_ptr_ = cur_lck.mutex();
       return *this;

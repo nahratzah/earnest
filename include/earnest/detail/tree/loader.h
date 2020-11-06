@@ -18,16 +18,31 @@ class earnest_export_ loader {
 
   virtual ~loader() noexcept;
 
+  virtual auto allocate_elem(db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<value_type> = 0;
+  virtual auto allocate_key(db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<key_type> = 0;
+  virtual auto allocate_key(const value_type& value, db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<key_type> = 0;
+  virtual auto allocate_augmented_page_ref(db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<augmented_page_ref> = 0;
+  virtual auto allocate_augmented_page_ref(const leaf& leaf, db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<augmented_page_ref> = 0;
+  virtual auto allocate_augmented_page_ref(const branch& branch, db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<augmented_page_ref> = 0;
+
   template<typename T>
-  auto load_from_disk(offset_type off, cheap_fn_ref<cycle_ptr::cycle_gptr<db_cache::cache_obj>(db_cache::allocator_type, cycle_ptr::cycle_gptr<abstract_tree>, const txfile::transaction&, offset_type)> load) const
+  auto load_from_disk(offset_type off, cheap_fn_ref<cycle_ptr::cycle_gptr<db_cache::cache_obj>(db_cache::allocator_type, std::shared_ptr<const cfg>, const txfile::transaction&, offset_type)> load) const
   -> std::enable_if_t<std::is_base_of_v<db_cache::cache_obj, std::remove_const_t<T>>, cycle_ptr::cycle_gptr<T>>;
 
+  /**
+   * \brief Allocate space in a txfile.
+   * \param[in,out] tx Transaction in which the allocation happens.
+   * \param bytes Number of bytes to allocate.
+   * \return Offset of allocated space.
+   */
+  virtual auto allocate_disk_space(txfile::transaction& tx, std::size_t bytes) const -> offset_type = 0;
+
   private:
-  virtual auto do_load_from_disk(offset_type off, cheap_fn_ref<cycle_ptr::cycle_gptr<db_cache::cache_obj>(db_cache::allocator_type, cycle_ptr::cycle_gptr<abstract_tree>, const txfile::transaction&, offset_type)> load) const -> cycle_ptr::cycle_gptr<db_cache::cache_obj> = 0;
+  virtual auto do_load_from_disk(offset_type off, cheap_fn_ref<cycle_ptr::cycle_gptr<db_cache::cache_obj>(db_cache::allocator_type, std::shared_ptr<const cfg>, const txfile::transaction&, offset_type)> load) const -> cycle_ptr::cycle_gptr<db_cache::cache_obj> = 0;
 };
 
 template<typename T>
-auto loader::load_from_disk(offset_type off, cheap_fn_ref<cycle_ptr::cycle_gptr<db_cache::cache_obj>(db_cache::allocator_type, cycle_ptr::cycle_gptr<abstract_tree>, const txfile::transaction&, offset_type)> load) const
+auto loader::load_from_disk(offset_type off, cheap_fn_ref<cycle_ptr::cycle_gptr<db_cache::cache_obj>(db_cache::allocator_type, std::shared_ptr<const cfg>, const txfile::transaction&, offset_type)> load) const
 -> std::enable_if_t<std::is_base_of_v<db_cache::cache_obj, std::remove_const_t<T>>, cycle_ptr::cycle_gptr<T>> {
   return boost::polymorphic_pointer_downcast<T>(do_load_from_disk(off, std::move(load)));
 }

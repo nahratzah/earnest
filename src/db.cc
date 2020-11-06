@@ -235,7 +235,7 @@ void db::transaction::rollback() noexcept {
   active_ = false;
 }
 
-auto db::transaction::lock_all_layouts_() const -> std::unordered_map<cycle_ptr::cycle_gptr<const detail::layout_obj>, std::shared_lock<std::shared_mutex>> {
+auto db::transaction::lock_all_layouts_() const -> std::unordered_map<cycle_ptr::cycle_gptr<const detail::layout_obj>, detail::layout_lock> {
   using layout_map_element = std::pair<const detail::layout_domain*, cycle_ptr::cycle_gptr<const detail::layout_obj>>;
   struct layout_map_compare {
     auto operator()(const layout_map_element& x, const layout_map_element& y) const -> bool {
@@ -244,7 +244,7 @@ auto db::transaction::lock_all_layouts_() const -> std::unordered_map<cycle_ptr:
     }
   };
   using layout_map = std::set<layout_map_element, layout_map_compare>;
-  using layout_locks_map = std::unordered_map<cycle_ptr::cycle_gptr<const detail::layout_obj>, std::shared_lock<std::shared_mutex>>;
+  using layout_locks_map = std::unordered_map<cycle_ptr::cycle_gptr<const detail::layout_obj>, detail::layout_lock>;
 
   // Gather all the layouts.
   layout_map layouts = objpipe::of(&deleted_set_, &created_set_, &require_set_)
@@ -273,7 +273,7 @@ auto db::transaction::lock_all_layouts_() const -> std::unordered_map<cycle_ptr:
             layout_locks_map(),
             [](auto&& map, const cycle_ptr::cycle_gptr<const detail::layout_obj>& lobj) -> decltype(map) {
               assert(map.count(lobj) == 0);
-              map.emplace(lobj, std::shared_lock<std::shared_mutex>(lobj->layout_mtx));
+              map.emplace(lobj, detail::layout_lock(*lobj));
               return std::forward<decltype(map)>(map);
             });
 
@@ -293,7 +293,7 @@ auto db::transaction::lock_all_layouts_() const -> std::unordered_map<cycle_ptr:
                 // Update the layouts.
                 layouts.emplace(&lobj->get_layout_domain(), std::forward<decltype(lobj)>(lobj));
                 // Try to lock the layout. (We use try-lock because we are not respecting lock ordering.)
-                std::shared_lock<std::shared_mutex> lck{ lobj->layout_mtx, std::try_to_lock };
+                detail::layout_lock lck{ *lobj, std::try_to_lock };
                 if (lck.owns_lock())
                   layout_locks.emplace(lobj, std::move(lck));
                 else // If the lock attempt failed, we'll need to restart the locking process.

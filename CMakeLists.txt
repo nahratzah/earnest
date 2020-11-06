@@ -27,12 +27,16 @@ add_library (earnest
   src/detail/tree/cfg.cc
   src/detail/tree/page.cc
   src/detail/tree/leaf.cc
+  src/detail/tree/branch.cc
   src/detail/tree/tree.cc
   src/detail/tree/key_type.cc
   src/detail/tree/value_type.cc
   src/detail/tree/tx_aware_value_type.cc
   src/detail/tree/loader.cc
   src/detail/tree/leaf_iterator.cc
+  src/detail/tree/augmented_page_ref.cc
+  src/detail/tree/ops.cc
+  src/detail/tree/loader_impl.cc
   src/db.cc
   src/db_errc.cc
   src/fd.cc
@@ -73,6 +77,12 @@ target_link_libraries (earnest PRIVATE
 set_property (TARGET earnest PROPERTY VERSION ${EARNEST_VERSION})
 target_compile_features (earnest PUBLIC cxx_std_17)
 set_target_properties (earnest PROPERTIES CXX_EXTENSIONS OFF)
+
+find_path(AsioIncludes asio.hpp)
+if(NOT AsioIncludes)
+  message(FATAL_ERROR "Can't find folder containing asio.hpp")
+endif()
+target_include_directories(earnest PUBLIC ${AsioIncludes})
 
 find_package (Threads REQUIRED)
 if(CMAKE_USE_PTHREADS_INIT)
@@ -140,11 +150,18 @@ install (FILES
   include/earnest/detail/tree/page.h
   include/earnest/detail/tree/leaf.h
   include/earnest/detail/tree/leaf-inl.h
+  include/earnest/detail/tree/branch.h
+  include/earnest/detail/tree/branch-inl.h
   include/earnest/detail/tree/key_type.h
   include/earnest/detail/tree/value_type.h
   include/earnest/detail/tree/tx_aware_value_type.h
   include/earnest/detail/tree/leaf_iterator.h
   include/earnest/detail/tree/leaf_iterator-inl.h
+  include/earnest/detail/tree/augmented_page_ref.h
+  include/earnest/detail/tree/ops.h
+  include/earnest/detail/tree/ops-inl.h
+  include/earnest/detail/tree/loader_impl.h
+  include/earnest/detail/tree/loader_impl-inl.h
   DESTINATION include/earnest/detail/tree)
 
 add_subdirectory (tests)

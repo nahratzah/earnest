@@ -424,6 +424,11 @@ class earnest_export_ tree_page_leaf final
   friend abstract_tx_aware_tree_elem;
   friend class txfile_allocator;
 
+  private:
+  void lock_layout() const override;
+  bool try_lock_layout() const override;
+  void unlock_layout() const override;
+
   public:
   static constexpr std::uint32_t magic = 0x2901'c28fU;
 

@@ -20,11 +20,14 @@ class earnest_export_ abstract_page
 : protected virtual cycle_ptr::cycle_base,
   public db_cache::cache_obj
 {
+  friend branch;
+  friend ops;
+
   public:
   using offset_type = std::uint64_t;
   using allocator_type = db_cache::allocator_type;
 
-  explicit abstract_page(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc = allocator_type());
+  explicit abstract_page(std::shared_ptr<const struct cfg> tree_config, allocator_type alloc = allocator_type());
   virtual ~abstract_page() noexcept = 0;
 
   auto get_allocator() const -> allocator_type { return alloc; }
@@ -37,7 +40,7 @@ class earnest_export_ abstract_page
   void unlock_shared() const { mtx_.unlock_shared(); }
 
   template<typename Page>
-  static auto allocate_page(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc = allocator_type())
+  static auto allocate_page(std::shared_ptr<const cfg> tree_config, allocator_type alloc = allocator_type())
   -> std::enable_if_t<std::is_base_of_v<abstract_page, Page>, cycle_ptr::cycle_gptr<Page>>;
 
   /**
@@ -47,7 +50,7 @@ class earnest_export_ abstract_page
    * \param off Offset of the page.
    * \param alloc Allocator to use for the page.
    */
-  static auto decode(cycle_ptr::cycle_gptr<abstract_tree> tree, const txfile::transaction& tx, offset_type off, allocator_type alloc, boost::system::error_code& ec)
+  static auto decode(const loader& loader, std::shared_ptr<const struct cfg> tree_config, const txfile::transaction& tx, offset_type off, allocator_type alloc, boost::system::error_code& ec)
   -> cycle_ptr::cycle_gptr<abstract_page>;
   /**
    * \brief Load a page from disk.
@@ -65,13 +68,14 @@ class earnest_export_ abstract_page
    * \param[in] tx Read-transaction in which the tree is located.
    * \param off Offset of the page.
    */
-  virtual void decode_(const txfile::transaction& tx, offset_type off, boost::system::error_code& ec) = 0;
+  virtual void decode_(const loader& loader, const txfile::transaction& tx, offset_type off, boost::system::error_code& ec) = 0;
 
   mutable std::shared_mutex mtx_;
 
   protected:
   offset_type offset = 0, parent = 0;
   allocator_type alloc;
+  bool valid_ = true;
 
   public:
   const std::shared_ptr<const cfg> cfg;

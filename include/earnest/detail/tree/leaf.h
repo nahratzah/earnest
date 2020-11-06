@@ -15,6 +15,7 @@
 
 #include <earnest/detail/export_.h>
 #include <earnest/detail/locked_ptr.h>
+#include <earnest/detail/layout_domain.h>
 
 #include <earnest/detail/tree/fwd.h>
 #include <earnest/detail/tree/page.h>
@@ -23,10 +24,13 @@ namespace earnest::detail::tree {
 
 
 class earnest_export_ leaf final
-: public abstract_page
+: public abstract_page,
+  public layout_obj
 {
   friend tx_aware_value_type;
   friend leaf_iterator;
+  friend ops;
+  template<typename KeyType, typename ValueType, typename... Augments> friend class tx_aware_loader;
 
   public:
   using shared_lock_ptr = earnest::detail::shared_lock_ptr<cycle_ptr::cycle_gptr<const leaf>>;
@@ -42,7 +46,7 @@ class earnest_export_ leaf final
   void init() override;
 
   public:
-  explicit leaf(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc = allocator_type());
+  explicit leaf(std::shared_ptr<const struct cfg> tree_config, allocator_type alloc = allocator_type());
   ~leaf() noexcept override;
 
   /**
@@ -60,8 +64,10 @@ class earnest_export_ leaf final
    * \param[in,out] front The page being split.
    * \param[out] back Empty destination page.
    * \param[out] tx Transaction.
+   * \return The key of the back page.
    */
-  static void split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx);
+  static auto split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx)
+  -> cycle_ptr::cycle_gptr<const key_type>;
 
   /**
    * \brief Remove element from this page.
@@ -82,6 +88,9 @@ class earnest_export_ leaf final
    */
   static void link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem, cycle_ptr::cycle_gptr<value_type> pos, txfile::transaction& tx);
 
+  static auto valid(const shared_lock_ptr& page) -> bool { return page->valid_; }
+  static auto valid(const unique_lock_ptr& page) -> bool { return page->valid_; }
+
   ///\brief Retrieve the size of this page.
   static auto size(const shared_lock_ptr& self) -> size_type { return self->size_; }
   ///\brief Retrieve the size of this page.
@@ -89,14 +98,17 @@ class earnest_export_ leaf final
   ///\brief Retrieve the max size of this page.
   auto max_size() const -> size_type;
 
-  ///\brief Accessor to get all elements.
-  static auto get_elements(const shared_lock_ptr& self) -> std::vector<cycle_ptr::cycle_gptr<value_type>>;
-  ///\brief Accessor to get all elements.
-  static auto get_elements(const unique_lock_ptr& self) -> std::vector<cycle_ptr::cycle_gptr<value_type>>;
   ///\brief Get the key of this page.
   ///\details Key may be nil.
   ///\note No lock required: key is only modified during decoding phase.
   auto key() const -> cycle_ptr::cycle_gptr<const key_type>;
+
+  static auto before_begin(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator;
+  static auto before_begin(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator;
+  static auto begin(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator;
+  static auto begin(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator;
+  static auto end(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator;
+  static auto end(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator;
 
   private:
   earnest_local_ static auto lock_elem_with_siblings_(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem)
@@ -104,6 +116,8 @@ class earnest_export_ leaf final
       earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<value_type>>,
       earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<value_type>>,
       earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<value_type>>>;
+  ///\brief Size in bytes of the key type.
+  auto bytes_per_key_() const noexcept -> std::size_t;
   ///\brief Size in bytes of the value type.
   auto bytes_per_val_() const noexcept -> std::size_t;
   ///\brief Size in bytes of the page.
@@ -111,9 +125,14 @@ class earnest_export_ leaf final
   ///\brief Compute offset from slot index.
   auto offset_for_idx_(index_type idx) const noexcept -> offset_type;
 
-  void decode_(const txfile::transaction& tx, offset_type off, boost::system::error_code& ec) override;
+  void decode_(const loader& loader, const txfile::transaction& tx, offset_type off, boost::system::error_code& ec) override;
 
-  const cycle_ptr::cycle_member_ptr<value_type> sentinel_;
+  auto get_layout_domain() const noexcept -> const layout_domain& override;
+  void lock_layout() const override final;
+  bool try_lock_layout() const override final;
+  void unlock_layout() const override final;
+
+  cycle_ptr::cycle_member_ptr<value_type> head_sentinel_, tail_sentinel_;
   cycle_ptr::cycle_member_ptr<const key_type> key_;
   size_type size_ = 0;
   offset_type predecessor_off_ = 0, successor_off_ = 0;

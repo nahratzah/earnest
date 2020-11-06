@@ -2,8 +2,10 @@
 #define _PRINT_H
 
 #include <boost/io/ios_state.hpp>
-#include <ostream>
 #include <iomanip>
+#include <ostream>
+#include <string>
+#include <vector>
 
 namespace std {
 
@@ -16,6 +18,22 @@ auto operator<<(std::ostream& o, const std::vector<std::uint8_t, Alloc>& v) -> s
   o << "[";
   for (const auto value : v) o << " " << std::setw(2) << std::uint32_t(value);
   if (!v.empty()) o << " ";
+  o << "]";
+
+  return o;
+}
+
+// HACK: print string vector.
+auto operator<<(std::ostream& o, const std::vector<std::string>& v) -> std::ostream& {
+  auto ifs = boost::io::ios_flags_saver(o);
+
+  o << "[";
+  bool first = true;
+  for (const auto& value : v) {
+    o << (first ? " " : ", ") << value;
+    first = false;
+  }
+  if (!first) o << " ";
   o << "]";
 
   return o;

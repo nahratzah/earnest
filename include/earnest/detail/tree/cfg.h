@@ -14,17 +14,20 @@ namespace earnest::detail::tree {
 struct cfg {
   static constexpr std::size_t SIZE = 20u;
 
-  std::uint32_t items_per_leaf_page, items_per_node_page;
-  std::uint32_t key_bytes, val_bytes, augment_bytes;
+  ///\brief Number of items per leaf page.
+  std::uint32_t items_per_leaf_page;
+  ///\brief Number of items per branch page.
+  std::uint32_t items_per_node_page;
+  ///\brief Size of the key type.
+  std::uint32_t key_bytes;
+  ///\brief Size of the value type.
+  ///\note A value_type for a map, is both the key, and the mapped type.
+  std::uint32_t val_bytes;
+  ///\brief Size of the augmentation.
+  std::uint32_t augment_bytes;
 
   earnest_export_ void encode(boost::asio::mutable_buffer buf) const;
   earnest_export_ void decode(boost::asio::const_buffer buf);
-
-  cfg() = default;
-  virtual ~cfg() noexcept;
-
-  virtual auto allocate_elem(db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<value_type> = 0;
-  virtual auto allocate_key(db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<key_type> = 0;
 };
 
 

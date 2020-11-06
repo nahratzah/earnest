@@ -25,10 +25,19 @@ class earnest_export_ tx_aware_value_type
   auto try_lock_shared() const -> bool override final { return mtx_.try_lock_shared(); }
   void unlock_shared() const override final { mtx_.unlock_shared(); }
 
+  void encode(boost::asio::mutable_buffer buf) const override final;
+  void decode(boost::asio::const_buffer buf) override final;
+
   auto is_never_visible() const noexcept -> bool override final;
 
   private:
   auto offset() const -> std::uint64_t override final;
+  auto get_container_for_layout() const -> cycle_ptr::cycle_gptr<const detail::layout_obj> override final;
+
+  ///\brief Encode this key value element.
+  virtual void encode_value(boost::asio::mutable_buffer buf) const = 0;
+  ///\brief Decode this key value element.
+  virtual void decode_value(boost::asio::const_buffer buf) = 0;
 };
 
 

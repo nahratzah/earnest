@@ -2,26 +2,31 @@
 
 #include <earnest/detail/tree/tree.h>
 #include <earnest/detail/tree/leaf.h>
+#include <earnest/detail/tree/branch.h>
 #include <earnest/detail/tree/loader.h>
 #include <boost/endian/conversion.hpp>
 #include <boost/asio/error.hpp>
 #include <boost/system/error_code.hpp>
 #include <boost/system/system_error.hpp>
+#include <cassert>
 
 namespace earnest::detail::tree {
 
 
-abstract_page::abstract_page(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc)
+abstract_page::abstract_page(std::shared_ptr<const struct cfg> tree_config, allocator_type alloc)
 : alloc(std::move(alloc)),
-  cfg(tree->cfg)
-{}
+  cfg(std::move(tree_config))
+{
+  assert(tree_config != nullptr);
+}
 
 abstract_page::~abstract_page() noexcept = default;
 
 void abstract_page::init() {}
 
 auto abstract_page::decode(
-    cycle_ptr::cycle_gptr<abstract_tree> tree,
+    const loader& loader,
+    std::shared_ptr<const struct cfg> tree_config,
     const txfile::transaction& tx,
     offset_type off,
     allocator_type alloc,
@@ -37,11 +42,14 @@ auto abstract_page::decode(
       ec = boost::asio::error::operation_not_supported;
       return page;
     case leaf::magic:
-      page = allocate_page<leaf>(tree, std::move(alloc));
+      page = allocate_page<leaf>(std::move(tree_config), std::move(alloc));
+      break;
+    case branch::magic:
+      page = allocate_page<branch>(std::move(tree_config), std::move(alloc));
       break;
   }
 
-  page->decode_(tx, off, ec);
+  page->decode_(loader, tx, off, ec);
   return page;
 }
 
@@ -51,9 +59,9 @@ auto abstract_page::load_from_disk(
 -> cycle_ptr::cycle_gptr<abstract_page> {
   return loader.load_from_disk<abstract_page>(
       off,
-      [](db_cache::allocator_type alloc, cycle_ptr::cycle_gptr<abstract_tree> tree, const txfile::transaction& tx, txfile::transaction::offset_type off) -> cycle_ptr::cycle_gptr<abstract_page> {
+      [&loader](db_cache::allocator_type alloc, std::shared_ptr<const struct cfg> tree_config, const txfile::transaction& tx, txfile::transaction::offset_type off) -> cycle_ptr::cycle_gptr<abstract_page> {
         boost::system::error_code ec;
-        auto page_ptr = decode(std::move(tree), tx, off, std::move(alloc), ec);
+        auto page_ptr = decode(loader, std::move(tree_config), tx, off, std::move(alloc), ec);
         if (ec) throw boost::system::error_code(ec);
         return page_ptr;
       });

@@ -2,6 +2,7 @@
 #include <earnest/detail/tree/value_type.h>
 #include <earnest/detail/tree/key_type.h>
 #include <earnest/detail/tree/loader.h>
+#include <earnest/detail/tree/leaf_iterator.h>
 #include <algorithm>
 #include <cassert>
 #include <deque>
@@ -34,11 +35,6 @@ class leaf_sentinel final
   void unlock_shared() const override { mtx_.unlock_shared(); }
 
   auto is_never_visible() const noexcept -> bool override { return true; }
-
-  auto get_key(allocator_type alloc) const -> cycle_ptr::cycle_gptr<const key_type> override {
-    assert(false);
-    throw std::logic_error("leaf sentinels are not supposed to have a key");
-  }
 
   private:
   void encode(boost::asio::mutable_buffer buf) const override {
@@ -76,17 +72,26 @@ void leaf::init() {
   abstract_page::init();
 
 #ifndef NDEBUG
-  value_type::unique_lock_ptr lck(sentinel_);
-  assert(sentinel_->parent_ == nullptr);
+  {
+    value_type::unique_lock_ptr head_lck(head_sentinel_);
+    assert(head_sentinel_->parent_ == nullptr);
+  }
+  {
+    value_type::unique_lock_ptr tail_lck(tail_sentinel_);
+    assert(tail_sentinel_->parent_ == nullptr);
+  }
 #endif
 
-  sentinel_->parent_ = shared_from_this(this);
-  sentinel_->pred_ = sentinel_->succ_ = sentinel_;
+  tail_sentinel_->parent_ = shared_from_this(this);
+  head_sentinel_->parent_ = shared_from_this(this);
+  tail_sentinel_->pred_ = head_sentinel_;
+  head_sentinel_->succ_ = tail_sentinel_;
 }
 
-leaf::leaf(cycle_ptr::cycle_gptr<abstract_tree> tree, allocator_type alloc)
-: abstract_page(std::move(tree), std::move(alloc)),
-  sentinel_(*this, cycle_ptr::allocate_cycle<leaf_sentinel>(this->alloc, cfg->items_per_leaf_page, this->alloc)),
+leaf::leaf(std::shared_ptr<const struct cfg> tree_config, allocator_type alloc)
+: abstract_page(std::move(tree_config), std::move(alloc)),
+  head_sentinel_(*this, cycle_ptr::allocate_cycle<leaf_sentinel>(this->alloc, cfg->items_per_leaf_page, this->alloc)),
+  tail_sentinel_(*this, cycle_ptr::allocate_cycle<leaf_sentinel>(this->alloc, cfg->items_per_leaf_page, this->alloc)),
   key_(*this)
 {}
 
@@ -115,11 +120,13 @@ void leaf::merge(const loader& loader, const unique_lock_ptr& front, const uniqu
 
   index_type next_idx = 0;
 
+  value_type::unique_lock_ptr f_head_sentinel(front->head_sentinel_);
+
   // Compact element in the front page.
   moved_vector_t reslotted(tx.get_allocator());
   reslotted.reserve(front->size_);
-  for (cycle_ptr::cycle_gptr<value_type> elem = front->sentinel_->succ_;
-      elem != front->sentinel_;
+  for (cycle_ptr::cycle_gptr<value_type> elem = front->head_sentinel_->succ_;
+      elem != front->tail_sentinel_;
       elem = elem->succ_, ++next_idx) {
     reslotted.emplace_back(elem);
     // Ensure this index won't be zeroed.
@@ -138,14 +145,15 @@ void leaf::merge(const loader& loader, const unique_lock_ptr& front, const uniqu
         boost::asio::buffer(elem_buffer));
   }
 
-  value_type::unique_lock_ptr f_sentinel(front->sentinel_);
+  value_type::unique_lock_ptr f_tail_sentinel(front->tail_sentinel_);
+  value_type::unique_lock_ptr b_head_sentinel(back->head_sentinel_);
 
   moved_vector_t moved(tx.get_allocator());
   moved.reserve(back->size_);
 
   // Append elements from the back page.
-  for (cycle_ptr::cycle_gptr<value_type> elem = back->sentinel_->succ_;
-      elem != back->sentinel_;
+  for (cycle_ptr::cycle_gptr<value_type> elem = back->head_sentinel_->succ_;
+      elem != back->tail_sentinel_;
       elem = elem->succ_, ++next_idx) {
     moved.emplace_back(elem);
     // Ensure we won't zero out this slot.
@@ -182,10 +190,13 @@ void leaf::merge(const loader& loader, const unique_lock_ptr& front, const uniqu
     }
   }
 
-  value_type::unique_lock_ptr b_sentinel(back->sentinel_);
+  value_type::unique_lock_ptr b_tail_sentinel(back->tail_sentinel_);
+
   tx.on_commit(
-      [   front_sentinel=std::move(f_sentinel),
-          back_sentinel=std::move(b_sentinel),
+      [   front_head_sentinel=std::move(f_head_sentinel),
+          front_tail_sentinel=std::move(f_tail_sentinel),
+          back_head_sentinel=std::move(b_head_sentinel),
+          back_tail_sentinel=std::move(b_tail_sentinel),
           moved=std::move(moved),
           reslotted=std::move(reslotted),
           front_ptr=front.mutex(),
@@ -204,18 +215,20 @@ void leaf::merge(const loader& loader, const unique_lock_ptr& front, const uniqu
         // Update page sizes.
         front_ptr->size_ += std::exchange(back_ptr->size_, 0u);
 
-        // Splice elements.
-        front_sentinel->pred_ = moved.back().mutex();
-        moved.back()->succ_ = front_sentinel.mutex();
-
+        // Connect elements.
         reslotted.back()->succ_ = moved.front().mutex();
         moved.front()->pred_ = reslotted.back().mutex();
 
-        back_sentinel->pred_ = back_sentinel->succ_ = back_sentinel.mutex();
+        // Move back tail sentinel to front page.
+        back_tail_sentinel->parent_ = front_ptr;
+        front_ptr->tail_sentinel_ = back_tail_sentinel.mutex();
 
         // Update sibling pointers.
         front_ptr->successor_off_ = (back_successor ? back_successor->offset : 0u);
         if (back_successor) back_successor->predecessor_off_ = front_ptr->offset;
+
+        // Invalidate back page.
+        back_ptr->valid_ = false;
       });
 
   // Zero out the previously-filled-but-now-empty slots.
@@ -241,7 +254,7 @@ void leaf::merge(const loader& loader, const unique_lock_ptr& front, const uniqu
   }
 }
 
-void leaf::split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) {
+auto leaf::split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) -> cycle_ptr::cycle_gptr<const key_type> {
   assert(front.owns_lock() && back.owns_lock());
   assert(front.mutex() != back.mutex());
   assert(front->cfg == back->cfg);
@@ -267,17 +280,19 @@ void leaf::split(const loader& loader, const unique_lock_ptr& front, const uniqu
             load_from_disk(back->successor_off_, loader)));
   }
 
+  value_type::unique_lock_ptr f_head_sentinel(front->head_sentinel_);
   value_type::unique_lock_ptr last_kept;
   {
-    cycle_ptr::cycle_gptr<value_type> lk = front->sentinel_;
+    cycle_ptr::cycle_gptr<value_type> lk = front->head_sentinel_;
     for (size_type i = 0; i < new_front_size; ++i)
       lk = lk->succ_;
     last_kept = value_type::unique_lock_ptr(std::move(lk));
   }
-  for (cycle_ptr::cycle_gptr<value_type> i = last_kept->succ_; i != front->sentinel_; i = i->succ_)
+  for (cycle_ptr::cycle_gptr<value_type> i = last_kept->succ_; i != front->tail_sentinel_; i = i->succ_)
     moved.emplace_back(i);
-  value_type::unique_lock_ptr f_sentinel(front->sentinel_);
-  value_type::unique_lock_ptr b_sentinel(back->sentinel_);
+  value_type::unique_lock_ptr f_tail_sentinel(front->tail_sentinel_);
+  value_type::unique_lock_ptr b_head_sentinel(back->head_sentinel_);
+  value_type::unique_lock_ptr b_tail_sentinel(back->tail_sentinel_);
 
   index_type target_slot = 0;
   for (auto i = moved.cbegin(); i != moved.cend(); ++i, ++target_slot) {
@@ -289,7 +304,7 @@ void leaf::split(const loader& loader, const unique_lock_ptr& front, const uniqu
         boost::asio::buffer(elem_buffer));
   }
 
-  const cycle_ptr::cycle_gptr<const key_type> back_key = moved.front()->get_key(back->get_allocator());
+  cycle_ptr::cycle_gptr<const key_type> back_key = loader.allocate_key(*moved.front(), back->get_allocator());
   if (back_key == nullptr) throw std::logic_error("unable to extract key from value tpye");
   {
     header h;
@@ -325,8 +340,10 @@ void leaf::split(const loader& loader, const unique_lock_ptr& front, const uniqu
   tx.on_commit(
       [   last_kept=std::move(last_kept),
           moved=std::move(moved),
-          front_sentinel=std::move(f_sentinel),
-          back_sentinel=std::move(b_sentinel),
+          front_head_sentinel=std::move(f_head_sentinel),
+          front_tail_sentinel=std::move(f_tail_sentinel),
+          back_head_sentinel=std::move(b_head_sentinel),
+          back_tail_sentinel=std::move(b_tail_sentinel),
           front_ptr=front.mutex(),
           back_ptr=back.mutex(),
           new_front_size,
@@ -344,14 +361,18 @@ void leaf::split(const loader& loader, const unique_lock_ptr& front, const uniqu
         // Install new key.
         back_ptr->key_ = std::move(back_key);
 
-        // Splice elements.
-        front_sentinel->pred_ = last_kept.mutex();
-        last_kept->succ_ = front_sentinel.mutex();
+        // Splice the back tail sentinel into the front set.
+        back_tail_sentinel->pred_ = last_kept.mutex();
+        last_kept->succ_ = back_tail_sentinel.mutex();
+        // Swap the tail sentinels around.
+        front_tail_sentinel->parent_ = back_ptr;
+        back_tail_sentinel->parent_ = front_ptr;
+        swap(front_ptr->tail_sentinel_, back_ptr->tail_sentinel_);
+        // Now, the old back-sentinel will still be after the collection.
 
-        moved.front()->pred_ = back_sentinel.mutex();
-        back_sentinel->succ_ = moved.front().mutex();
-        moved.back()->succ_ = back_sentinel.mutex();
-        back_sentinel->pred_ = moved.back().mutex();
+        // Fix the back head sentinel.
+        moved.front()->pred_ = back_head_sentinel.mutex();
+        back_head_sentinel->succ_ = moved.front().mutex();
 
         // Update collection sizes.
         front_ptr->size_ = new_front_size;
@@ -365,6 +386,20 @@ void leaf::split(const loader& loader, const unique_lock_ptr& front, const uniqu
         back_ptr->successor_off_ = (back_successor ? back_successor->offset : 0u);
 
         back_ptr->parent = front_ptr->parent;
+
+        // Validate sentinel updates.
+        assert(front_ptr->tail_sentinel_->pred_ == last_kept.mutex());
+        assert(last_kept->succ_ == front_ptr->tail_sentinel_);
+
+        assert(back_ptr->head_sentinel_->succ_ == moved.front().mutex());
+        assert(back_ptr->tail_sentinel_->pred_ == moved.back().mutex());
+
+        assert(moved.front()->pred_ == back_ptr->head_sentinel_);
+        assert(moved.back()->succ_ == back_ptr->tail_sentinel_);
+
+        // Validate that we indeed kept the back sentinel at the very rear of the list,
+        // by moving it into the sibling page.
+        assert(front_tail_sentinel.mutex() == back_ptr->tail_sentinel_);
       });
 
   // Zero out the previously-filled-but-now-empty slots.
@@ -382,12 +417,14 @@ void leaf::split(const loader& loader, const unique_lock_ptr& front, const uniqu
 
     tx.write_at_many(std::move(offsets), boost::asio::buffer(elem_buffer));
   }
+
+  return back_key;
 }
 
 void leaf::unlink(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem, txfile::transaction& tx) {
   assert(self.owns_lock());
   assert(value_type::shared_lock_ptr(elem)->parent_ == self.mutex());
-  assert(elem != self->sentinel_);
+  assert(elem != self->head_sentinel_ && elem != self->tail_sentinel_);
 
   value_type::unique_lock_ptr elem_pred, elem_lck, elem_succ;
   std::tie(elem_pred, elem_lck, elem_succ) = lock_elem_with_siblings_(self, elem);
@@ -432,13 +469,13 @@ void leaf::link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> e
   assert(size(self) < self->max_size());
   assert(value_type::shared_lock_ptr(elem)->parent_ == nullptr);
 
-  if (pos == nullptr) pos = self->sentinel_;
+  if (pos == nullptr) pos = self->tail_sentinel_;
   assert(value_type::shared_lock_ptr(pos)->parent_ == self.mutex());
 
   std::basic_string<char, std::char_traits<char>, shared_resource_allocator<char>> elem_buffer(tx.get_allocator());
   elem_buffer.resize(self->bytes_per_val_());
 
-  const bool no_shifting_needed = (pos->slot_ != 0 && (pos->pred_ == self->sentinel_ || pos->pred_->slot_ < pos->slot_ - 1u));
+  const bool no_shifting_needed = (pos->slot_ != 0 && (pos->pred_ == self->head_sentinel_ || pos->pred_->slot_ < pos->slot_ - 1u));
   const bool shifting_needed = !no_shifting_needed;
 
   // Attempt to move predecessors forward, to create a gap.
@@ -447,7 +484,7 @@ void leaf::link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> e
   lock_vector predecessors(tx.get_allocator());
   if (shifting_needed) {
     for (cycle_ptr::cycle_gptr<value_type> i = pos->pred_;
-        i != self->sentinel_ && (predecessors.empty() || predecessors.back()->slot_ == i->slot_ + 1u);
+        i != self->head_sentinel_ && (predecessors.empty() || predecessors.back()->slot_ == i->slot_ + 1u);
         i = i->pred_)
       predecessors.emplace_back(i, std::defer_lock);
     if (!predecessors.empty()) {
@@ -467,10 +504,8 @@ void leaf::link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> e
 
   // Figure out predecessor.
   // We must ensure it's locked only once.
-  // But we must _not_ lock it, if it is the sentinel.
   value_type::unique_lock_ptr elem_pred(pos->pred_, std::defer_lock);
-  if (predecessors.empty() && elem_pred.mutex() != self->sentinel_)
-    elem_pred.lock();
+  if (predecessors.empty()) elem_pred.lock();
 
   // Lock the element.
   value_type::unique_lock_ptr elem_lck(elem);
@@ -483,16 +518,12 @@ void leaf::link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> e
   lock_vector successors(tx.get_allocator());
   if (shifting_needed && predecessors.empty()) {
     for (cycle_ptr::cycle_gptr<value_type> i = pos;
-        i != self->sentinel_ && (successors.empty() || successors.back()->slot_ + 1u == i->slot_);
+        i != self->tail_sentinel_ && (successors.empty() || successors.back()->slot_ + 1u == i->slot_);
         i = i->succ_) {
       successors.emplace_back(i);
     }
   }
   if (successors.empty()) elem_succ.lock();
-
-  // Lock sentinel predecessor.
-  if (predecessors.empty() && !elem_pred.owns_lock() && elem_pred.mutex() != elem_succ.mutex())
-    elem_pred.lock();
 
   // Assertions so far.
   if (no_shifting_needed) {
@@ -605,30 +636,36 @@ void leaf::link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> e
       });
 }
 
-auto leaf::get_elements(const shared_lock_ptr& self) -> std::vector<cycle_ptr::cycle_gptr<value_type>> {
+auto leaf::before_begin(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator {
   assert(self.owns_lock());
-
-  std::vector<cycle_ptr::cycle_gptr<value_type>> r;
-  r.reserve(self->size_);
-
-  for (cycle_ptr::cycle_gptr<value_type> i = self->sentinel_->succ_;
-      i != self->sentinel_;
-      i = i->succ_)
-    r.emplace_back(i);
-  return r;
+  return leaf_iterator(std::move(loader), self->head_sentinel_);
 }
 
-auto leaf::get_elements(const unique_lock_ptr& self) -> std::vector<cycle_ptr::cycle_gptr<value_type>> {
+auto leaf::before_begin(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator {
   assert(self.owns_lock());
+  return leaf_iterator(std::move(loader), self->head_sentinel_);
+}
 
-  std::vector<cycle_ptr::cycle_gptr<value_type>> r;
-  r.reserve(self->size_);
+auto leaf::begin(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator {
+  assert(self.owns_lock());
+  value_type::shared_lock_ptr sentinel(self->head_sentinel_);
+  return leaf_iterator(std::move(loader), sentinel->succ_);
+}
 
-  for (cycle_ptr::cycle_gptr<value_type> i = self->sentinel_->succ_;
-      i != self->sentinel_;
-      i = i->succ_)
-    r.emplace_back(i);
-  return r;
+auto leaf::begin(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator {
+  assert(self.owns_lock());
+  value_type::shared_lock_ptr sentinel(self->head_sentinel_);
+  return leaf_iterator(std::move(loader), sentinel->succ_);
+}
+
+auto leaf::end(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator {
+  assert(self.owns_lock());
+  return leaf_iterator(std::move(loader), self->tail_sentinel_);
+}
+
+auto leaf::end(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator {
+  assert(self.owns_lock());
+  return leaf_iterator(std::move(loader), self->tail_sentinel_);
 }
 
 auto leaf::lock_elem_with_siblings_(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem) -> std::tuple<value_type::unique_lock_ptr, value_type::unique_lock_ptr, value_type::unique_lock_ptr> {
@@ -644,18 +681,15 @@ auto leaf::lock_elem_with_siblings_(const unique_lock_ptr& self, cycle_ptr::cycl
       value_type::unique_lock_ptr(elem, std::defer_lock),
       value_type::unique_lock_ptr(elem->succ_, std::defer_lock));
 
-  if (std::get<0>(r).mutex() != self->sentinel_) // Lock sentinel last.
-    std::get<0>(r).lock();
+  // Ordering must be adhered to.
+  std::get<0>(r).lock();
   std::get<1>(r).lock();
   std::get<2>(r).lock();
-  // Lock the sentinel, but take care not to lock it, if successor is also sentinel.
-  if (!std::get<0>(r).owns_lock() && std::get<0>(r).mutex() != std::get<2>(r).mutex())
-    std::get<0>(r).lock();
 
   return r;
 }
 
-void leaf::decode_(const txfile::transaction& tx, offset_type off, boost::system::error_code& ec) {
+void leaf::decode_(const loader& loader, const txfile::transaction& tx, offset_type off, boost::system::error_code& ec) {
   auto stream = buffered_read_stream_at<const txfile::transaction, shared_resource_allocator<void>>(tx, off, bytes_per_page_(), tx.get_allocator());
 
   header h;
@@ -664,11 +698,11 @@ void leaf::decode_(const txfile::transaction& tx, offset_type off, boost::system
 
   // Decode the page key.
   std::string buf;
-  buf.resize(cfg->key_bytes);
+  buf.resize(bytes_per_key_());
   boost::asio::read(stream, boost::asio::buffer(buf), ec);
   if (ec) return;
   if (h.flags & header::flag_has_key) { // Decode key.
-    cycle_ptr::cycle_gptr<key_type> key = cfg->allocate_key(alloc);
+    cycle_ptr::cycle_gptr<key_type> key = loader.allocate_key(alloc);
     key->decode(boost::asio::buffer(buf));
     key_ = std::move(key);
   }
@@ -679,21 +713,67 @@ void leaf::decode_(const txfile::transaction& tx, offset_type off, boost::system
     if (ec) return;
 
     // Decode key-value element.
-    cycle_ptr::cycle_gptr<value_type> value = cfg->allocate_elem(alloc);
+    cycle_ptr::cycle_gptr<value_type> value = loader.allocate_elem(alloc);
     value->decode(boost::asio::buffer(buf));
 
     // If the value is visible, link it.
     if (!value->is_never_visible()) {
       value->parent_ = shared_from_this(this);
-      cycle_ptr::cycle_gptr<value_type> pred = sentinel_->pred_;
+      cycle_ptr::cycle_gptr<value_type> pred = tail_sentinel_->pred_;
       value->pred_ = pred;
       pred->succ_ = value;
-      value->succ_ = sentinel_;
-      sentinel_->pred_ = value;
+      value->succ_ = tail_sentinel_;
+      tail_sentinel_->pred_ = value;
     }
   }
 
   this->offset = off;
+}
+
+auto leaf::get_layout_domain() const noexcept -> const layout_domain& {
+  class layout_domain_impl final
+  : public layout_domain
+  {
+    public:
+    layout_domain_impl() noexcept = default;
+    ~layout_domain_impl() noexcept override = default;
+
+    private:
+    auto less_compare(const layout_obj& x_obj, const layout_obj& y_obj) const -> bool override {
+      std::optional<bool> opt_before_result;
+
+      {
+        const leaf*const x = dynamic_cast<const leaf*>(&x_obj);
+        const leaf*const y = dynamic_cast<const leaf*>(&y_obj);
+        if (x != nullptr && y != nullptr) {
+          if (x->key_ == nullptr) {
+            opt_before_result.emplace(y->key_ != nullptr);
+          } else if (y->key_ == nullptr) {
+            opt_before_result.emplace(false);
+          } else {
+            opt_before_result = x->key_->before(*y->key_);
+          }
+        }
+      }
+
+      return opt_before_result.value_or(&x_obj < &y_obj);
+    }
+  };
+
+  static layout_domain_impl impl;
+  return impl;
+}
+
+void leaf::lock_layout() const {
+  lock_shared();
+}
+
+bool leaf::try_lock_layout() const {
+  return try_lock_shared();
+}
+
+void leaf::unlock_layout() const {
+  unlock_shared();
 }
 
 

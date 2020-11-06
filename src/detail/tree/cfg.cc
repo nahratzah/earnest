@@ -36,7 +36,5 @@ void cfg::decode(boost::asio::const_buffer buf) {
   boost::endian::big_to_native_inplace(augment_bytes);
 }
 
-cfg::~cfg() noexcept = default;
-
 
 } /* namespace earnest::detail::tree */

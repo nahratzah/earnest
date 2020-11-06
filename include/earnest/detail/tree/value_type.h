@@ -20,6 +20,7 @@ class earnest_export_ value_type
   friend leaf;
   friend tx_aware_value_type;
   friend leaf_iterator;
+  template<typename KeyType, typename ValueType, typename... Augments> friend class tx_aware_loader;
 
   public:
   using allocator_type = db_cache::allocator_type;
@@ -46,8 +47,6 @@ class earnest_export_ value_type
   virtual void unlock_shared() const = 0;
 
   virtual auto is_never_visible() const noexcept -> bool = 0;
-
-  virtual auto get_key(allocator_type alloc) const -> cycle_ptr::cycle_gptr<const key_type> = 0;
 
   static auto parent_page_for_read(shared_lock_ptr& vptr)
   -> std::tuple<
