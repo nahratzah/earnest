@@ -2,6 +2,7 @@
 #define EARNEST_DETAIL_TREE_TREE_H
 
 #include <memory>
+#include <shared_mutex>
 
 #include <earnest/db.h>
 #include <earnest/detail/export_.h>
@@ -14,7 +15,8 @@ namespace earnest::detail::tree {
 
 class earnest_export_ basic_tree
 : public db_cache::domain,
-  public db::db_obj
+  public db::db_obj,
+  public db_cache::cache_obj
 {
   friend ops;
 
