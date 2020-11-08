@@ -52,12 +52,6 @@ class earnest_export_ abstract_page
    */
   static auto decode(const loader& loader, std::shared_ptr<const struct cfg> tree_config, const txfile::transaction& tx, offset_type off, allocator_type alloc, boost::system::error_code& ec)
   -> cycle_ptr::cycle_gptr<abstract_page>;
-  /**
-   * \brief Load a page from disk.
-   * \param off Offset of the page.
-   * \param loader Loader interface.
-   */
-  static auto load_from_disk(offset_type off, const loader& loader) -> cycle_ptr::cycle_gptr<abstract_page>;
 
   protected:
   virtual void init();

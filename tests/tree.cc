@@ -1,137 +1,60 @@
 #include "UnitTest++/UnitTest++.h"
 #include "print.h"
-#include <earnest/detail/tree/leaf.h>
+#include <earnest/fd.h>
+#include <earnest/db.h>
 #include <earnest/detail/tree/tree.h>
-#include <earnest/detail/tree/value_type.h>
-#include <earnest/detail/tree/key_type.h>
-#include <earnest/detail/tree/augmented_page_ref.h>
 #include <earnest/detail/tree/loader_impl.h>
 #include <earnest/detail/tree/leaf_iterator.h>
-#include <earnest/fd.h>
-#include <earnest/txfile.h>
-#include <boost/polymorphic_cast.hpp>
-#include <boost/asio/io_context.hpp>
 #include <boost/asio/buffer.hpp>
+#include <boost/asio/io_context.hpp>
 #include <boost/asio/write_at.hpp>
-#include <array>
-#include <cstring>
-#include <initializer_list>
-#include <ostream>
-#include <shared_mutex>
+#include <boost/system/error_code.hpp>
+#include <boost/system/system_error.hpp>
+#include <cycle_ptr/cycle_ptr.h>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <string>
+#include <memory>
 #include <vector>
+#include <algorithm>
 
-using earnest::detail::tree::leaf;
+namespace tree = ::earnest::detail::tree;
 
-struct fixture {
-  struct string_value_type {
-    static const std::size_t SIZE = 4;
 
-    string_value_type() = default;
-    string_value_type(std::string value) : value(std::move(value)) {}
+struct string_value_type {
+  static const std::size_t SIZE = 4;
 
-    void encode(boost::asio::mutable_buffer buf) const {
-      assert(buf.size() >= SIZE);
-      std::memset(buf.data(), 0, buf.size());
-      boost::asio::buffer_copy(boost::asio::buffer(buf, SIZE), boost::asio::buffer(value));
-    }
+  string_value_type() = default;
+  string_value_type(std::string value) : value(std::move(value)) {}
 
-    void decode(boost::asio::const_buffer buf) {
-      std::string_view str_buf(reinterpret_cast<const char*>(buf.data()), buf.size());
-      value.assign(
-          str_buf.begin(),
-          std::find(str_buf.begin(), str_buf.end(), '\0'));
-    }
+  void encode(boost::asio::mutable_buffer buf) const {
+    assert(buf.size() >= SIZE);
+    std::memset(buf.data(), 0, buf.size());
+    boost::asio::buffer_copy(boost::asio::buffer(buf, SIZE), boost::asio::buffer(value));
+  }
 
-    auto operator<(const string_value_type& y) const -> bool {
-      return value < y.value;
-    }
+  void decode(boost::asio::const_buffer buf) {
+    std::string_view str_buf(reinterpret_cast<const char*>(buf.data()), buf.size());
+    value.assign(
+        str_buf.begin(),
+        std::find(str_buf.begin(), str_buf.end(), '\0'));
+  }
 
-    std::string value;
-  };
+  auto operator<(const string_value_type& y) const -> bool {
+    return value < y.value;
+  }
 
-  static constexpr std::size_t items_per_leaf_page = 4;
+  std::string value;
+};
 
-  fixture()
+
+class db_fixture {
+  public:
+  db_fixture()
   : io_context(),
-    file(earnest::txfile::create("tree_leaf", tmpfile_fd_(this->io_context.get_executor(), "tree_leaf"), 0u, 1u << 20)),
-    cfg(mk_cfg_())
+    db(earnest::db::create("test", tmpfile_fd_(this->io_context.get_executor(), "tree-test")))
   {}
-
-  auto leaf_bytes() const -> std::size_t {
-    return leaf::header::SIZE + cfg->key_bytes + cfg->items_per_leaf_page * cfg->val_bytes;
-  }
-
-  auto load_leaf(earnest::fd::offset_type offset) -> cycle_ptr::cycle_gptr<leaf> {
-    auto tx = file.begin();
-
-    boost::system::error_code ec;
-    auto page_ptr = earnest::detail::tree::abstract_page::decode(*loader, cfg, tx, offset, earnest::shared_resource_allocator<void>(), ec);
-    REQUIRE CHECK(!ec);
-    REQUIRE CHECK(page_ptr != nullptr);
-
-    REQUIRE CHECK(std::dynamic_pointer_cast<leaf>(page_ptr) != nullptr);
-    return std::dynamic_pointer_cast<leaf>(page_ptr);
-  }
-
-  auto write_empty_leaf(earnest::fd::offset_type offset) -> cycle_ptr::cycle_gptr<leaf> {
-    auto tx = file.begin(false);
-    if (tx.size() < offset + leaf_bytes()) tx.resize(offset + leaf_bytes());
-    auto magic = leaf::magic;
-    boost::endian::native_to_big_inplace(magic);
-    boost::asio::write_at(tx, offset, boost::asio::buffer(&magic, sizeof(magic)));
-    tx.commit();
-
-    return load_leaf(offset);
-  }
-
-  template<typename Vector>
-  auto write_leaf(earnest::fd::offset_type offset, const Vector& elems) -> cycle_ptr::cycle_gptr<leaf> {
-    struct mk_elem_t {
-      auto operator()(const std::string& s) const
-      -> cycle_ptr::cycle_gptr<mock_loader::value_type> {
-        return cycle_ptr::make_cycle<mock_loader::value_type>(s);
-      }
-
-      auto operator()(cycle_ptr::cycle_gptr<mock_loader::value_type> elem_ptr) const
-      -> cycle_ptr::cycle_gptr<mock_loader::value_type> {
-        return elem_ptr;
-      }
-    };
-    mk_elem_t mk_elem;
-
-    leaf::unique_lock_ptr leaf(write_empty_leaf(offset));
-
-    for (const auto& new_elem : elems) {
-      auto tx = file.begin(false);
-      leaf::link(leaf, mk_elem(new_elem), nullptr, tx);
-      tx.commit();
-    }
-
-    return leaf.mutex();
-  }
-
-  auto read_all_from_leaf(const leaf::shared_lock_ptr& leaf) -> std::vector<std::string> {
-    std::vector<std::string> result;
-    std::transform(leaf::begin(loader, leaf), leaf::end(loader, leaf), std::back_inserter(result),
-        [](const earnest::detail::tree::value_type& value_ref) -> const std::string& {
-          auto ptr = boost::polymorphic_downcast<const mock_loader::value_type*>(&value_ref);
-          REQUIRE CHECK(ptr != nullptr);
-          return ptr->value.value;
-        });
-    return result;
-  }
-
-  auto read_all_from_leaf(const leaf::unique_lock_ptr& leaf) -> std::vector<std::string> {
-    std::vector<std::string> result;
-    std::transform(leaf::begin(loader, leaf), leaf::end(loader, leaf), std::back_inserter(result),
-        [](const earnest::detail::tree::value_type& value_ref) -> const std::string& {
-          auto ptr = boost::polymorphic_downcast<const mock_loader::value_type*>(&value_ref);
-          REQUIRE CHECK(ptr != nullptr);
-          return ptr->value.value;
-        });
-    return result;
-  }
 
   private:
   static auto tmpfile_fd_(earnest::fd::executor_type x, std::string file) -> earnest::fd {
@@ -140,10 +63,56 @@ struct fixture {
     return f;
   }
 
-  static auto mk_cfg_() -> std::shared_ptr<earnest::detail::tree::cfg> {
-    return std::make_shared<earnest::detail::tree::cfg>(
-        earnest::detail::tree::cfg{
-          items_per_leaf_page, // items_per_leaf_page
+  protected:
+  auto txfile_begin(bool read_only = true) -> earnest::txfile::transaction {
+    class db_obj_exposition
+    : public earnest::db::db_obj
+    {
+      public:
+      explicit db_obj_exposition(std::shared_ptr<earnest::db> db)
+      : earnest::db::db_obj(std::move(db))
+      {}
+
+      using earnest::db::db_obj::txfile_begin;
+    };
+
+    return db_obj_exposition(db).txfile_begin(read_only);
+  }
+
+  auto txfile_begin() const -> earnest::txfile::transaction {
+    class db_obj_exposition
+    : public earnest::db::db_obj
+    {
+      public:
+      explicit db_obj_exposition(std::shared_ptr<earnest::db> db)
+      : earnest::db::db_obj(std::move(db))
+      {}
+
+      using earnest::db::db_obj::txfile_begin;
+    };
+
+    return db_obj_exposition(db).txfile_begin();
+  }
+
+  boost::asio::io_context io_context;
+  const std::shared_ptr<earnest::db> db;
+};
+
+
+class tree_fixture
+: public db_fixture
+{
+  public:
+  tree_fixture()
+  : db_fixture(),
+    tree(cycle_ptr::make_cycle<tree::basic_tree>(this->db, mk_cfg_(), mk_loader_()))
+  {}
+
+  private:
+  static auto mk_cfg_() -> std::shared_ptr<tree::cfg> {
+    return std::make_shared<tree::cfg>(
+        tree::cfg{
+          4, // items_per_leaf_page
           2, // items_per_node_page
           string_value_type::SIZE, // key_bytes
           string_value_type::SIZE, // val_bytes
@@ -151,231 +120,380 @@ struct fixture {
         });
   }
 
-  protected:
   class mock_loader
-  : public earnest::detail::tree::tx_aware_loader<string_value_type, string_value_type>
+  : public tree::tx_aware_loader<string_value_type, string_value_type>
   {
     public:
-    explicit mock_loader(fixture& self) noexcept : self_(self) {}
-
     auto allocate_disk_space(earnest::txfile::transaction& tx, std::size_t bytes) const -> offset_type override {
       REQUIRE CHECK(false);
       return 0;
     }
-
-    private:
-    auto do_load_from_disk(offset_type off, earnest::detail::cheap_fn_ref<cycle_ptr::cycle_gptr<earnest::detail::db_cache::cache_obj>(earnest::detail::db_cache::allocator_type, std::shared_ptr<const earnest::detail::tree::cfg>, const earnest::txfile::transaction&, offset_type)> load) const
-    -> cycle_ptr::cycle_gptr<earnest::detail::db_cache::cache_obj> override {
-      return load(alloc, self_.cfg, self_.file.begin(), off);
-    }
-
-    fixture& self_;
-    earnest::detail::db_cache::allocator_type alloc;
   };
 
-  static auto key_type_cast(cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type> key) -> const std::string& {
-    return boost::polymorphic_downcast<const mock_loader::key_type*>(key.get())->key.value;
+  static auto mk_loader_() -> std::shared_ptr<tree::loader> {
+    return std::make_shared<mock_loader>();
   }
 
-  public:
-  boost::asio::io_context io_context;
-  earnest::txfile file;
-  std::shared_ptr<earnest::detail::tree::cfg> cfg;
-  cycle_ptr::cycle_gptr<mock_loader> loader = cycle_ptr::make_cycle<mock_loader>(*this);
+  protected:
+  using loader_value_type = mock_loader::value_type;
+  using loader_key_type = mock_loader::key_type;
+
+  auto leaf_bytes() const -> std::size_t {
+    return tree::leaf::header::SIZE + tree->cfg->key_bytes + tree->cfg->items_per_leaf_page * tree->cfg->val_bytes;
+  }
+
+  auto read_all_from_leaf(const tree::leaf::shared_lock_ptr& leaf) const -> std::vector<std::string> {
+    std::vector<std::string> result;
+    std::transform(
+        tree::leaf::begin(tree, leaf), tree::leaf::end(tree, leaf),
+        std::back_inserter(result),
+        [](const earnest::detail::tree::value_type& value_ref) -> const std::string& {
+          auto ptr = boost::polymorphic_downcast<const mock_loader::value_type*>(&value_ref);
+          REQUIRE CHECK(ptr != nullptr);
+          return ptr->value.value;
+        });
+    return result;
+  }
+
+  auto read_all_from_leaf(const tree::leaf::unique_lock_ptr& leaf) const -> std::vector<std::string> {
+    std::vector<std::string> result;
+    std::transform(
+        tree::leaf::begin(tree, leaf), tree::leaf::end(tree, leaf),
+        std::back_inserter(result),
+        [](const earnest::detail::tree::value_type& value_ref) -> const std::string& {
+          auto ptr = boost::polymorphic_downcast<const mock_loader::value_type*>(&value_ref);
+          REQUIRE CHECK(ptr != nullptr);
+          return ptr->value.value;
+        });
+    return result;
+  }
+
+  void write_empty_leaf(std::uint64_t offset) {
+    auto tx = txfile_begin(false);
+    if (tx.size() < offset + leaf_bytes()) tx.resize(offset + leaf_bytes());
+    std::array<std::uint8_t, tree::leaf::header::SIZE> buf;
+    tree::leaf::header{ tree::leaf::magic, 0u, 0u, 0u, 0u }.encode(boost::asio::buffer(buf));
+    boost::asio::write_at(tx, 0, boost::asio::buffer(buf));
+    tx.commit();
+  }
+
+  void write_leaf(std::uint64_t offset, std::initializer_list<cycle_ptr::cycle_gptr<loader_value_type>> elems) {
+    write_empty_leaf(offset);
+
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(offset));
+    std::for_each(
+        elems.begin(), elems.end(),
+        [&leaf, this](cycle_ptr::cycle_gptr<loader_value_type> elem) {
+          auto tx = txfile_begin(false);
+          tree::leaf::link(leaf, elem, nullptr, tx);
+          tx.commit();
+        });
+  }
+
+  private:
+  auto load_page_from_disk_(std::uint64_t offset) const -> cycle_ptr::cycle_gptr<tree::abstract_page> {
+    auto tx = txfile_begin();
+    boost::system::error_code ec;
+    auto page_ptr = tree::abstract_page::decode(*tree->loader, tree->cfg, tx, offset, {}, ec);
+    if (ec) throw boost::system::error_code(ec);
+    tx.commit();
+    return page_ptr;
+  }
+
+  protected:
+  template<typename Page>
+  auto load_page_from_disk(std::uint64_t offset) const
+  -> std::enable_if_t<std::is_base_of_v<tree::abstract_page, std::remove_const_t<Page>>, cycle_ptr::cycle_gptr<Page>> {
+    if constexpr(std::is_same_v<tree::abstract_page, std::remove_const_t<Page>>)
+      return load_page_from_disk_(offset);
+    else
+      return boost::polymorphic_pointer_downcast<Page>(load_page_from_disk_(offset));
+  }
+
+  const cycle_ptr::cycle_gptr<tree::basic_tree> tree;
 };
+
 
 SUITE(leaf) {
 
-TEST_FIXTURE(fixture, empty_page) {
-  auto leaf = leaf::shared_lock_ptr(write_empty_leaf(0));
-  CHECK_EQUAL(cfg->items_per_leaf_page, leaf->max_size());
-  CHECK_EQUAL(0, leaf::size(leaf));
+  TEST_FIXTURE(tree_fixture, empty_page) {
+    write_empty_leaf(0);
+    tree::leaf::shared_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
 
-  CHECK_EQUAL(std::vector<std::string>(), fixture::read_all_from_leaf(leaf));
-  CHECK_EQUAL(cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type>(nullptr), leaf->key());
-}
-
-TEST_FIXTURE(fixture, append_first_element) {
-  const auto new_elem = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("val"));
-
-  auto leaf = leaf::unique_lock_ptr(write_empty_leaf(0));
-
-  auto tx = file.begin(false);
-  leaf::link(leaf, new_elem, nullptr, tx);
-
-  // Element don't appear until commit is called.
-  CHECK_EQUAL(std::vector<std::string>(), fixture::read_all_from_leaf(leaf));
-  tx.commit();
-
-  CHECK_EQUAL(
-      std::vector<std::string>{ "val" },
-      fixture::read_all_from_leaf(leaf));
-}
-
-TEST_FIXTURE(fixture, append_many_elements) {
-  const std::vector<std::string> elems{ "1", "2", "3", "4" };
-
-  auto leaf = leaf::unique_lock_ptr(write_empty_leaf(0));
-  for (const auto& new_elem : elems) {
-    auto tx = file.begin(false);
-    leaf::link(leaf, cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type(new_elem)), nullptr, tx);
-    tx.commit();
+    CHECK_EQUAL(tree->cfg->items_per_leaf_page, leaf->max_size());
+    CHECK_EQUAL(0, tree::leaf::size(leaf));
+    CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(leaf));
+    CHECK_EQUAL(cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type>(nullptr), leaf->key());
   }
 
-  CHECK_EQUAL(elems, fixture::read_all_from_leaf(leaf));
-}
+  TEST_FIXTURE(tree_fixture, append_first_element) {
+    write_empty_leaf(0);
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    const auto new_elem = cycle_ptr::allocate_cycle<loader_value_type>(leaf->get_allocator(), string_value_type("val"));
 
-TEST_FIXTURE(fixture, read_back_empty) {
-  write_empty_leaf(0);
+    auto tx = txfile_begin(false);
+    tree::leaf::link(leaf, new_elem, nullptr, tx);
 
-  CHECK_EQUAL(std::vector<std::string>(), fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
-}
+    // Element doesn't appear until commit is called.
+    CHECK_EQUAL(0, tree::leaf::size(leaf));
+    CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(leaf));
 
-TEST_FIXTURE(fixture, read_back) {
-  const std::vector<std::string> elems{ "1", "2", "3", "4" };
-  write_leaf(0, elems);
+    // Nothing is written to disk yet.
+    {
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      CHECK_EQUAL(0, tree::leaf::size(uncached_leaf));
+      CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(uncached_leaf));
+    }
 
-  CHECK_EQUAL(elems, fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
-}
+    tx.commit();
+    CHECK_EQUAL(1, tree::leaf::size(leaf));
+    CHECK_EQUAL(std::vector<std::string>{ "val" }, read_all_from_leaf(leaf));
 
-TEST_FIXTURE(fixture, erase) {
-  auto key1 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("1"));
-  auto key2 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("2"));
-  auto key3 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("3"));
-  auto key4 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("4"));
+    // Key of the page is unchanged.
+    CHECK_EQUAL(cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type>(nullptr), leaf->key());
 
-  leaf::unique_lock_ptr leaf(
-      write_leaf(0, std::vector<cycle_ptr::cycle_gptr<mock_loader::value_type>>{ key1, key2, key3, key4 }));
-  auto tx = file.begin(false);
-  leaf::unlink(leaf, key2, tx);
+    // Changes have been committed to disk.
+    {
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      CHECK_EQUAL(1, tree::leaf::size(uncached_leaf));
+      CHECK_EQUAL(std::vector<std::string>{ "val" }, read_all_from_leaf(uncached_leaf));
+    }
+  }
 
-  // Unlink operation won't take effect until commited.
-  CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), fixture::read_all_from_leaf(leaf));
-  tx.commit();
+  TEST_FIXTURE(tree_fixture, append_many_elements) {
+    const std::vector<std::string> elems{ "1", "2", "3", "4" };
+    write_empty_leaf(0);
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
 
-  // key2 was deleted.
-  CHECK_EQUAL((std::vector<std::string>{ "1", "3", "4" }), fixture::read_all_from_leaf(leaf));
-}
+    for (const auto& new_elem : elems) {
+      auto tx = txfile_begin(false);
+      tree::leaf::link(leaf, cycle_ptr::allocate_cycle<loader_value_type>(leaf->get_allocator(), string_value_type(new_elem)), nullptr, tx);
+      tx.commit();
+    }
 
-TEST_FIXTURE(fixture, read_back_erase) {
-  {
-    auto key1 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("1"));
-    auto key2 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("2"));
-    auto key3 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("3"));
-    auto key4 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("4"));
+    CHECK_EQUAL(elems.size(), tree::leaf::size(leaf));
+    CHECK_EQUAL(elems, read_all_from_leaf(leaf));
 
-    leaf::unique_lock_ptr leaf(
-        write_leaf(0, std::vector<cycle_ptr::cycle_gptr<mock_loader::value_type>>{ key1, key2, key3, key4 }));
-    auto tx = file.begin(false);
-    leaf::unlink(leaf, key2, tx);
+    // Changes have been committed to disk.
+    {
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      CHECK_EQUAL(elems.size(), tree::leaf::size(uncached_leaf));
+      CHECK_EQUAL(elems, read_all_from_leaf(uncached_leaf));
+    }
+  }
+
+  TEST_FIXTURE(tree_fixture, erase_front) {
+    auto key1 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("1"));
+    auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
+    auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
+    auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
+    write_leaf(0, { key1, key2, key3, key4 });
+
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    auto tx = txfile_begin(false);
+    tree::leaf::unlink(leaf, key1, tx);
 
     // Unlink operation won't take effect until commited.
-    CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), fixture::read_all_from_leaf(leaf));
+    CHECK_EQUAL(4, tree::leaf::size(leaf));
+    CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(leaf));
+
+    // Nothing is written to disk yet.
+    {
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      CHECK_EQUAL(4, tree::leaf::size(uncached_leaf));
+      CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_leaf));
+    }
+
     tx.commit();
+
+    // key1 was deleted.
+    CHECK_EQUAL(3, tree::leaf::size(leaf));
+    CHECK_EQUAL((std::vector<std::string>{ "2", "3", "4" }), read_all_from_leaf(leaf));
+
+    // Changes have been committed to disk.
+    {
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      CHECK_EQUAL(3, tree::leaf::size(uncached_leaf));
+      CHECK_EQUAL((std::vector<std::string>{ "2", "3", "4" }), read_all_from_leaf(uncached_leaf));
+    }
   }
 
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "1", "3", "4" }),
-      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
-}
+  TEST_FIXTURE(tree_fixture, erase_middle) {
+    auto key1 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("1"));
+    auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
+    auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
+    auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
+    write_leaf(0, { key1, key2, key3, key4 });
 
-TEST_FIXTURE(fixture, merge) {
-  auto key1 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("1"));
-  auto key2 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("2"));
-  auto key3 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("3"));
-  auto key4 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("4"));
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    auto tx = txfile_begin(false);
+    tree::leaf::unlink(leaf, key2, tx);
 
-  leaf::unique_lock_ptr first(
-      write_leaf(0, std::vector<cycle_ptr::cycle_gptr<mock_loader::value_type>>{ key1, key2 }));
-  leaf::unique_lock_ptr second(
-      write_leaf(leaf_bytes(), std::vector<cycle_ptr::cycle_gptr<mock_loader::value_type>>{ key3, key4 }));
+    // Unlink operation won't take effect until commited.
+    CHECK_EQUAL(4, tree::leaf::size(leaf));
+    CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(leaf));
 
-  auto tx = file.begin(false);
-  leaf::merge(*loader, first, second, tx);
+    // Nothing is written to disk yet.
+    {
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      CHECK_EQUAL(4, tree::leaf::size(uncached_leaf));
+      CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_leaf));
+    }
 
-  // No change is seen until transaction commit.
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "1", "2" }),
-      fixture::read_all_from_leaf(first));
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "3", "4" }),
-      fixture::read_all_from_leaf(second));
+    tx.commit();
 
-  tx.commit();
+    // key2 was deleted.
+    CHECK_EQUAL(3, tree::leaf::size(leaf));
+    CHECK_EQUAL((std::vector<std::string>{ "1", "3", "4" }), read_all_from_leaf(leaf));
 
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "1", "2", "3", "4" }),
-      fixture::read_all_from_leaf(first));
-  CHECK_EQUAL(
-      std::vector<std::string>(),
-      fixture::read_all_from_leaf(second));
+    // Changes have been committed to disk.
+    {
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      CHECK_EQUAL(3, tree::leaf::size(uncached_leaf));
+      CHECK_EQUAL((std::vector<std::string>{ "1", "3", "4" }), read_all_from_leaf(uncached_leaf));
+    }
+  }
 
-  // Read-back test.
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "1", "2", "3", "4" }),
-      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
-  CHECK_EQUAL(
-      cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type>(nullptr),
-      load_leaf(0)->key());
+  TEST_FIXTURE(tree_fixture, erase_back) {
+    auto key1 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("1"));
+    auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
+    auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
+    auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
+    write_leaf(0, { key1, key2, key3, key4 });
 
-  CHECK_EQUAL(
-      std::vector<std::string>(),
-      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(leaf_bytes()))));
-}
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    auto tx = txfile_begin(false);
+    tree::leaf::unlink(leaf, key4, tx);
 
-TEST_FIXTURE(fixture, split) {
-  const auto key1 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("1"));
-  const auto key2 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("2"));
-  const auto key3 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("3"));
-  const auto key4 = cycle_ptr::make_cycle<mock_loader::value_type>(string_value_type("4"));
+    // Unlink operation won't take effect until commited.
+    CHECK_EQUAL(4, tree::leaf::size(leaf));
+    CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(leaf));
 
-  leaf::unique_lock_ptr first(
-      write_leaf(0, std::vector<cycle_ptr::cycle_gptr<mock_loader::value_type>>{ key1, key2, key3, key4 }));
-  leaf::unique_lock_ptr second(
-      write_empty_leaf(leaf_bytes()));
+    // Nothing is written to disk yet.
+    {
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      CHECK_EQUAL(4, tree::leaf::size(uncached_leaf));
+      CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_leaf));
+    }
 
-  auto tx = file.begin(false);
-  leaf::split(*loader, first, second, tx);
+    tx.commit();
 
-  // No change is seen until transaction commit.
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "1", "2", "3", "4" }),
-      fixture::read_all_from_leaf(first));
-  CHECK_EQUAL(
-      std::vector<std::string>(),
-      fixture::read_all_from_leaf(second));
+    // key4 was deleted.
+    CHECK_EQUAL(3, tree::leaf::size(leaf));
+    CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3" }), read_all_from_leaf(leaf));
 
-  tx.commit();
+    // Changes have been committed to disk.
+    {
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      CHECK_EQUAL(3, tree::leaf::size(uncached_leaf));
+      CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3" }), read_all_from_leaf(uncached_leaf));
+    }
+  }
 
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "1", "2" }),
-      fixture::read_all_from_leaf(first));
-  CHECK_EQUAL(
-      cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type>(nullptr),
-      first->key());
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "3", "4" }),
-      fixture::read_all_from_leaf(second));
-  CHECK_EQUAL(
-      "3",
-      key_type_cast(second->key()));
+  TEST_FIXTURE(tree_fixture, merge) {
+    auto key1 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("1"));
+    auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
+    auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
+    auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
+    write_leaf(0, { key1, key2 });
+    write_leaf(leaf_bytes(), { key3, key4 });
 
-  // Read-back test.
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "1", "2" }),
-      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(0))));
-  CHECK_EQUAL(
-      cycle_ptr::cycle_gptr<const earnest::detail::tree::key_type>(nullptr),
-      load_leaf(0)->key());
-  CHECK_EQUAL(
-      (std::vector<std::string>{ "3", "4" }),
-      fixture::read_all_from_leaf(leaf::shared_lock_ptr(load_leaf(leaf_bytes()))));
-  CHECK_EQUAL(
-      "3",
-      key_type_cast(load_leaf(leaf_bytes())->key()));
-}
+    tree::leaf::unique_lock_ptr first(load_page_from_disk<tree::leaf>(0));
+    tree::leaf::unique_lock_ptr second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+    auto tx = txfile_begin(false);
+    tree::leaf::merge(tree, first, second, tx);
+
+    // No change is seen until transaction commit.
+    CHECK_EQUAL(2, tree::leaf::size(first));
+    CHECK_EQUAL(2, tree::leaf::size(second));
+    CHECK_EQUAL((std::vector<std::string>{ "1", "2" }), read_all_from_leaf(first));
+    CHECK_EQUAL((std::vector<std::string>{ "3", "4" }), read_all_from_leaf(second));
+
+    // Nothing is written to disk yet.
+    {
+      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+      CHECK_EQUAL(2, tree::leaf::size(uncached_first));
+      CHECK_EQUAL(2, tree::leaf::size(uncached_second));
+      CHECK_EQUAL((std::vector<std::string>{ "1", "2" }), read_all_from_leaf(uncached_first));
+      CHECK_EQUAL((std::vector<std::string>{ "3", "4" }), read_all_from_leaf(uncached_second));
+    }
+
+    tx.commit();
+
+    // Everything was merged into the first page.
+    CHECK_EQUAL(4, tree::leaf::size(first));
+    CHECK_EQUAL(0, tree::leaf::size(second));
+    CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(first));
+    CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(second));
+
+    // Changes have been committed to disk.
+    {
+      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+      CHECK_EQUAL(4, tree::leaf::size(uncached_first));
+      CHECK_EQUAL(0, tree::leaf::size(uncached_second));
+      CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_first));
+      CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(uncached_second));
+    }
+  }
+
+  TEST_FIXTURE(tree_fixture, split) {
+    auto key1 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("1"));
+    auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
+    auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
+    auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
+    write_leaf(0, { key1, key2, key3, key4 });
+    write_empty_leaf(leaf_bytes());
+
+    tree::leaf::unique_lock_ptr first(load_page_from_disk<tree::leaf>(0));
+    tree::leaf::unique_lock_ptr second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+    auto tx = txfile_begin(false);
+    tree::leaf::split(tree, first, second, tx);
+
+    // No change is seen until transaction commit.
+    CHECK_EQUAL(4, tree::leaf::size(first));
+    CHECK_EQUAL(0, tree::leaf::size(second));
+    CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(first));
+    CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(second));
+
+    // Nothing is written to disk yet.
+    {
+      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+      CHECK_EQUAL(4, tree::leaf::size(uncached_first));
+      CHECK_EQUAL(0, tree::leaf::size(uncached_second));
+      CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_first));
+      CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(uncached_second));
+    }
+
+    tx.commit();
+
+    // Some elements from the first page are now in the second page.
+    CHECK_EQUAL(2, tree::leaf::size(first));
+    CHECK_EQUAL(2, tree::leaf::size(second));
+    CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(first));
+    CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(second));
+
+    // Key has been set.
+    CHECK_EQUAL("3", boost::polymorphic_pointer_downcast<const loader_key_type>(second->key())->key.value);
+
+    // Changes have been committed to disk.
+    {
+      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+      CHECK_EQUAL(2, tree::leaf::size(uncached_first));
+      CHECK_EQUAL(2, tree::leaf::size(uncached_second));
+      CHECK_EQUAL((std::vector<std::string>{ "1", "2" }), read_all_from_leaf(uncached_first));
+      CHECK_EQUAL((std::vector<std::string>{ "3", "4" }), read_all_from_leaf(uncached_second));
+
+      // Key has been set.
+      CHECK_EQUAL("3", boost::polymorphic_pointer_downcast<const loader_key_type>(uncached_second->key())->key.value);
+    }
+  }
 
 } /* SUITE(leaf) */
+
 
 int main() {
   return UnitTest::RunAllTests();

@@ -2,6 +2,7 @@
 #include <earnest/detail/tree/leaf.h>
 #include <earnest/detail/tree/page.h>
 #include <earnest/detail/tree/value_type.h>
+#include <earnest/detail/tree/ops.h>
 #include <boost/polymorphic_pointer_cast.hpp>
 
 #include <cassert>
@@ -13,7 +14,7 @@ namespace earnest::detail::tree {
 
 auto leaf_iterator::operator++() -> leaf_iterator& {
   assert(value_ptr_ != nullptr);
-  assert(loader_ != nullptr);
+  assert(tree_ != nullptr);
 
   // Helper function.
   const auto seek_forward = [](value_type::shared_lock_ptr& cur_lck) -> value_type::shared_lock_ptr {
@@ -61,8 +62,7 @@ auto leaf_iterator::operator++() -> leaf_iterator& {
 
     // Load the next page.
     parent_page = leaf::shared_lock_ptr(
-        boost::polymorphic_pointer_downcast<leaf>(
-            abstract_page::load_from_disk(parent_page->successor_off_, *loader_)));
+        ops::load_page<leaf>(tree_, parent_page->successor_off_));
 
     // Seek in the next page.
     cur_lck = value_type::shared_lock_ptr(parent_page->head_sentinel_);
@@ -77,7 +77,7 @@ auto leaf_iterator::operator++() -> leaf_iterator& {
 
 auto leaf_iterator::operator--() -> leaf_iterator& {
   assert(value_ptr_ != nullptr);
-  assert(loader_ != nullptr);
+  assert(tree_ != nullptr);
 
   // Seeking backward, using pointer-and-locks logic.
   const auto seek_backward = [](const cycle_ptr::cycle_gptr<const value_type>& start) -> std::tuple<value_type::shared_lock_ptr, value_type::shared_lock_ptr> {
@@ -157,8 +157,7 @@ restart_search:
       leaf::shared_lock_ptr pred_page;
       do {
         pred_page = leaf::shared_lock_ptr(
-            boost::polymorphic_pointer_downcast<leaf>(
-                abstract_page::load_from_disk(parent_page->predecessor_off_, *loader_)),
+            ops::load_page<leaf>(tree_, parent_page->predecessor_off_),
             std::try_to_lock);
         if (!pred_page.owns_lock()) {
           parent_page.unlock();

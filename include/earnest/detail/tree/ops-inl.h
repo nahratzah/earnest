@@ -11,6 +11,7 @@
 #include <boost/asio/write_at.hpp>
 #include <boost/polymorphic_pointer_cast.hpp>
 #include <cassert>
+#include <memory>
 
 namespace earnest::detail::tree {
 
@@ -30,7 +31,7 @@ auto ops::split_child_page_(
   [[maybe_unused]] auto dbc_val = f->obj_cache()->get(
       f->loader->allocate_disk_space(tx, child->bytes_per_page_()),
       f,
-      [&sibling, &tx, &self, &child, loader=f->loader.get()](db_cache::allocator_type alloc, txfile::transaction::offset_type sibling_offset) -> cycle_ptr::cycle_gptr<Child> {
+      [&f, &sibling, &tx, &self, &child, loader=f->loader.get()](db_cache::allocator_type alloc, txfile::transaction::offset_type sibling_offset) -> cycle_ptr::cycle_gptr<Child> {
         // Remember constants.
         const auto bytes_per_augmented_page_ref = self->bytes_per_augmented_page_ref_();
         const auto bytes_per_key = self->bytes_per_key_();
@@ -44,7 +45,7 @@ auto ops::split_child_page_(
         sibling = unique_lock_ptr<cycle_ptr::cycle_gptr<Child>>(abstract_page::allocate_page<Child>(child->cfg, alloc));
         sibling->offset = loader->allocate_disk_space(tx, sibling_offset);
 
-        cycle_ptr::cycle_gptr<const key_type> key = Child::split(*loader, child, sibling, tx);
+        cycle_ptr::cycle_gptr<const key_type> key = Child::split(f, child, sibling, tx);
 
         // Compute augmentation for sibling.
         cycle_ptr::cycle_gptr<augmented_page_ref> sibling_pgref = loader->allocate_augmented_page_ref(*sibling, sibling->get_allocator());
@@ -129,6 +130,43 @@ auto ops::split_child_page_(
 
   assert(dbc_val == sibling.mutex());
   return sibling;
+}
+
+template<typename BranchPageSel>
+auto ops::begin_end_leaf_(
+    const shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>& f,
+    BranchPageSel&& branch_page_sel)
+-> shared_lock_ptr<cycle_ptr::cycle_gptr<const leaf>> {
+  assert(f.owns_lock());
+
+  // XXX maybe throw an exception
+  assert(f->root_page_ != 0);
+
+  shared_lock_ptr<cycle_ptr::cycle_gptr<const abstract_page>> locked_page(load_page_(f.mutex(), f->root_page_));
+  for (;;) {
+    const auto locked_branch = dynamic_cast<const branch*>(std::addressof(*locked_page));
+    if (locked_branch == nullptr) break; // Must be a leaf.
+    locked_page = shared_lock_ptr<cycle_ptr::cycle_gptr<const abstract_page>>(
+        load_page_(f.mutex(), branch_page_sel(locked_branch->pages_)->offset()));
+  }
+
+  shared_lock_ptr<cycle_ptr::cycle_gptr<const leaf>> locked_leaf(
+      boost::polymorphic_pointer_downcast<const leaf>(locked_page.mutex()),
+      std::adopt_lock);
+  locked_page.release(); // Because adopt-lock above.
+
+  return locked_leaf;
+}
+
+template<typename Page>
+inline auto ops::load_page(
+    const cycle_ptr::cycle_gptr<const basic_tree>& f,
+    std::uint64_t offset)
+-> std::enable_if_t<std::is_base_of_v<abstract_page, std::remove_const_t<Page>>, cycle_ptr::cycle_gptr<Page>> {
+  if constexpr(std::is_same_v<abstract_page, std::remove_const_t<Page>>)
+    return load_page_(f, offset);
+  else
+    return boost::polymorphic_pointer_downcast<Page>(load_page_(f, offset));
 }
 
 

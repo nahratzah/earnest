@@ -4,8 +4,8 @@
 namespace earnest::detail::tree {
 
 
-inline leaf_iterator::leaf_iterator(cycle_ptr::cycle_gptr<const loader> loader, cycle_ptr::cycle_gptr<const value_type> value_ptr) noexcept
-: loader_(std::move(loader)),
+inline leaf_iterator::leaf_iterator(cycle_ptr::cycle_gptr<const basic_tree> tree, cycle_ptr::cycle_gptr<const value_type> value_ptr) noexcept
+: tree_(std::move(tree)),
   value_ptr_(std::move(value_ptr))
 {}
 
@@ -53,10 +53,6 @@ inline auto leaf_iterator::ptr() && noexcept -> cycle_ptr::cycle_gptr<const valu
   return std::move(value_ptr_);
 }
 
-
-inline reverse_leaf_iterator::reverse_leaf_iterator(cycle_ptr::cycle_gptr<const loader> loader, cycle_ptr::cycle_gptr<const value_type> value_ptr) noexcept
-: base_(std::move(loader), std::move(value_ptr))
-{}
 
 inline reverse_leaf_iterator::reverse_leaf_iterator(const leaf_iterator& base) noexcept
 : base_(base)

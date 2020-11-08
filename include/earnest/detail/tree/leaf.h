@@ -6,6 +6,7 @@
 #include <shared_mutex>
 #include <system_error>
 #include <tuple>
+#include <memory>
 
 #include <boost/asio/buffer.hpp>
 #include <boost/system/error_code.hpp>
@@ -56,7 +57,7 @@ class earnest_export_ leaf final
    * \param[in,out] back The second page that is being merged.
    * \param[out] tx Transaction.
    */
-  static void merge(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx);
+  static void merge(const cycle_ptr::cycle_gptr<basic_tree>& tree, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx);
   /**
    * \brief Split into two pages.
    * \details Moves some elements from \p front into \p back.
@@ -66,7 +67,7 @@ class earnest_export_ leaf final
    * \param[out] tx Transaction.
    * \return The key of the back page.
    */
-  static auto split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx)
+  static auto split(const cycle_ptr::cycle_gptr<basic_tree>& tree, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx)
   -> cycle_ptr::cycle_gptr<const key_type>;
 
   /**
@@ -103,12 +104,12 @@ class earnest_export_ leaf final
   ///\note No lock required: key is only modified during decoding phase.
   auto key() const -> cycle_ptr::cycle_gptr<const key_type>;
 
-  static auto before_begin(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator;
-  static auto before_begin(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator;
-  static auto begin(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator;
-  static auto begin(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator;
-  static auto end(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator;
-  static auto end(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator;
+  static auto before_begin(cycle_ptr::cycle_gptr<const basic_tree> tree, const shared_lock_ptr& self) -> leaf_iterator;
+  static auto before_begin(cycle_ptr::cycle_gptr<const basic_tree> tree, const unique_lock_ptr& self) -> leaf_iterator;
+  static auto begin(cycle_ptr::cycle_gptr<const basic_tree> tree, const shared_lock_ptr& self) -> leaf_iterator;
+  static auto begin(cycle_ptr::cycle_gptr<const basic_tree> tree, const unique_lock_ptr& self) -> leaf_iterator;
+  static auto end(cycle_ptr::cycle_gptr<const basic_tree> tree, const shared_lock_ptr& self) -> leaf_iterator;
+  static auto end(cycle_ptr::cycle_gptr<const basic_tree> tree, const unique_lock_ptr& self) -> leaf_iterator;
 
   private:
   earnest_local_ static auto lock_elem_with_siblings_(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem)

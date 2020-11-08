@@ -3,6 +3,7 @@
 #include <earnest/detail/tree/key_type.h>
 #include <earnest/detail/tree/loader.h>
 #include <earnest/detail/tree/leaf_iterator.h>
+#include <earnest/detail/tree/ops.h>
 #include <algorithm>
 #include <cassert>
 #include <deque>
@@ -97,7 +98,7 @@ leaf::leaf(std::shared_ptr<const struct cfg> tree_config, allocator_type alloc)
 
 leaf::~leaf() noexcept = default;
 
-void leaf::merge(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) {
+void leaf::merge(const cycle_ptr::cycle_gptr<basic_tree>& tree, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) {
   using moved_vector_t = std::vector<value_type::unique_lock_ptr, shared_resource_allocator<value_type::unique_lock_ptr>>;
 
   assert(front.owns_lock() && back.owns_lock());
@@ -114,8 +115,7 @@ void leaf::merge(const loader& loader, const unique_lock_ptr& front, const uniqu
   unique_lock_ptr back_successor;
   if (back->successor_off_ != 0) {
     back_successor = unique_lock_ptr(
-        boost::polymorphic_pointer_downcast<leaf>(
-            load_from_disk(back->successor_off_, loader)));
+        ops::load_page<leaf>(tree, back->successor_off_));
   }
 
   index_type next_idx = 0;
@@ -254,7 +254,7 @@ void leaf::merge(const loader& loader, const unique_lock_ptr& front, const uniqu
   }
 }
 
-auto leaf::split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) -> cycle_ptr::cycle_gptr<const key_type> {
+auto leaf::split(const cycle_ptr::cycle_gptr<basic_tree>& tree, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx) -> cycle_ptr::cycle_gptr<const key_type> {
   assert(front.owns_lock() && back.owns_lock());
   assert(front.mutex() != back.mutex());
   assert(front->cfg == back->cfg);
@@ -276,8 +276,7 @@ auto leaf::split(const loader& loader, const unique_lock_ptr& front, const uniqu
   unique_lock_ptr back_successor;
   if (back->successor_off_ != 0) {
     back_successor = unique_lock_ptr(
-        boost::polymorphic_pointer_downcast<leaf>(
-            load_from_disk(back->successor_off_, loader)));
+        ops::load_page<leaf>(tree, back->successor_off_));
   }
 
   value_type::unique_lock_ptr f_head_sentinel(front->head_sentinel_);
@@ -304,7 +303,7 @@ auto leaf::split(const loader& loader, const unique_lock_ptr& front, const uniqu
         boost::asio::buffer(elem_buffer));
   }
 
-  cycle_ptr::cycle_gptr<const key_type> back_key = loader.allocate_key(*moved.front(), back->get_allocator());
+  cycle_ptr::cycle_gptr<const key_type> back_key = tree->loader->allocate_key(*moved.front(), back->get_allocator());
   if (back_key == nullptr) throw std::logic_error("unable to extract key from value tpye");
   {
     header h;
@@ -636,36 +635,36 @@ void leaf::link(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> e
       });
 }
 
-auto leaf::before_begin(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator {
+auto leaf::before_begin(cycle_ptr::cycle_gptr<const basic_tree> tree, const shared_lock_ptr& self) -> leaf_iterator {
   assert(self.owns_lock());
-  return leaf_iterator(std::move(loader), self->head_sentinel_);
+  return leaf_iterator(std::move(tree), self->head_sentinel_);
 }
 
-auto leaf::before_begin(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator {
+auto leaf::before_begin(cycle_ptr::cycle_gptr<const basic_tree> tree, const unique_lock_ptr& self) -> leaf_iterator {
   assert(self.owns_lock());
-  return leaf_iterator(std::move(loader), self->head_sentinel_);
+  return leaf_iterator(std::move(tree), self->head_sentinel_);
 }
 
-auto leaf::begin(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator {
+auto leaf::begin(cycle_ptr::cycle_gptr<const basic_tree> tree, const shared_lock_ptr& self) -> leaf_iterator {
   assert(self.owns_lock());
   value_type::shared_lock_ptr sentinel(self->head_sentinel_);
-  return leaf_iterator(std::move(loader), sentinel->succ_);
+  return leaf_iterator(std::move(tree), sentinel->succ_);
 }
 
-auto leaf::begin(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator {
+auto leaf::begin(cycle_ptr::cycle_gptr<const basic_tree> tree, const unique_lock_ptr& self) -> leaf_iterator {
   assert(self.owns_lock());
   value_type::shared_lock_ptr sentinel(self->head_sentinel_);
-  return leaf_iterator(std::move(loader), sentinel->succ_);
+  return leaf_iterator(std::move(tree), sentinel->succ_);
 }
 
-auto leaf::end(cycle_ptr::cycle_gptr<const loader> loader, const shared_lock_ptr& self) -> leaf_iterator {
+auto leaf::end(cycle_ptr::cycle_gptr<const basic_tree> tree, const shared_lock_ptr& self) -> leaf_iterator {
   assert(self.owns_lock());
-  return leaf_iterator(std::move(loader), self->tail_sentinel_);
+  return leaf_iterator(std::move(tree), self->tail_sentinel_);
 }
 
-auto leaf::end(cycle_ptr::cycle_gptr<const loader> loader, const unique_lock_ptr& self) -> leaf_iterator {
+auto leaf::end(cycle_ptr::cycle_gptr<const basic_tree> tree, const unique_lock_ptr& self) -> leaf_iterator {
   assert(self.owns_lock());
-  return leaf_iterator(std::move(loader), self->tail_sentinel_);
+  return leaf_iterator(std::move(tree), self->tail_sentinel_);
 }
 
 auto leaf::lock_elem_with_siblings_(const unique_lock_ptr& self, cycle_ptr::cycle_gptr<value_type> elem) -> std::tuple<value_type::unique_lock_ptr, value_type::unique_lock_ptr, value_type::unique_lock_ptr> {

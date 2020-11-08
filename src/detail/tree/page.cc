@@ -7,7 +7,6 @@
 #include <boost/endian/conversion.hpp>
 #include <boost/asio/error.hpp>
 #include <boost/system/error_code.hpp>
-#include <boost/system/system_error.hpp>
 #include <cassert>
 
 namespace earnest::detail::tree {
@@ -51,20 +50,6 @@ auto abstract_page::decode(
 
   page->decode_(loader, tx, off, ec);
   return page;
-}
-
-auto abstract_page::load_from_disk(
-    offset_type off,
-    const loader& loader)
--> cycle_ptr::cycle_gptr<abstract_page> {
-  return loader.load_from_disk<abstract_page>(
-      off,
-      [&loader](db_cache::allocator_type alloc, std::shared_ptr<const struct cfg> tree_config, const txfile::transaction& tx, txfile::transaction::offset_type off) -> cycle_ptr::cycle_gptr<abstract_page> {
-        boost::system::error_code ec;
-        auto page_ptr = decode(loader, std::move(tree_config), tx, off, std::move(alloc), ec);
-        if (ec) throw boost::system::error_code(ec);
-        return page_ptr;
-      });
 }
 
 

@@ -3,6 +3,7 @@
 #include <earnest/detail/tree/loader.h>
 #include <earnest/detail/tree/augmented_page_ref.h>
 #include <earnest/detail/tree/key_type.h>
+#include <earnest/detail/tree/ops.h>
 #include <algorithm>
 #include <iterator>
 #include <string>
@@ -42,7 +43,7 @@ branch::branch(std::shared_ptr<const struct cfg> tree_config, allocator_type all
 
 branch::~branch() noexcept = default;
 
-void branch::merge(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx, cycle_ptr::cycle_gptr<const key_type> separator_key) {
+void branch::merge(const cycle_ptr::cycle_gptr<basic_tree>& tree, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx, cycle_ptr::cycle_gptr<const key_type> separator_key) {
   assert(front.owns_lock() && back.owns_lock());
   assert(front.mutex() != back.mutex());
   assert(front->cfg == back->cfg);
@@ -125,7 +126,7 @@ void branch::merge(const loader& loader, const unique_lock_ptr& front, const uni
   std::vector<earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<abstract_page>>, shared_resource_allocator<earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<abstract_page>>>> moved_children(tx.get_allocator());
   for (const auto& pgref : back->pages_) {
     moved_children.emplace_back(
-        abstract_page::load_from_disk(pgref->offset(), loader));
+        ops::load_page(tree, pgref->offset()));
   }
   // Update parent pointers of moved pages.
   std::vector<txfile::transaction::offset_type> offsets;
@@ -170,7 +171,7 @@ void branch::merge(const loader& loader, const unique_lock_ptr& front, const uni
       });
 }
 
-auto branch::split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx)
+auto branch::split(const cycle_ptr::cycle_gptr<basic_tree>& tree, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx)
 -> cycle_ptr::cycle_gptr<const key_type> {
   assert(front.owns_lock() && back.owns_lock());
   assert(front.mutex() != back.mutex());
@@ -249,7 +250,7 @@ auto branch::split(const loader& loader, const unique_lock_ptr& front, const uni
       pgref_iter != front->pages_.cend();
       ++pgref_iter) {
     moved_children.emplace_back(
-        abstract_page::load_from_disk((*pgref_iter)->offset(), loader));
+        ops::load_page(tree, (*pgref_iter)->offset()));
   }
   // Update parent pointers of moved pages.
   std::vector<txfile::transaction::offset_type> offsets;

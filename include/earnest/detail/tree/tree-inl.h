@@ -37,6 +37,11 @@ inline tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::tx_object(
 : impl_(*this, tx.on(tree.impl_))
 {}
 
+template<typename KeyType, typename ValueType, typename... Augments>
+inline auto tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::empty() const -> bool {
+  return impl_->empty() || begin() == end();
+}
+
 
 } /* namespace earnest::detail::tree */
 

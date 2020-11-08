@@ -11,7 +11,7 @@ namespace earnest::detail::tree {
 class earnest_export_ leaf_iterator {
   public:
   leaf_iterator() = default;
-  leaf_iterator(cycle_ptr::cycle_gptr<const loader> loader, cycle_ptr::cycle_gptr<const value_type> value_ptr) noexcept;
+  leaf_iterator(cycle_ptr::cycle_gptr<const basic_tree> tree, cycle_ptr::cycle_gptr<const value_type> value_ptr) noexcept;
   explicit leaf_iterator(const reverse_leaf_iterator&) noexcept;
   explicit leaf_iterator(reverse_leaf_iterator&&) noexcept;
 
@@ -31,7 +31,7 @@ class earnest_export_ leaf_iterator {
   auto ptr() && noexcept -> cycle_ptr::cycle_gptr<const value_type>&&;
 
   private:
-  cycle_ptr::cycle_gptr<const loader> loader_;
+  cycle_ptr::cycle_gptr<const basic_tree> tree_;
   cycle_ptr::cycle_gptr<const value_type> value_ptr_;
 };
 
@@ -40,7 +40,6 @@ class reverse_leaf_iterator {
 
   public:
   reverse_leaf_iterator() = default;
-  reverse_leaf_iterator(cycle_ptr::cycle_gptr<const loader> loader, cycle_ptr::cycle_gptr<const value_type> value_ptr) noexcept;
   explicit reverse_leaf_iterator(const leaf_iterator&) noexcept;
   explicit reverse_leaf_iterator(leaf_iterator&&) noexcept;
 

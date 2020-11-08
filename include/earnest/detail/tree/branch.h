@@ -61,7 +61,7 @@ class earnest_export_ branch final
    * \param[in,out] back The second page that is being merged.
    * \param[out] tx Transaction.
    */
-  static void merge(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx, cycle_ptr::cycle_gptr<const key_type> separator_key);
+  static void merge(const cycle_ptr::cycle_gptr<basic_tree>& tree, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx, cycle_ptr::cycle_gptr<const key_type> separator_key);
   /**
    * \brief Split into two pages.
    * \details Moves some elements from \p front into \p back.
@@ -71,7 +71,7 @@ class earnest_export_ branch final
    * \param[out] tx Transaction.
    * \return The key of the back page.
    */
-  static auto split(const loader& loader, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx)
+  static auto split(const cycle_ptr::cycle_gptr<basic_tree>& tree, const unique_lock_ptr& front, const unique_lock_ptr& back, txfile::transaction& tx)
   -> cycle_ptr::cycle_gptr<const key_type>;
 
   /**
