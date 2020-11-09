@@ -59,6 +59,10 @@ class key_type_impl final
     key(std::move(key))
   {}
 
+  explicit key_type_impl(KeyType key)
+  : key_type_impl(std::move(key), allocator_type())
+  {}
+
   void encode(boost::asio::mutable_buffer buf) const override {
     key.encode(buf);
   }

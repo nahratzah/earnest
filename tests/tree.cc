@@ -216,8 +216,8 @@ class tree_fixture
     return offset;
   }
 
-  auto write_leaf(std::initializer_list<cycle_ptr::cycle_gptr<loader_value_type>> elems) -> std::uint64_t {
-    const auto offset = write_empty_leaf();
+  auto write_leaf(std::initializer_list<cycle_ptr::cycle_gptr<loader_value_type>> elems, cycle_ptr::cycle_gptr<const loader_key_type> key = nullptr) -> std::uint64_t {
+    const auto offset = write_empty_leaf(key);
 
     tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(offset));
     std::for_each(
@@ -476,7 +476,7 @@ SUITE(leaf) {
     auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
     auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
     const auto first_offset = write_leaf({ key1, key2 });
-    const auto second_offset = write_leaf({ key3, key4 });
+    const auto second_offset = write_leaf({ key3, key4 }, cycle_ptr::make_cycle<loader_key_type>(string_value_type("3")));
 
     tree::leaf::unique_lock_ptr first(load_page_from_disk<tree::leaf>(first_offset));
     tree::leaf::unique_lock_ptr second(load_page_from_disk<tree::leaf>(second_offset));
@@ -576,6 +576,7 @@ SUITE(leaf) {
   }
 
 } /* SUITE(leaf) */
+
 
 SUITE(branch) {
 
