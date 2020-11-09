@@ -193,7 +193,7 @@ void db::transaction_obj::rollback() noexcept {
 }
 
 
-auto db::transaction::visible(const cycle_ptr::cycle_gptr<tx_aware_data>& datum) const noexcept -> bool {
+auto db::transaction::visible(const cycle_ptr::cycle_gptr<const tx_aware_data>& datum) const noexcept -> bool {
   assert(datum != nullptr);
   if (deleted_set_.count(datum) > 0) return false;
   if (created_set_.count(datum) > 0) return true;
@@ -341,14 +341,14 @@ void db::transaction::commit_phase2_(const detail::commit_manager::commit_id& wr
   std::for_each(
       created_set_.begin(), created_set_.end(),
       [&write_id](const auto& datum_ptr) {
-        datum_ptr->set_created(write_id.val());
+        const_cast<tx_aware_data&>(*datum_ptr).set_created(write_id.val());
       });
 
   // In-memory: mark all deleted objects.
   std::for_each(
       deleted_set_.begin(), deleted_set_.end(),
       [&write_id](const auto& datum_ptr) {
-        datum_ptr->set_deleted(write_id.val());
+        const_cast<tx_aware_data&>(*datum_ptr).set_deleted(write_id.val());
       });
 
   // Run phase2 on each transaction object.

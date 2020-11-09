@@ -162,7 +162,7 @@ class earnest_export_ db::transaction {
   auto before(const transaction& other) const noexcept -> bool;
   auto after(const transaction& other) const noexcept -> bool;
   ///\brief Test if we can see the given \p datum.
-  auto visible(const cycle_ptr::cycle_gptr<tx_aware_data>& datum) const noexcept -> bool;
+  auto visible(const cycle_ptr::cycle_gptr<const tx_aware_data>& datum) const noexcept -> bool;
 
   void commit();
   void rollback() noexcept;
@@ -222,10 +222,10 @@ class earnest_export_ db::transaction {
   >;
 
   using tx_aware_data_set = std::unordered_set<
-      cycle_ptr::cycle_gptr<tx_aware_data>,
-      std::hash<cycle_ptr::cycle_gptr<tx_aware_data>>,
-      std::equal_to<cycle_ptr::cycle_gptr<tx_aware_data>>,
-      std::allocator_traits<allocator_type>::rebind_alloc<cycle_ptr::cycle_gptr<tx_aware_data>>
+      cycle_ptr::cycle_gptr<const tx_aware_data>,
+      std::hash<cycle_ptr::cycle_gptr<const tx_aware_data>>,
+      std::equal_to<cycle_ptr::cycle_gptr<const tx_aware_data>>,
+      std::allocator_traits<allocator_type>::rebind_alloc<cycle_ptr::cycle_gptr<const tx_aware_data>>
   >;
 
   detail::commit_manager::commit_id seq_;

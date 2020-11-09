@@ -118,13 +118,13 @@ inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::is_sentinel
 
 template<typename LeafIterator>
 inline void basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::seek_forward_until_valid_() {
-  while (!is_sentinel() && !(*this)->visible_in_tx(txo_->tx.seq()))
+  while (!is_sentinel() && !txo_->tx.visible(ptr()))
     ++iter_;
 }
 
 template<typename LeafIterator>
 inline void basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::seek_backward_until_valid_() {
-  while (!is_sentinel() && !(*this)->visible_in_tx(txo_->tx.seq()))
+  while (!is_sentinel() && !txo_->tx.visible(ptr()))
     --iter_;
 }
 
