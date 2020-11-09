@@ -10,6 +10,7 @@
 #include <boost/asio/write_at.hpp>
 #include <boost/system/error_code.hpp>
 #include <boost/system/system_error.hpp>
+#include <boost/endian/conversion.hpp>
 #include <cycle_ptr/cycle_ptr.h>
 #include <algorithm>
 #include <cstddef>
@@ -94,8 +95,22 @@ class db_fixture {
     return db_obj_exposition(db).txfile_begin();
   }
 
+  auto offset_advance(std::uint64_t bytes) -> std::uint64_t {
+    std::lock_guard<std::mutex> lck(offset_mtx_);
+
+    auto tx = txfile_begin(false);
+    if (tx.size() < offset_ + bytes) tx.resize(offset_ + bytes);
+    tx.commit();
+
+    return std::exchange(offset_, offset_ + bytes);
+  }
+
   boost::asio::io_context io_context;
   const std::shared_ptr<earnest::db> db;
+
+  private:
+  std::uint64_t offset_ = earnest::db::DB_HEADER_SIZE;
+  std::mutex offset_mtx_;
 };
 
 
@@ -142,6 +157,12 @@ class tree_fixture
     return tree::leaf::header::SIZE + tree->cfg->key_bytes + tree->cfg->items_per_leaf_page * tree->cfg->val_bytes;
   }
 
+  auto branch_bytes() const -> std::size_t {
+    return tree::branch::header::SIZE
+        + tree->cfg->items_per_node_page * (sizeof(std::uint64_t) + tree->cfg->augment_bytes)
+        + (tree->cfg->items_per_node_page - 1u) * tree->cfg->key_bytes;
+  }
+
   auto read_all_from_leaf(const tree::leaf::shared_lock_ptr& leaf) const -> std::vector<std::string> {
     std::vector<std::string> result;
     std::transform(
@@ -168,17 +189,35 @@ class tree_fixture
     return result;
   }
 
-  void write_empty_leaf(std::uint64_t offset) {
+  auto write_empty_leaf(cycle_ptr::cycle_gptr<const loader_key_type> key = nullptr) -> std::uint64_t {
+    const auto offset = offset_advance(leaf_bytes());
+
     auto tx = txfile_begin(false);
-    if (tx.size() < offset + leaf_bytes()) tx.resize(offset + leaf_bytes());
-    std::array<std::uint8_t, tree::leaf::header::SIZE> buf;
-    tree::leaf::header{ tree::leaf::magic, 0u, 0u, 0u, 0u }.encode(boost::asio::buffer(buf));
-    boost::asio::write_at(tx, 0, boost::asio::buffer(buf));
+    assert(tx.size() >= offset + leaf_bytes());
+    std::vector<std::uint8_t> buf(leaf_bytes(), std::uint8_t(0));
+    tree::leaf::header{ tree::leaf::magic, (key ? tree::leaf::header::flag_has_key : 0u), 0u, 0u, 0u }.encode(boost::asio::buffer(buf));
+    if (key) key->encode(boost::asio::buffer(buf) + tree::leaf::header::SIZE);
+    boost::asio::write_at(tx, offset, boost::asio::buffer(buf));
     tx.commit();
+
+    return offset;
   }
 
-  void write_leaf(std::uint64_t offset, std::initializer_list<cycle_ptr::cycle_gptr<loader_value_type>> elems) {
-    write_empty_leaf(offset);
+  auto write_empty_branch() -> std::uint64_t {
+    const auto offset = offset_advance(branch_bytes());
+
+    auto tx = txfile_begin(false);
+    assert(tx.size() >= offset + leaf_bytes());
+    std::vector<std::uint8_t> buf(branch_bytes(), std::uint8_t(0));
+    tree::branch::header{ tree::branch::magic, 0u, 0u }.encode(boost::asio::buffer(buf));
+    boost::asio::write_at(tx, offset, boost::asio::buffer(buf));
+    tx.commit();
+
+    return offset;
+  }
+
+  auto write_leaf(std::initializer_list<cycle_ptr::cycle_gptr<loader_value_type>> elems) -> std::uint64_t {
+    const auto offset = write_empty_leaf();
 
     tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(offset));
     std::for_each(
@@ -188,6 +227,46 @@ class tree_fixture
           tree::leaf::link(leaf, elem, nullptr, tx);
           tx.commit();
         });
+
+    return offset;
+  }
+
+  auto write_branch(std::initializer_list<cycle_ptr::cycle_gptr<const loader_key_type>> keys) -> std::uint64_t {
+    const auto offset = offset_advance(branch_bytes());
+
+    auto tx = txfile_begin(false);
+    assert(tx.size() >= offset + leaf_bytes());
+    std::vector<std::uint8_t> buf(branch_bytes(), std::uint8_t(0));
+    assert(keys.size() < 0xffff'ffffu);
+    tree::branch::header{ tree::branch::magic, static_cast<std::uint32_t>(keys.size() + 1u), 0u }.encode(boost::asio::buffer(buf));
+
+    auto wbuf = boost::asio::buffer(buf) + tree::branch::header::SIZE;
+    {
+      std::uint64_t child_offset = write_empty_leaf();
+      boost::endian::native_to_big_inplace(child_offset);
+      boost::asio::buffer_copy(
+          wbuf,
+          boost::asio::buffer(&child_offset, sizeof(child_offset)));
+      wbuf += sizeof(child_offset);
+    }
+    std::for_each(
+        keys.begin(), keys.end(),
+        [&wbuf, this](cycle_ptr::cycle_gptr<const loader_key_type> key) {
+          key->encode(wbuf);
+          wbuf += tree->cfg->key_bytes;
+
+          std::uint64_t child_offset = write_empty_leaf(key);
+          boost::endian::native_to_big_inplace(child_offset);
+          boost::asio::buffer_copy(
+              wbuf,
+              boost::asio::buffer(&child_offset, sizeof(child_offset)));
+          wbuf += sizeof(child_offset);
+        });
+
+    boost::asio::write_at(tx, offset, boost::asio::buffer(buf));
+    tx.commit();
+
+    return offset;
   }
 
   private:
@@ -217,9 +296,10 @@ class tree_fixture
 SUITE(leaf) {
 
   TEST_FIXTURE(tree_fixture, empty_page) {
-    write_empty_leaf(0);
-    tree::leaf::shared_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    const auto offset = write_empty_leaf();
+    tree::leaf::shared_lock_ptr leaf(load_page_from_disk<tree::leaf>(offset));
 
+    CHECK(tree::leaf::valid(leaf));
     CHECK_EQUAL(tree->cfg->items_per_leaf_page, leaf->max_size());
     CHECK_EQUAL(0, tree::leaf::size(leaf));
     CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(leaf));
@@ -227,8 +307,8 @@ SUITE(leaf) {
   }
 
   TEST_FIXTURE(tree_fixture, append_first_element) {
-    write_empty_leaf(0);
-    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    const auto offset = write_empty_leaf();
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(offset));
     const auto new_elem = cycle_ptr::allocate_cycle<loader_value_type>(leaf->get_allocator(), string_value_type("val"));
 
     auto tx = txfile_begin(false);
@@ -240,7 +320,7 @@ SUITE(leaf) {
 
     // Nothing is written to disk yet.
     {
-      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(offset));
       CHECK_EQUAL(0, tree::leaf::size(uncached_leaf));
       CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(uncached_leaf));
     }
@@ -254,7 +334,7 @@ SUITE(leaf) {
 
     // Changes have been committed to disk.
     {
-      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(offset));
       CHECK_EQUAL(1, tree::leaf::size(uncached_leaf));
       CHECK_EQUAL(std::vector<std::string>{ "val" }, read_all_from_leaf(uncached_leaf));
     }
@@ -262,8 +342,8 @@ SUITE(leaf) {
 
   TEST_FIXTURE(tree_fixture, append_many_elements) {
     const std::vector<std::string> elems{ "1", "2", "3", "4" };
-    write_empty_leaf(0);
-    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    const auto offset = write_empty_leaf();
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(offset));
 
     for (const auto& new_elem : elems) {
       auto tx = txfile_begin(false);
@@ -276,7 +356,7 @@ SUITE(leaf) {
 
     // Changes have been committed to disk.
     {
-      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(offset));
       CHECK_EQUAL(elems.size(), tree::leaf::size(uncached_leaf));
       CHECK_EQUAL(elems, read_all_from_leaf(uncached_leaf));
     }
@@ -287,9 +367,9 @@ SUITE(leaf) {
     auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
     auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
     auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
-    write_leaf(0, { key1, key2, key3, key4 });
+    const auto offset = write_leaf({ key1, key2, key3, key4 });
 
-    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(offset));
     auto tx = txfile_begin(false);
     tree::leaf::unlink(leaf, key1, tx);
 
@@ -299,7 +379,7 @@ SUITE(leaf) {
 
     // Nothing is written to disk yet.
     {
-      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(offset));
       CHECK_EQUAL(4, tree::leaf::size(uncached_leaf));
       CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_leaf));
     }
@@ -312,7 +392,7 @@ SUITE(leaf) {
 
     // Changes have been committed to disk.
     {
-      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(offset));
       CHECK_EQUAL(3, tree::leaf::size(uncached_leaf));
       CHECK_EQUAL((std::vector<std::string>{ "2", "3", "4" }), read_all_from_leaf(uncached_leaf));
     }
@@ -323,9 +403,9 @@ SUITE(leaf) {
     auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
     auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
     auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
-    write_leaf(0, { key1, key2, key3, key4 });
+    const auto offset = write_leaf({ key1, key2, key3, key4 });
 
-    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(offset));
     auto tx = txfile_begin(false);
     tree::leaf::unlink(leaf, key2, tx);
 
@@ -335,7 +415,7 @@ SUITE(leaf) {
 
     // Nothing is written to disk yet.
     {
-      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(offset));
       CHECK_EQUAL(4, tree::leaf::size(uncached_leaf));
       CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_leaf));
     }
@@ -348,7 +428,7 @@ SUITE(leaf) {
 
     // Changes have been committed to disk.
     {
-      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(offset));
       CHECK_EQUAL(3, tree::leaf::size(uncached_leaf));
       CHECK_EQUAL((std::vector<std::string>{ "1", "3", "4" }), read_all_from_leaf(uncached_leaf));
     }
@@ -359,9 +439,9 @@ SUITE(leaf) {
     auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
     auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
     auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
-    write_leaf(0, { key1, key2, key3, key4 });
+    const auto offset = write_leaf({ key1, key2, key3, key4 });
 
-    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(0));
+    tree::leaf::unique_lock_ptr leaf(load_page_from_disk<tree::leaf>(offset));
     auto tx = txfile_begin(false);
     tree::leaf::unlink(leaf, key4, tx);
 
@@ -371,7 +451,7 @@ SUITE(leaf) {
 
     // Nothing is written to disk yet.
     {
-      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(offset));
       CHECK_EQUAL(4, tree::leaf::size(uncached_leaf));
       CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_leaf));
     }
@@ -384,7 +464,7 @@ SUITE(leaf) {
 
     // Changes have been committed to disk.
     {
-      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(0));
+      tree::leaf::shared_lock_ptr uncached_leaf(load_page_from_disk<tree::leaf>(offset));
       CHECK_EQUAL(3, tree::leaf::size(uncached_leaf));
       CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3" }), read_all_from_leaf(uncached_leaf));
     }
@@ -395,11 +475,11 @@ SUITE(leaf) {
     auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
     auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
     auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
-    write_leaf(0, { key1, key2 });
-    write_leaf(leaf_bytes(), { key3, key4 });
+    const auto first_offset = write_leaf({ key1, key2 });
+    const auto second_offset = write_leaf({ key3, key4 });
 
-    tree::leaf::unique_lock_ptr first(load_page_from_disk<tree::leaf>(0));
-    tree::leaf::unique_lock_ptr second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+    tree::leaf::unique_lock_ptr first(load_page_from_disk<tree::leaf>(first_offset));
+    tree::leaf::unique_lock_ptr second(load_page_from_disk<tree::leaf>(second_offset));
     auto tx = txfile_begin(false);
     tree::leaf::merge(tree, first, second, tx);
 
@@ -411,8 +491,8 @@ SUITE(leaf) {
 
     // Nothing is written to disk yet.
     {
-      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(0));
-      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(first_offset));
+      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(second_offset));
       CHECK_EQUAL(2, tree::leaf::size(uncached_first));
       CHECK_EQUAL(2, tree::leaf::size(uncached_second));
       CHECK_EQUAL((std::vector<std::string>{ "1", "2" }), read_all_from_leaf(uncached_first));
@@ -427,10 +507,13 @@ SUITE(leaf) {
     CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(first));
     CHECK_EQUAL(std::vector<std::string>(), read_all_from_leaf(second));
 
+    CHECK(tree::leaf::valid(first)); // First page remains valid.
+    CHECK(!tree::leaf::valid(second)); // Second page is no longer valid.
+
     // Changes have been committed to disk.
     {
-      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(0));
-      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(first_offset));
+      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(second_offset));
       CHECK_EQUAL(4, tree::leaf::size(uncached_first));
       CHECK_EQUAL(0, tree::leaf::size(uncached_second));
       CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_first));
@@ -443,11 +526,11 @@ SUITE(leaf) {
     auto key2 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("2"));
     auto key3 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("3"));
     auto key4 = cycle_ptr::make_cycle<loader_value_type>(string_value_type("4"));
-    write_leaf(0, { key1, key2, key3, key4 });
-    write_empty_leaf(leaf_bytes());
+    const auto first_offset = write_leaf({ key1, key2, key3, key4 });
+    const auto second_offset = write_empty_leaf();
 
-    tree::leaf::unique_lock_ptr first(load_page_from_disk<tree::leaf>(0));
-    tree::leaf::unique_lock_ptr second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+    tree::leaf::unique_lock_ptr first(load_page_from_disk<tree::leaf>(first_offset));
+    tree::leaf::unique_lock_ptr second(load_page_from_disk<tree::leaf>(second_offset));
     auto tx = txfile_begin(false);
     tree::leaf::split(tree, first, second, tx);
 
@@ -459,8 +542,8 @@ SUITE(leaf) {
 
     // Nothing is written to disk yet.
     {
-      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(0));
-      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(first_offset));
+      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(second_offset));
       CHECK_EQUAL(4, tree::leaf::size(uncached_first));
       CHECK_EQUAL(0, tree::leaf::size(uncached_second));
       CHECK_EQUAL((std::vector<std::string>{ "1", "2", "3", "4" }), read_all_from_leaf(uncached_first));
@@ -480,8 +563,8 @@ SUITE(leaf) {
 
     // Changes have been committed to disk.
     {
-      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(0));
-      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(leaf_bytes()));
+      tree::leaf::shared_lock_ptr uncached_first(load_page_from_disk<tree::leaf>(first_offset));
+      tree::leaf::shared_lock_ptr uncached_second(load_page_from_disk<tree::leaf>(second_offset));
       CHECK_EQUAL(2, tree::leaf::size(uncached_first));
       CHECK_EQUAL(2, tree::leaf::size(uncached_second));
       CHECK_EQUAL((std::vector<std::string>{ "1", "2" }), read_all_from_leaf(uncached_first));
@@ -493,6 +576,26 @@ SUITE(leaf) {
   }
 
 } /* SUITE(leaf) */
+
+SUITE(branch) {
+
+  TEST_FIXTURE(tree_fixture, empty_page) {
+    const auto offset = write_empty_branch();
+    tree::branch::shared_lock_ptr branch(load_page_from_disk<tree::branch>(offset));
+
+    CHECK(tree::branch::valid(branch));
+    CHECK_EQUAL(0, tree::branch::size(branch));
+  }
+
+  TEST_FIXTURE(tree_fixture, single_element) {
+    const auto offset = write_branch({});
+    tree::branch::shared_lock_ptr branch(load_page_from_disk<tree::branch>(offset));
+
+    CHECK(tree::branch::valid(branch));
+    CHECK_EQUAL(1, tree::branch::size(branch));
+  }
+
+} /* SUITE(branch) */
 
 
 int main() {
