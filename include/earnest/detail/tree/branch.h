@@ -41,10 +41,10 @@ class earnest_export_ branch final
       cycle_ptr::cycle_member_ptr<T>,
       cycle_ptr::cycle_allocator<
           std::allocator_traits<allocator_type>::template rebind_alloc<cycle_ptr::cycle_member_ptr<T>>>>;
-  using key_vector = vector_type<const key_type>;
-  using page_ref_vector = vector_type<augmented_page_ref>;
 
   public:
+  using key_vector = vector_type<const key_type>;
+  using page_ref_vector = vector_type<augmented_page_ref>;
   using size_type = page_ref_vector::size_type;
 
   protected:
@@ -98,6 +98,9 @@ class earnest_export_ branch final
   static auto size(const unique_lock_ptr& self) -> size_type { return self->pages_.size(); }
   ///\brief Retrieve the max size of this page.
   auto max_size() const -> size_type;
+
+  auto keys() const noexcept -> const key_vector& { return keys_; }
+  auto pages() const noexcept -> const page_ref_vector& { return pages_; }
 
   private:
   ///\brief Size in bytes of the key type.

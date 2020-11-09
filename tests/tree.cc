@@ -128,7 +128,7 @@ class tree_fixture
     return std::make_shared<tree::cfg>(
         tree::cfg{
           4, // items_per_leaf_page
-          2, // items_per_node_page
+          4, // items_per_node_page
           string_value_type::SIZE, // key_bytes
           string_value_type::SIZE, // val_bytes
           0 // augment_bytes
@@ -185,6 +185,50 @@ class tree_fixture
           auto ptr = boost::polymorphic_downcast<const mock_loader::value_type*>(&value_ref);
           REQUIRE CHECK(ptr != nullptr);
           return ptr->value.value;
+        });
+    return result;
+  }
+
+  auto branch_keys(const tree::branch::shared_lock_ptr& branch) const -> std::vector<std::string> {
+    std::vector<std::string> result;
+    std::transform(
+        branch->keys().begin(), branch->keys().end(),
+        std::back_inserter(result),
+        [](const auto& key_ptr) -> const std::string& {
+          return boost::polymorphic_downcast<const loader_key_type*>(key_ptr.get())->key.value;
+        });
+    return result;
+  }
+
+  auto branch_keys(const tree::branch::unique_lock_ptr& branch) const -> std::vector<std::string> {
+    std::vector<std::string> result;
+    std::transform(
+        branch->keys().begin(), branch->keys().end(),
+        std::back_inserter(result),
+        [](const auto& key_ptr) -> const std::string& {
+          return boost::polymorphic_downcast<const loader_key_type*>(key_ptr.get())->key.value;
+        });
+    return result;
+  }
+
+  auto branch_offsets(const tree::branch::shared_lock_ptr& branch) const -> std::vector<std::uint64_t> {
+    std::vector<std::uint64_t> result;
+    std::transform(
+        branch->pages().begin(), branch->pages().end(),
+        std::back_inserter(result),
+        [](const auto& augmented_page_ref_ptr) -> std::uint64_t {
+          return augmented_page_ref_ptr->offset();
+        });
+    return result;
+  }
+
+  auto branch_offsets(const tree::branch::unique_lock_ptr& branch) const -> std::vector<std::uint64_t> {
+    std::vector<std::uint64_t> result;
+    std::transform(
+        branch->pages().begin(), branch->pages().end(),
+        std::back_inserter(result),
+        [](const auto& augmented_page_ref_ptr) -> std::uint64_t {
+          return augmented_page_ref_ptr->offset();
         });
     return result;
   }
@@ -586,6 +630,7 @@ SUITE(branch) {
 
     CHECK(tree::branch::valid(branch));
     CHECK_EQUAL(0, tree::branch::size(branch));
+    CHECK_EQUAL(4, branch->max_size());
   }
 
   TEST_FIXTURE(tree_fixture, single_element) {
@@ -594,6 +639,144 @@ SUITE(branch) {
 
     CHECK(tree::branch::valid(branch));
     CHECK_EQUAL(1, tree::branch::size(branch));
+    CHECK_EQUAL(std::vector<std::string>(), branch_keys(branch));
+  }
+
+  TEST_FIXTURE(tree_fixture, merge) {
+    const auto first_offset = write_branch({ cycle_ptr::make_cycle<loader_key_type>(string_value_type("k1")) });
+    const auto second_offset = write_branch({ cycle_ptr::make_cycle<loader_key_type>(string_value_type("k3")) });
+    const auto separator_key = cycle_ptr::make_cycle<loader_key_type>(string_value_type("k2"));
+    tree::branch::unique_lock_ptr first(load_page_from_disk<tree::branch>(first_offset));
+    tree::branch::unique_lock_ptr second(load_page_from_disk<tree::branch>(second_offset));
+
+    REQUIRE CHECK_EQUAL(2, tree::branch::size(first));
+    REQUIRE CHECK_EQUAL(2, tree::branch::size(second));
+
+    std::vector<std::uint64_t> child_offsets;
+    for (const auto& offset : branch_offsets(first)) child_offsets.push_back(offset);
+    for (const auto& offset : branch_offsets(second)) child_offsets.push_back(offset);
+
+    auto tx = txfile_begin(false);
+    tree::branch::merge(tree, first, second, tx, separator_key);
+
+    // No change until transaction commit.
+    CHECK_EQUAL(2, tree::branch::size(first));
+    CHECK_EQUAL(2, tree::branch::size(second));
+    CHECK_EQUAL((std::vector<std::string>{ "k1" }), branch_keys(first));
+    CHECK_EQUAL((std::vector<std::string>{ "k3" }), branch_keys(second));
+    CHECK_EQUAL(
+        std::vector<std::uint64_t>(child_offsets.begin(), child_offsets.begin() + 2),
+        branch_offsets(first));
+    CHECK_EQUAL(
+        std::vector<std::uint64_t>(child_offsets.end() - 2, child_offsets.end()),
+        branch_offsets(second));
+
+    // Nothing is written to disk yet.
+    {
+      tree::branch::shared_lock_ptr uncached_first(load_page_from_disk<tree::branch>(first_offset));
+      CHECK_EQUAL(2, tree::branch::size(uncached_first));
+      CHECK_EQUAL((std::vector<std::string>{ "k1" }), branch_keys(uncached_first));
+      CHECK_EQUAL(
+          std::vector<std::uint64_t>(child_offsets.begin(), child_offsets.begin() + 2),
+          branch_offsets(uncached_first));
+
+      tree::branch::shared_lock_ptr uncached_second(load_page_from_disk<tree::branch>(second_offset));
+      CHECK_EQUAL(2, tree::branch::size(uncached_second));
+      CHECK_EQUAL((std::vector<std::string>{ "k3" }), branch_keys(uncached_second));
+      CHECK_EQUAL(
+          std::vector<std::uint64_t>(child_offsets.end() - 2, child_offsets.end()),
+          branch_offsets(uncached_second));
+    }
+
+    tx.commit();
+
+    // All elements have moved to the first page.
+    CHECK_EQUAL((std::vector<std::string>{ "k1", "k2", "k3" }), branch_keys(first));
+    CHECK_EQUAL(std::vector<std::string>(), branch_keys(second));
+    CHECK_EQUAL(child_offsets, branch_offsets(first));
+    CHECK_EQUAL(std::vector<std::uint64_t>(), branch_offsets(second));
+
+    CHECK(tree::branch::valid(first)); // First page remains valid.
+    CHECK(!tree::branch::valid(second)); // Second page is no longer valid.
+
+    // Changes have been committed to disk.
+    {
+      tree::branch::shared_lock_ptr uncached_first(load_page_from_disk<tree::branch>(first_offset));
+      CHECK_EQUAL(4, tree::branch::size(uncached_first));
+      CHECK_EQUAL((std::vector<std::string>{ "k1", "k2", "k3" }), branch_keys(uncached_first));
+      CHECK_EQUAL(child_offsets, branch_offsets(uncached_first));
+
+      tree::branch::shared_lock_ptr uncached_second(load_page_from_disk<tree::branch>(second_offset));
+      CHECK_EQUAL(0, tree::branch::size(uncached_second));
+      CHECK_EQUAL(std::vector<std::string>(), branch_keys(uncached_second));
+      CHECK_EQUAL(std::vector<std::uint64_t>(), branch_offsets(uncached_second));
+    }
+  }
+
+  TEST_FIXTURE(tree_fixture, split) {
+    const auto second_offset = write_empty_branch();
+    const auto first_offset = write_branch({ cycle_ptr::make_cycle<loader_key_type>(string_value_type("k1")), cycle_ptr::make_cycle<loader_key_type>(string_value_type("k2")) });
+    tree::branch::unique_lock_ptr first(load_page_from_disk<tree::branch>(first_offset));
+    tree::branch::unique_lock_ptr second(load_page_from_disk<tree::branch>(second_offset));
+
+    const auto child_offsets = branch_offsets(first);
+    REQUIRE CHECK_EQUAL(4, child_offsets.size());
+    REQUIRE CHECK_EQUAL(4, tree::branch::size(first));
+    REQUIRE CHECK_EQUAL(0, tree::branch::size(second));
+    REQUIRE CHECK_EQUAL(std::vector<std::uint64_t>(), branch_offsets(second));
+
+    auto tx = txfile_begin(false);
+    const auto split_key = tree::branch::split(tree, first, second, tx);
+
+    CHECK_EQUAL("k2", boost::polymorphic_pointer_downcast<const loader_key_type>(split_key)->key.value);
+
+    // No change until transaction commit.
+    CHECK_EQUAL((std::vector<std::string>{ "k1", "k2", "k3" }), branch_keys(first));
+    CHECK_EQUAL(std::vector<std::string>(), branch_keys(second));
+
+    // Nothing is written to disk yet.
+    {
+      tree::branch::shared_lock_ptr uncached_first(load_page_from_disk<tree::branch>(first_offset));
+      CHECK_EQUAL(4, tree::branch::size(uncached_first));
+      CHECK_EQUAL((std::vector<std::string>{ "k1", "k2", "k3" }), branch_keys(uncached_first));
+      CHECK_EQUAL(child_offsets, branch_offsets(uncached_first));
+
+      tree::branch::shared_lock_ptr uncached_second(load_page_from_disk<tree::branch>(second_offset));
+      CHECK_EQUAL(0, tree::branch::size(uncached_second));
+      CHECK_EQUAL(std::vector<std::string>(), branch_keys(uncached_second));
+      CHECK_EQUAL(std::vector<std::uint64_t>(), branch_offsets(uncached_second));
+    }
+
+    tx.commit();
+
+    // Some elements from the first page are now in the second page.
+    CHECK_EQUAL(2, tree::branch::size(first));
+    CHECK_EQUAL(2, tree::branch::size(second));
+    CHECK_EQUAL((std::vector<std::string>{ "k1" }), branch_keys(first));
+    CHECK_EQUAL((std::vector<std::string>{ "k3" }), branch_keys(second));
+    CHECK_EQUAL(
+        std::vector<std::uint64_t>(child_offsets.begin(), child_offsets.begin() + 2),
+        branch_offsets(first));
+    CHECK_EQUAL(
+        std::vector<std::uint64_t>(child_offsets.end() - 2, child_offsets.end()),
+        branch_offsets(second));
+
+    // Changes have been committed to disk.
+    {
+      tree::branch::shared_lock_ptr uncached_first(load_page_from_disk<tree::branch>(first_offset));
+      CHECK_EQUAL(2, tree::branch::size(uncached_first));
+      CHECK_EQUAL((std::vector<std::string>{ "k1" }), branch_keys(uncached_first));
+      CHECK_EQUAL(
+          std::vector<std::uint64_t>(child_offsets.begin(), child_offsets.begin() + 2),
+          branch_offsets(uncached_first));
+
+      tree::branch::shared_lock_ptr uncached_second(load_page_from_disk<tree::branch>(second_offset));
+      CHECK_EQUAL(2, tree::branch::size(uncached_second));
+      CHECK_EQUAL((std::vector<std::string>{ "k3" }), branch_keys(uncached_second));
+      CHECK_EQUAL(
+          std::vector<std::uint64_t>(child_offsets.end() - 2, child_offsets.end()),
+          branch_offsets(uncached_second));
+    }
   }
 
 } /* SUITE(branch) */

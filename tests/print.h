@@ -39,6 +39,22 @@ auto operator<<(std::ostream& o, const std::vector<std::string>& v) -> std::ostr
   return o;
 }
 
+// HACK: print uint64_t vector.
+auto operator<<(std::ostream& o, const std::vector<std::uint64_t>& v) -> std::ostream& {
+  auto ifs = boost::io::ios_flags_saver(o);
+
+  o << "[";
+  bool first = true;
+  for (const auto& value : v) {
+    o << (first ? " " : ", ") << value;
+    first = false;
+  }
+  if (!first) o << " ";
+  o << "]";
+
+  return o;
+}
+
 }
 
 #endif /* _PRINT_H */
