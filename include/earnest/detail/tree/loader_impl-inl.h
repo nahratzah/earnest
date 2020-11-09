@@ -4,6 +4,7 @@
 #include <earnest/detail/tree/leaf.h>
 #include <earnest/detail/tree/branch.h>
 #include <boost/polymorphic_cast.hpp>
+#include <numeric>
 
 namespace earnest::detail::tree {
 
@@ -30,6 +31,22 @@ template<typename KeyType, typename ValueType, typename... Augments>
 auto tx_aware_loader<KeyType, ValueType, Augments...>::allocate_augmented_page_ref(db_cache::allocator_type alloc) const
 -> cycle_ptr::cycle_gptr<augmented_page_ref> {
   return cycle_ptr::allocate_cycle<augment_type>(alloc, std::allocator_arg, alloc);
+}
+
+template<typename KeyType, typename ValueType, typename... Augments>
+auto tx_aware_loader<KeyType, ValueType, Augments...>::key_bytes() const noexcept -> std::size_t {
+  return KeyType::SIZE;
+}
+
+template<typename KeyType, typename ValueType, typename... Augments>
+auto tx_aware_loader<KeyType, ValueType, Augments...>::val_bytes() const noexcept -> std::size_t {
+  return ValueType::SIZE;
+}
+
+template<typename KeyType, typename ValueType, typename... Augments>
+auto tx_aware_loader<KeyType, ValueType, Augments...>::augment_bytes() const noexcept -> std::size_t {
+  std::initializer_list<std::size_t> il{ Augments::SIZE... };
+  return std::accumulate(il.begin(), il.end(), std::size_t(0));
 }
 
 template<typename KeyType, typename ValueType, typename... Augments>

@@ -120,21 +120,10 @@ class tree_fixture
   public:
   tree_fixture()
   : db_fixture(),
-    tree(cycle_ptr::make_cycle<tree::basic_tree>(this->db, mk_cfg_(), mk_loader_()))
+    tree(tree::basic_tree::create(this->db, this->offset_advance(tree::basic_tree::SIZE), mk_loader_(), 4, 4))
   {}
 
   private:
-  static auto mk_cfg_() -> std::shared_ptr<tree::cfg> {
-    return std::make_shared<tree::cfg>(
-        tree::cfg{
-          4, // items_per_leaf_page
-          4, // items_per_node_page
-          string_value_type::SIZE, // key_bytes
-          string_value_type::SIZE, // val_bytes
-          0 // augment_bytes
-        });
-  }
-
   class mock_loader
   : public tree::tx_aware_loader<string_value_type, string_value_type>
   {

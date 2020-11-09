@@ -146,6 +146,10 @@ class tx_aware_loader
   auto allocate_augmented_page_ref(const leaf& leaf, db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<earnest::detail::tree::augmented_page_ref> override;
   auto allocate_augmented_page_ref(const branch& leaf, db_cache::allocator_type alloc) const -> cycle_ptr::cycle_gptr<earnest::detail::tree::augmented_page_ref> override;
 
+  auto key_bytes() const noexcept -> std::size_t override;
+  auto val_bytes() const noexcept -> std::size_t override;
+  auto augment_bytes() const noexcept -> std::size_t override;
+
   private:
   static auto reduce_(std::tuple<Augments...>&& x, const std::tuple<Augments...>& y)
   -> std::tuple<Augments...>;

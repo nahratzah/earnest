@@ -267,6 +267,13 @@ class earnest_export_ db::db_obj {
   ///\brief Begin a txfile transaction.
   auto txfile_begin(bool read_only) const -> txfile::transaction;
 
+  ///\brief The object cache of the database.
+  static auto obj_cache(std::shared_ptr<class db> db) -> cycle_ptr::cycle_gptr<detail::db_cache>;
+  ///\brief Begin a read-only txfile transaction.
+  static auto txfile_begin(std::shared_ptr<class db> db) -> txfile::transaction;
+  ///\brief Begin a txfile transaction.
+  static auto txfile_begin(std::shared_ptr<class db> db, bool read_only) -> txfile::transaction;
+
   private:
   std::weak_ptr<class db> db_;
 };

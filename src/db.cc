@@ -396,7 +396,7 @@ void db::transaction::rollback_() noexcept {
 db::db_obj::~db_obj() noexcept = default;
 
 auto db::db_obj::obj_cache() const -> cycle_ptr::cycle_gptr<detail::db_cache> {
-  return db()->obj_cache_;
+  return obj_cache(db());
 }
 
 auto db::db_obj::db() const -> std::shared_ptr<class db> {
@@ -404,11 +404,23 @@ auto db::db_obj::db() const -> std::shared_ptr<class db> {
 }
 
 auto db::db_obj::txfile_begin() const -> txfile::transaction {
-  return db()->f_.begin();
+  return txfile_begin(db());
 }
 
 auto db::db_obj::txfile_begin(bool read_only) const -> txfile::transaction {
-  return db()->f_.begin(read_only);
+  return txfile_begin(db(), read_only);
+}
+
+auto db::db_obj::obj_cache(std::shared_ptr<class db> db) -> cycle_ptr::cycle_gptr<detail::db_cache> {
+  return db->obj_cache_;
+}
+
+auto db::db_obj::txfile_begin(std::shared_ptr<class db> db) -> txfile::transaction {
+  return db->f_.begin();
+}
+
+auto db::db_obj::txfile_begin(std::shared_ptr<class db> db, bool read_only) -> txfile::transaction {
+  return db->f_.begin(read_only);
 }
 
 

@@ -23,10 +23,31 @@ class earnest_export_ basic_tree
   friend ops;
 
   public:
-  using size_type = tree_size_type;
+  static constexpr std::size_t SIZE = 32u;
+  static constexpr std::uint32_t magic = 0x2376'a4feU;
 
-  explicit basic_tree(std::shared_ptr<class db> db, std::shared_ptr<const struct cfg> cfg, std::shared_ptr<const class loader> loader);
+  private:
+  static constexpr std::size_t MAGIC_OFFSET = 0u;
+  static constexpr std::size_t CFG_OFFSET = MAGIC_OFFSET + sizeof(magic);
+  static constexpr std::size_t ROOT_PAGE_OFFSET = CFG_OFFSET + cfg::SIZE;
+  static_assert(SIZE >= ROOT_PAGE_OFFSET + sizeof(std::uint64_t), "incorrect size");
+
+  public:
+  using size_type = tree_size_type;
+  using allocator_type = db_cache::allocator_type;
+
+  basic_tree(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const class loader> loader, allocator_type alloc = allocator_type());
   ~basic_tree() noexcept override;
+
+  protected:
+  static void create_(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, const class loader& loader, std::size_t items_per_leaf, std::size_t items_per_branch);
+
+  public:
+  template<typename TreeImpl = basic_tree>
+  static auto create(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const class loader> loader, std::size_t items_per_leaf, std::size_t items_per_branch, allocator_type alloc = allocator_type())
+  -> std::enable_if_t<std::is_base_of_v<basic_tree, TreeImpl>, cycle_ptr::cycle_gptr<TreeImpl>>;
+
+  auto get_allocator() const -> allocator_type { return alloc_; }
 
   void lock() { mtx_.lock(); }
   auto try_lock() -> bool { return mtx_.try_lock(); }
@@ -42,6 +63,7 @@ class earnest_export_ basic_tree
   auto has_pages() const -> bool; // Must be called with mtx_ held for share or exclusive.
 
   private:
+  allocator_type alloc_;
   std::uint64_t root_page_ = 0;
   mutable std::shared_mutex mtx_;
 };

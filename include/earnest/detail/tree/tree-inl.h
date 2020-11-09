@@ -10,14 +10,18 @@
 namespace earnest::detail::tree {
 
 
-inline basic_tree::basic_tree(
-    std::shared_ptr<class db> db,
-    std::shared_ptr<const struct cfg> cfg,
-    std::shared_ptr<const class loader> loader)
-: db::db_obj(std::move(db)),
-  cfg(std::move(cfg)),
-  loader(std::move(loader))
-{}
+template<typename TreeImpl>
+inline auto basic_tree::create(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const class loader> loader, std::size_t items_per_leaf, std::size_t items_per_branch, allocator_type alloc)
+-> std::enable_if_t<std::is_base_of_v<basic_tree, TreeImpl>, cycle_ptr::cycle_gptr<TreeImpl>> {
+  create_(db, offset, *loader, items_per_leaf, items_per_branch);
+
+  return cycle_ptr::allocate_cycle<TreeImpl>(
+      alloc,
+      std::move(db),
+      std::move(offset),
+      std::move(loader),
+      alloc);
+}
 
 
 inline basic_tx_aware_tree::tx_object::tx_object(

@@ -31,6 +31,10 @@ class earnest_export_ loader {
    * \return Offset of allocated space.
    */
   virtual auto allocate_disk_space(txfile::transaction& tx, std::size_t bytes) const -> offset_type = 0;
+
+  virtual auto key_bytes() const noexcept -> std::size_t = 0;
+  virtual auto val_bytes() const noexcept -> std::size_t = 0;
+  virtual auto augment_bytes() const noexcept -> std::size_t = 0;
 };
 
 
