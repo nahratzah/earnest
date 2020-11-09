@@ -23,6 +23,8 @@ class earnest_export_ basic_tree
   friend ops;
 
   public:
+  using size_type = tree_size_type;
+
   explicit basic_tree(std::shared_ptr<class db> db, std::shared_ptr<const struct cfg> cfg, std::shared_ptr<const class loader> loader);
   ~basic_tree() noexcept override;
 
@@ -64,8 +66,12 @@ class basic_tx_aware_tree::tx_object
 : public db::transaction_obj,
   public cycle_ptr::cycle_base
 {
+  private:
+  template<typename LeafIterator> class iterator_;
+
   public:
-  class iterator;
+  using iterator = iterator_<leaf_iterator>;
+  using reverse_iterator = iterator_<reverse_leaf_iterator>;
 
   explicit tx_object(db::transaction& tx, cycle_ptr::cycle_gptr<basic_tx_aware_tree> tree);
   ~tx_object() noexcept override;
@@ -73,35 +79,54 @@ class basic_tx_aware_tree::tx_object
   auto empty() const -> bool;
   auto begin() const -> iterator;
   auto end() const -> iterator;
+  auto rbegin() const -> reverse_iterator;
+  auto rend() const -> reverse_iterator;
 
   private:
-  auto begin_([[maybe_unused]] const basic_tx_aware_tree::shared_lock_ptr& tree) const -> iterator;
-  auto end_([[maybe_unused]] const basic_tx_aware_tree::shared_lock_ptr& tree) const -> iterator;
+  auto begin_(const basic_tx_aware_tree::shared_lock_ptr& tree) const -> iterator;
+  auto end_(const basic_tx_aware_tree::shared_lock_ptr& tree) const -> iterator;
+  auto rbegin_(const basic_tx_aware_tree::shared_lock_ptr& tree) const -> reverse_iterator;
+  auto rend_(const basic_tx_aware_tree::shared_lock_ptr& tree) const -> reverse_iterator;
 
   db::transaction& tx;
   const cycle_ptr::cycle_member_ptr<basic_tx_aware_tree> tree_;
 };
 
 
-class basic_tx_aware_tree::tx_object::iterator {
+template<typename LeafIterator>
+class basic_tx_aware_tree::tx_object::iterator_ {
+  friend tx_object;
+  template<typename> friend class basic_tx_aware_tree::tx_object::iterator_;
+
   public:
-  constexpr iterator() noexcept = default;
+  using iterator_category = typename LeafIterator::iterator_category;
+  using difference_type = typename LeafIterator::difference_type;
+  using value_type = tx_aware_value_type;
+  using pointer = const tx_aware_value_type*;
+  using reference = const tx_aware_value_type&;
+
+  constexpr iterator_() noexcept = default;
+
+  template<typename OtherLeafIterator>
+  constexpr iterator_(const iterator_<OtherLeafIterator>& y) noexcept;
+  template<typename OtherLeafIterator>
+  constexpr iterator_(iterator_<OtherLeafIterator>&& y) noexcept;
 
   private:
-  explicit iterator(const leaf_iterator& iter) noexcept;
-  explicit iterator(leaf_iterator&& iter) noexcept;
+  iterator_(cycle_ptr::cycle_gptr<const tx_object> txo, const LeafIterator& iter, bool skip_seek = false) noexcept;
+  iterator_(cycle_ptr::cycle_gptr<const tx_object> txo, LeafIterator&& iter, bool skip_seek = false) noexcept;
 
   public:
-  auto operator++(int) -> iterator;
-  auto operator--(int) -> iterator;
-  auto operator++() -> iterator&;
-  auto operator--() -> iterator&;
+  auto operator++(int) -> iterator_;
+  auto operator--(int) -> iterator_;
+  auto operator++() -> iterator_&;
+  auto operator--() -> iterator_&;
 
-  auto operator==(const iterator& y) const -> bool;
-  auto operator!=(const iterator& y) const -> bool;
+  auto operator==(const iterator_& y) const -> bool;
+  auto operator!=(const iterator_& y) const -> bool;
 
-  auto operator*() const -> const tx_aware_value_type&;
-  auto operator->() const -> const tx_aware_value_type*;
+  auto operator*() const -> reference;
+  auto operator->() const -> pointer;
   auto ptr() const -> cycle_ptr::cycle_gptr<const tx_aware_value_type>;
   auto is_sentinel() const -> bool;
 
@@ -109,8 +134,8 @@ class basic_tx_aware_tree::tx_object::iterator {
   void seek_forward_until_valid_();
   void seek_backward_until_valid_();
 
-  cycle_ptr::cycle_gptr<tx_object> txo_;
-  leaf_iterator iter_;
+  cycle_ptr::cycle_gptr<const tx_object> txo_;
+  LeafIterator iter_;
 };
 
 
@@ -134,17 +159,26 @@ class tx_aware_tree
 };
 
 
-template<typename ValueType>
+template<typename ValueType, typename Iterator>
 class tx_aware_tree_iterator {
   public:
+  using iterator_category = typename Iterator::iterator_category;
+  using difference_type = typename Iterator::difference_type;
+  using value_type = ValueType;
   using pointer = const ValueType*;
   using reference = const ValueType&;
+  template<typename, typename> friend class tx_aware_tree_iterator;
 
   constexpr tx_aware_tree_iterator() noexcept = default;
 
+  tx_aware_tree_iterator(const tx_aware_tree_iterator<ValueType, leaf_iterator>& y) noexcept;
+  tx_aware_tree_iterator(const tx_aware_tree_iterator<ValueType, reverse_leaf_iterator>& y) noexcept;
+  tx_aware_tree_iterator(tx_aware_tree_iterator<ValueType, leaf_iterator>&& y) noexcept;
+  tx_aware_tree_iterator(tx_aware_tree_iterator<ValueType, reverse_leaf_iterator>&& y) noexcept;
+
   private:
-  explicit tx_aware_tree_iterator(const basic_tx_aware_tree::tx_object::iterator& iter) noexcept;
-  explicit tx_aware_tree_iterator(basic_tx_aware_tree::tx_object::iterator&& iter) noexcept;
+  explicit tx_aware_tree_iterator(const Iterator& iter) noexcept;
+  explicit tx_aware_tree_iterator(Iterator&& iter) noexcept;
 
   public:
   auto operator++(int) -> tx_aware_tree_iterator;
@@ -160,7 +194,7 @@ class tx_aware_tree_iterator {
   auto ptr() const -> cycle_ptr::cycle_gptr<const tx_aware_value_type_impl<ValueType>>;
 
   private:
-  basic_tx_aware_tree::tx_object::iterator iter_;
+  Iterator iter_;
 };
 
 
@@ -170,13 +204,17 @@ class tx_aware_tree<KeyType, ValueType, Augments...>::tx_object
   public cycle_ptr::cycle_base
 {
   public:
-  using iterator = tx_aware_tree_iterator<ValueType>;
+  using size_type = tree_size_type;
+  using iterator = tx_aware_tree_iterator<ValueType, basic_tx_aware_tree::tx_object::iterator>;
+  using reverse_iterator = tx_aware_tree_iterator<ValueType, basic_tx_aware_tree::tx_object::reverse_iterator>;
 
   tx_object(db::transaction& tx, cycle_ptr::cycle_gptr<tx_aware_tree> tree);
 
   auto empty() const -> bool;
   auto begin() const -> iterator;
   auto end() const -> iterator;
+  auto rbegin() const -> reverse_iterator;
+  auto rend() const -> reverse_iterator;
 
   private:
   const cycle_ptr::cycle_member_ptr<basic_tx_aware_tree::tx_object> impl_;

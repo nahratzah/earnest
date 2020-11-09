@@ -28,60 +28,104 @@ inline basic_tx_aware_tree::tx_object::tx_object(
 {}
 
 
-inline basic_tx_aware_tree::tx_object::iterator::iterator(const leaf_iterator& iter) noexcept
-: iter_(iter)
+template<typename LeafIterator>
+template<typename OtherLeafIterator>
+constexpr basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::iterator_(const iterator_<OtherLeafIterator>& y) noexcept
+: txo_(y.txo_),
+  iter_(y.iter_)
 {}
 
-inline basic_tx_aware_tree::tx_object::iterator::iterator(leaf_iterator&& iter) noexcept
-: iter_(std::move(iter))
+template<typename LeafIterator>
+template<typename OtherLeafIterator>
+constexpr basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::iterator_(iterator_<OtherLeafIterator>&& y) noexcept
+: txo_(std::move(y.txo_)),
+  iter_(std::move(y.iter_))
 {}
 
-inline auto basic_tx_aware_tree::tx_object::iterator::operator++(int) -> iterator {
-  auto r = iterator(iter_++);
+template<typename LeafIterator>
+inline basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::iterator_(cycle_ptr::cycle_gptr<const tx_object> txo, const LeafIterator& iter, bool skip_seek) noexcept
+: txo_(std::move(txo)),
+  iter_(iter)
+{
+  if (!skip_seek) seek_forward_until_valid_();
+}
+
+template<typename LeafIterator>
+inline basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::iterator_(cycle_ptr::cycle_gptr<const tx_object> txo, LeafIterator&& iter, bool skip_seek) noexcept
+: txo_(std::move(txo)),
+  iter_(std::move(iter))
+{
+  if (!skip_seek) seek_forward_until_valid_();
+}
+
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::operator++(int) -> iterator_ {
+  auto r = iterator(txo_, iter_++, true);
   seek_forward_until_valid_();
   return r;
 }
 
-inline auto basic_tx_aware_tree::tx_object::iterator::operator--(int) -> iterator {
-  auto r = iterator(iter_--);
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::operator--(int) -> iterator_ {
+  auto r = iterator(txo_, iter_--, true);
   seek_backward_until_valid_();
   return r;
 }
 
-inline auto basic_tx_aware_tree::tx_object::iterator::operator++() -> iterator& {
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::operator++() -> iterator_& {
   ++iter_;
   seek_forward_until_valid_();
   return *this;
 }
 
-inline auto basic_tx_aware_tree::tx_object::iterator::operator--() -> iterator& {
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::operator--() -> iterator_& {
   --iter_;
   seek_backward_until_valid_();
   return *this;
 }
 
-inline auto basic_tx_aware_tree::tx_object::iterator::operator==(const iterator& y) const -> bool {
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::operator==(const iterator_& y) const -> bool {
   return txo_ == y.txo_ && iter_ == y.iter_;
 }
 
-inline auto basic_tx_aware_tree::tx_object::iterator::operator!=(const iterator& y) const -> bool {
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::operator!=(const iterator_& y) const -> bool {
   return txo_ == y.txo_ && iter_ != y.iter_;
 }
 
-inline auto basic_tx_aware_tree::tx_object::iterator::operator*() const -> const tx_aware_value_type& {
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::operator*() const -> reference {
   return *boost::polymorphic_cast<const tx_aware_value_type*>(&iter_.operator*());
 }
 
-inline auto basic_tx_aware_tree::tx_object::iterator::operator->() const -> const tx_aware_value_type* {
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::operator->() const -> pointer {
   return boost::polymorphic_cast<const tx_aware_value_type*>(iter_.operator->());
 }
 
-inline auto basic_tx_aware_tree::tx_object::iterator::ptr() const -> cycle_ptr::cycle_gptr<const tx_aware_value_type> {
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::ptr() const -> cycle_ptr::cycle_gptr<const tx_aware_value_type> {
   return boost::polymorphic_pointer_downcast<const tx_aware_value_type>(iter_.ptr());
 }
 
-inline auto basic_tx_aware_tree::tx_object::iterator::is_sentinel() const -> bool {
+template<typename LeafIterator>
+inline auto basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::is_sentinel() const -> bool {
   return iter_->is_sentinel();
+}
+
+template<typename LeafIterator>
+inline void basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::seek_forward_until_valid_() {
+  while (!is_sentinel() && !(*this)->visible_in_tx(txo_->tx.seq()))
+    ++iter_;
+}
+
+template<typename LeafIterator>
+inline void basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::seek_backward_until_valid_() {
+  while (!is_sentinel() && !(*this)->visible_in_tx(txo_->tx.seq()))
+    --iter_;
 }
 
 
@@ -91,60 +135,80 @@ inline tx_aware_tree<KeyType, ValueType, Augments...>::tx_aware_tree(std::shared
 {}
 
 
-template<typename ValueType>
-inline tx_aware_tree_iterator<ValueType>::tx_aware_tree_iterator(const basic_tx_aware_tree::tx_object::iterator& iter) noexcept
+template<typename ValueType, typename Iterator>
+inline tx_aware_tree_iterator<ValueType, Iterator>::tx_aware_tree_iterator(const tx_aware_tree_iterator<ValueType, leaf_iterator>& iter) noexcept
 : iter_(iter)
 {}
 
-template<typename ValueType>
-inline tx_aware_tree_iterator<ValueType>::tx_aware_tree_iterator(basic_tx_aware_tree::tx_object::iterator&& iter) noexcept
+template<typename ValueType, typename Iterator>
+inline tx_aware_tree_iterator<ValueType, Iterator>::tx_aware_tree_iterator(const tx_aware_tree_iterator<ValueType, reverse_leaf_iterator>& iter) noexcept
+: iter_(iter)
+{}
+
+template<typename ValueType, typename Iterator>
+inline tx_aware_tree_iterator<ValueType, Iterator>::tx_aware_tree_iterator(tx_aware_tree_iterator<ValueType, leaf_iterator>&& iter) noexcept
 : iter_(std::move(iter))
 {}
 
-template<typename ValueType>
-inline auto tx_aware_tree_iterator<ValueType>::operator++(int) -> tx_aware_tree_iterator {
+template<typename ValueType, typename Iterator>
+inline tx_aware_tree_iterator<ValueType, Iterator>::tx_aware_tree_iterator(tx_aware_tree_iterator<ValueType, reverse_leaf_iterator>&& iter) noexcept
+: iter_(std::move(iter))
+{}
+
+template<typename ValueType, typename Iterator>
+inline tx_aware_tree_iterator<ValueType, Iterator>::tx_aware_tree_iterator(const Iterator& iter) noexcept
+: iter_(iter)
+{}
+
+template<typename ValueType, typename Iterator>
+inline tx_aware_tree_iterator<ValueType, Iterator>::tx_aware_tree_iterator(Iterator&& iter) noexcept
+: iter_(std::move(iter))
+{}
+
+template<typename ValueType, typename Iterator>
+inline auto tx_aware_tree_iterator<ValueType, Iterator>::operator++(int) -> tx_aware_tree_iterator {
   return tx_aware_tree_iterator(iter_++);
 }
 
-template<typename ValueType>
-inline auto tx_aware_tree_iterator<ValueType>::operator--(int) -> tx_aware_tree_iterator {
+template<typename ValueType, typename Iterator>
+inline auto tx_aware_tree_iterator<ValueType, Iterator>::operator--(int) -> tx_aware_tree_iterator {
   return tx_aware_tree_iterator(iter_--);
 }
 
-template<typename ValueType>
-inline auto tx_aware_tree_iterator<ValueType>::operator++() -> tx_aware_tree_iterator& {
+template<typename ValueType, typename Iterator>
+inline auto tx_aware_tree_iterator<ValueType, Iterator>::operator++() -> tx_aware_tree_iterator& {
   ++iter_;
   return *this;
 }
 
-template<typename ValueType>
-inline auto tx_aware_tree_iterator<ValueType>::operator--() -> tx_aware_tree_iterator& {
+template<typename ValueType, typename Iterator>
+inline auto tx_aware_tree_iterator<ValueType, Iterator>::operator--() -> tx_aware_tree_iterator& {
   --iter_;
   return *this;
 }
 
-template<typename ValueType>
-inline auto tx_aware_tree_iterator<ValueType>::operator==(const tx_aware_tree_iterator& y) const -> bool {
+template<typename ValueType, typename Iterator>
+inline auto tx_aware_tree_iterator<ValueType, Iterator>::operator==(const tx_aware_tree_iterator& y) const -> bool {
   return iter_ == y.iter_;
 }
 
-template<typename ValueType>
-inline auto tx_aware_tree_iterator<ValueType>::operator!=(const tx_aware_tree_iterator& y) const -> bool {
+template<typename ValueType, typename Iterator>
+inline auto tx_aware_tree_iterator<ValueType, Iterator>::operator!=(const tx_aware_tree_iterator& y) const -> bool {
   return iter_ != y.iter_;
 }
 
-template<typename ValueType>
-inline auto tx_aware_tree_iterator<ValueType>::operator*() const -> reference {
+template<typename ValueType, typename Iterator>
+inline auto tx_aware_tree_iterator<ValueType, Iterator>::operator*() const -> reference {
   return boost::polymorphic_downcast<const tx_aware_value_type_impl<ValueType>*>(&iter_.operator*())->value;
 }
 
-template<typename ValueType>
-inline auto tx_aware_tree_iterator<ValueType>::operator->() const -> pointer {
+template<typename ValueType, typename Iterator>
+inline auto tx_aware_tree_iterator<ValueType, Iterator>::operator->() const -> pointer {
   return std::addressof(boost::polymorphic_downcast<const tx_aware_value_type_impl<ValueType>*>(&iter_.operator*())->value);
 }
 
-template<typename ValueType>
-inline auto tx_aware_tree_iterator<ValueType>::ptr() const -> cycle_ptr::cycle_gptr<const tx_aware_value_type_impl<ValueType>> {
+template<typename ValueType, typename Iterator>
+inline auto tx_aware_tree_iterator<ValueType, Iterator>::ptr() const -> cycle_ptr::cycle_gptr<const tx_aware_value_type_impl<ValueType>> {
   return boost::polymorphic_pointer_downcast<const tx_aware_value_type_impl<ValueType>>(iter_.ptr());
 }
 
@@ -169,6 +233,16 @@ inline auto tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::begin() c
 template<typename KeyType, typename ValueType, typename... Augments>
 inline auto tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::end() const -> iterator {
   return iterator(impl_->end());
+}
+
+template<typename KeyType, typename ValueType, typename... Augments>
+inline auto tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::rbegin() const -> reverse_iterator {
+  return iterator(impl_->rbegin());
+}
+
+template<typename KeyType, typename ValueType, typename... Augments>
+inline auto tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::rend() const -> reverse_iterator {
+  return iterator(impl_->rend());
 }
 
 

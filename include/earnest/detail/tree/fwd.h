@@ -2,6 +2,7 @@
 #define EARNEST_DETAIL_TREE_FWD_H
 
 #include <cstddef>
+#include <cstdint>
 
 namespace earnest::detail::tree {
 
@@ -21,6 +22,9 @@ class augmented_page_ref;
 class leaf_iterator;
 class reverse_leaf_iterator;
 template<typename KeyType, typename ValueType, typename... Augments> class tx_aware_loader;
+
+using tree_size_type = std::uint64_t;
+using tree_difference_type = std::int64_t;
 
 
 } /* namespace earnest::detail::tree */

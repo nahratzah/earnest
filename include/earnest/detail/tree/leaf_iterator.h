@@ -4,12 +4,19 @@
 #include <earnest/detail/export_.h>
 #include <earnest/detail/tree/fwd.h>
 #include <cycle_ptr/cycle_ptr.h>
+#include <iterator>
 
 namespace earnest::detail::tree {
 
 
 class earnest_export_ leaf_iterator {
   public:
+  using iterator_category = std::bidirectional_iterator_tag;
+  using difference_type = tree_difference_type;
+  using value_type = earnest::detail::tree::value_type;
+  using pointer = const value_type*;
+  using reference = const value_type&;
+
   constexpr leaf_iterator() noexcept = default;
   leaf_iterator(cycle_ptr::cycle_gptr<const basic_tree> tree, cycle_ptr::cycle_gptr<const value_type> value_ptr) noexcept;
   explicit leaf_iterator(const reverse_leaf_iterator&) noexcept;
@@ -24,8 +31,8 @@ class earnest_export_ leaf_iterator {
   auto operator==(const leaf_iterator& y) const noexcept;
   auto operator!=(const leaf_iterator& y) const noexcept;
 
-  auto operator->() const -> const value_type*;
-  auto operator*() const -> const value_type&;
+  auto operator->() const -> pointer;
+  auto operator*() const -> reference;
 
   auto ptr() const& noexcept -> const cycle_ptr::cycle_gptr<const value_type>&;
   auto ptr() && noexcept -> cycle_ptr::cycle_gptr<const value_type>&&;
@@ -39,6 +46,12 @@ class reverse_leaf_iterator {
   friend leaf_iterator;
 
   public:
+  using iterator_category = leaf_iterator::iterator_category;
+  using difference_type = leaf_iterator::difference_type;
+  using value_type = leaf_iterator::value_type;
+  using pointer = leaf_iterator::pointer;
+  using reference = leaf_iterator::reference;
+
   constexpr reverse_leaf_iterator() noexcept = default;
   explicit reverse_leaf_iterator(const leaf_iterator&) noexcept;
   explicit reverse_leaf_iterator(leaf_iterator&&) noexcept;
@@ -52,8 +65,8 @@ class reverse_leaf_iterator {
   auto operator==(const reverse_leaf_iterator& y) const noexcept;
   auto operator!=(const reverse_leaf_iterator& y) const noexcept;
 
-  auto operator->() const -> const value_type*;
-  auto operator*() const -> const value_type&;
+  auto operator->() const -> pointer;
+  auto operator*() const -> reference;
 
   auto ptr() const& noexcept -> const cycle_ptr::cycle_gptr<const value_type>&;
   auto ptr() && noexcept -> cycle_ptr::cycle_gptr<const value_type>&&;

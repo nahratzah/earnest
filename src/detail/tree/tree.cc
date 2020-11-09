@@ -33,5 +33,33 @@ auto basic_tx_aware_tree::tx_object::end() const -> iterator {
   return end_(basic_tx_aware_tree::shared_lock_ptr(tree_));
 }
 
+auto basic_tx_aware_tree::tx_object::rbegin() const -> reverse_iterator {
+  return rbegin_(basic_tx_aware_tree::shared_lock_ptr(tree_));
+}
+
+auto basic_tx_aware_tree::tx_object::rend() const -> reverse_iterator {
+  return rend_(basic_tx_aware_tree::shared_lock_ptr(tree_));
+}
+
+auto basic_tx_aware_tree::tx_object::begin_(const basic_tx_aware_tree::shared_lock_ptr& tree) const -> iterator {
+  assert(tree.owns_lock() && tree.mutex() == tree_);
+  return iterator(this->shared_from_this(this), ops::begin(tree));
+}
+
+auto basic_tx_aware_tree::tx_object::end_(const basic_tx_aware_tree::shared_lock_ptr& tree) const -> iterator {
+  assert(tree.owns_lock() && tree.mutex() == tree_);
+  return iterator(this->shared_from_this(this), ops::end(tree), true);
+}
+
+auto basic_tx_aware_tree::tx_object::rbegin_(const basic_tx_aware_tree::shared_lock_ptr& tree) const -> reverse_iterator {
+  assert(tree.owns_lock() && tree.mutex() == tree_);
+  return reverse_iterator(this->shared_from_this(this), ops::rbegin(tree));
+}
+
+auto basic_tx_aware_tree::tx_object::rend_(const basic_tx_aware_tree::shared_lock_ptr& tree) const -> reverse_iterator {
+  assert(tree.owns_lock() && tree.mutex() == tree_);
+  return reverse_iterator(this->shared_from_this(this), ops::rend(tree), true);
+}
+
 
 } /* namespace earnest::detail::tree */

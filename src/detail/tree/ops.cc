@@ -45,46 +45,5 @@ auto ops::split_child_page(
   return split_child_page_(f, self, child);
 }
 
-auto ops::begin(const shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>& f)
--> leaf_iterator {
-  return leaf::begin(
-      f.mutex(),
-      begin_end_leaf_(
-          f,
-          [](const branch::page_ref_vector& pages) -> branch::page_ref_vector::const_reference {
-            return pages.front();
-          }));
-}
-
-auto ops::end(const shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>& f)
--> leaf_iterator {
-  return leaf::end(
-      f.mutex(),
-      begin_end_leaf_(
-          f,
-          [](const branch::page_ref_vector& pages) -> branch::page_ref_vector::const_reference {
-            return pages.back();
-          }));
-}
-
-auto ops::rbegin(const shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>& f)
--> reverse_leaf_iterator {
-  reverse_leaf_iterator iter(end(f));
-  ++iter;
-  return iter;
-}
-
-auto ops::rend(const shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>& f)
--> reverse_leaf_iterator {
-  return reverse_leaf_iterator(
-      leaf::before_begin(
-          f.mutex(),
-          begin_end_leaf_(
-              f,
-              [](const branch::page_ref_vector& pages) -> branch::page_ref_vector::const_reference {
-                return pages.front();
-              })));
-}
-
 
 } /* namespace earnest::detail::tree */

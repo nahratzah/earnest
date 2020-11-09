@@ -37,11 +37,11 @@ inline auto leaf_iterator::operator!=(const leaf_iterator& y) const noexcept {
   return !(*this == y);
 }
 
-inline auto leaf_iterator::operator->() const -> const value_type* {
+inline auto leaf_iterator::operator->() const -> pointer {
   return value_ptr_.operator->();
 }
 
-inline auto leaf_iterator::operator*() const -> const value_type& {
+inline auto leaf_iterator::operator*() const -> reference {
   return value_ptr_.operator*();
 }
 
@@ -92,11 +92,11 @@ inline auto reverse_leaf_iterator::operator!=(const reverse_leaf_iterator& y) co
   return base_ != y.base_;
 }
 
-inline auto reverse_leaf_iterator::operator->() const -> const value_type* {
+inline auto reverse_leaf_iterator::operator->() const -> pointer {
   return base_.operator->();
 }
 
-inline auto reverse_leaf_iterator::operator*() const -> const value_type& {
+inline auto reverse_leaf_iterator::operator*() const -> reference {
   return base_.operator*();
 }
 

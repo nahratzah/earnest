@@ -132,22 +132,23 @@ auto ops::split_child_page_(
   return sibling;
 }
 
-template<typename BranchPageSel>
+template<typename Tree, typename BranchPageSel>
 auto ops::begin_end_leaf_(
-    const shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>& f,
+    const shared_lock_ptr<cycle_ptr::cycle_gptr<const Tree>>& f_lck,
     BranchPageSel&& branch_page_sel)
--> shared_lock_ptr<cycle_ptr::cycle_gptr<const leaf>> {
-  assert(f.owns_lock());
+-> std::enable_if_t<std::is_base_of_v<basic_tree, Tree>, shared_lock_ptr<cycle_ptr::cycle_gptr<const leaf>>> {
+  assert(f_lck.owns_lock());
+  const basic_tree& f = *f_lck;
 
   // XXX maybe throw an exception
-  assert(f->root_page_ != 0);
+  assert(f.root_page_ != 0);
 
-  shared_lock_ptr<cycle_ptr::cycle_gptr<const abstract_page>> locked_page(load_page_(f.mutex(), f->root_page_));
+  shared_lock_ptr<cycle_ptr::cycle_gptr<const abstract_page>> locked_page(load_page_(f_lck.mutex(), f.root_page_));
   for (;;) {
     const auto locked_branch = dynamic_cast<const branch*>(std::addressof(*locked_page));
     if (locked_branch == nullptr) break; // Must be a leaf.
     locked_page = shared_lock_ptr<cycle_ptr::cycle_gptr<const abstract_page>>(
-        load_page_(f.mutex(), branch_page_sel(locked_branch->pages_)->offset()));
+        load_page_(f_lck.mutex(), branch_page_sel(locked_branch->pages_)->offset()));
   }
 
   shared_lock_ptr<cycle_ptr::cycle_gptr<const leaf>> locked_leaf(
@@ -167,6 +168,51 @@ inline auto ops::load_page(
     return load_page_(f, offset);
   else
     return boost::polymorphic_pointer_downcast<Page>(load_page_(f, offset));
+}
+
+template<typename Tree>
+inline auto ops::begin(const shared_lock_ptr<cycle_ptr::cycle_gptr<const Tree>>& f)
+-> std::enable_if_t<std::is_base_of_v<basic_tree, Tree>, leaf_iterator> {
+  return leaf::begin(
+      f.mutex(),
+      begin_end_leaf_(
+          f,
+          [](const branch::page_ref_vector& pages) -> branch::page_ref_vector::const_reference {
+            return pages.front();
+          }));
+}
+
+template<typename Tree>
+inline auto ops::end(const shared_lock_ptr<cycle_ptr::cycle_gptr<const Tree>>& f)
+-> std::enable_if_t<std::is_base_of_v<basic_tree, Tree>, leaf_iterator> {
+  return leaf::end(
+      f.mutex(),
+      begin_end_leaf_(
+          f,
+          [](const branch::page_ref_vector& pages) -> branch::page_ref_vector::const_reference {
+            return pages.back();
+          }));
+}
+
+template<typename Tree>
+inline auto ops::rbegin(const shared_lock_ptr<cycle_ptr::cycle_gptr<const Tree>>& f)
+-> std::enable_if_t<std::is_base_of_v<basic_tree, Tree>, reverse_leaf_iterator> {
+  reverse_leaf_iterator iter(end(f));
+  ++iter;
+  return iter;
+}
+
+template<typename Tree>
+inline auto ops::rend(const shared_lock_ptr<cycle_ptr::cycle_gptr<const Tree>>& f)
+-> std::enable_if_t<std::is_base_of_v<basic_tree, Tree>, reverse_leaf_iterator> {
+  return reverse_leaf_iterator(
+      leaf::before_begin(
+          f.mutex(),
+          begin_end_leaf_(
+              f,
+              [](const branch::page_ref_vector& pages) -> branch::page_ref_vector::const_reference {
+                return pages.front();
+              })));
 }
 
 
