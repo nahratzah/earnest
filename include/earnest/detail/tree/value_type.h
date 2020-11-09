@@ -47,6 +47,7 @@ class earnest_export_ value_type
   virtual void unlock_shared() const = 0;
 
   virtual auto is_never_visible() const noexcept -> bool = 0;
+  virtual auto is_sentinel() const noexcept -> bool;
 
   static auto parent_page_for_read(shared_lock_ptr& vptr)
   -> std::tuple<

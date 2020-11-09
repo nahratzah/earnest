@@ -38,6 +38,10 @@ inline earnest_local_ auto value_type::parent_page_for_x_(VPtr& vptr) -> std::tu
   return std::make_tuple(std::move(parent), std::move(relocked));
 }
 
+auto value_type::is_sentinel() const noexcept -> bool {
+  return false;
+}
+
 auto value_type::parent_page_for_read(shared_lock_ptr& vptr)
 -> std::tuple<leaf::shared_lock_ptr, bool> {
   return parent_page_for_x_<leaf::shared_lock_ptr>(vptr);

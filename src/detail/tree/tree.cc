@@ -9,28 +9,28 @@ namespace earnest::detail::tree {
 
 basic_tree::~basic_tree() noexcept = default;
 
-
-basic_tree::tx_object::~tx_object() noexcept = default;
-
-auto basic_tree::tx_object::empty() const -> bool {
-  std::shared_lock<basic_tree> lck(*tree_);
-  return tree_->root_page_ == 0u;
+auto basic_tree::has_pages() const -> bool {
+  return root_page_ != 0u;
 }
 
-auto basic_tree::tx_object::begin() const -> leaf_iterator {
-  return ops::begin(shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>(tree_));
+
+basic_tx_aware_tree::~basic_tx_aware_tree() noexcept = default;
+
+
+basic_tx_aware_tree::tx_object::~tx_object() noexcept = default;
+
+auto basic_tx_aware_tree::tx_object::empty() const -> bool {
+  basic_tx_aware_tree::shared_lock_ptr locked_tree(tree_);
+  return !locked_tree->has_pages()
+      || begin_(locked_tree).is_sentinel();
 }
 
-auto basic_tree::tx_object::end() const -> leaf_iterator {
-  return ops::end(shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>(tree_));
+auto basic_tx_aware_tree::tx_object::begin() const -> iterator {
+  return begin_(basic_tx_aware_tree::shared_lock_ptr(tree_));
 }
 
-auto basic_tree::tx_object::rbegin() const -> reverse_leaf_iterator {
-  return ops::rbegin(shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>(tree_));
-}
-
-auto basic_tree::tx_object::rend() const -> reverse_leaf_iterator {
-  return ops::rend(shared_lock_ptr<cycle_ptr::cycle_gptr<const basic_tree>>(tree_));
+auto basic_tx_aware_tree::tx_object::end() const -> iterator {
+  return end_(basic_tx_aware_tree::shared_lock_ptr(tree_));
 }
 
 

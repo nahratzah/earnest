@@ -36,6 +36,7 @@ class leaf_sentinel final
   void unlock_shared() const override { mtx_.unlock_shared(); }
 
   auto is_never_visible() const noexcept -> bool override { return true; }
+  auto is_sentinel() const noexcept -> bool override { return true; }
 
   private:
   void encode(boost::asio::mutable_buffer buf) const override {
