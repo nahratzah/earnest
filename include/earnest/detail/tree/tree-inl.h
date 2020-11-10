@@ -10,9 +10,11 @@
 namespace earnest::detail::tree {
 
 
-template<typename TreeImpl>
-inline auto basic_tree::create(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const class loader> loader, std::size_t items_per_leaf, std::size_t items_per_branch, allocator_type alloc)
--> std::enable_if_t<std::is_base_of_v<basic_tree, TreeImpl>, cycle_ptr::cycle_gptr<TreeImpl>> {
+template<typename TreeImpl, typename Loader>
+inline auto basic_tree::create(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<Loader> loader, std::size_t items_per_leaf, std::size_t items_per_branch, allocator_type alloc)
+-> std::enable_if_t<
+    std::is_base_of_v<basic_tree, TreeImpl> && std::is_base_of_v<class loader, std::remove_const_t<Loader>>,
+    cycle_ptr::cycle_gptr<TreeImpl>> {
   create_(db, offset, *loader, items_per_leaf, items_per_branch);
 
   return cycle_ptr::allocate_cycle<TreeImpl>(
@@ -22,6 +24,11 @@ inline auto basic_tree::create(std::shared_ptr<class db> db, txfile::transaction
       std::move(loader),
       alloc);
 }
+
+
+inline basic_tx_aware_tree::basic_tx_aware_tree(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const class loader> loader, allocator_type alloc)
+: basic_tree(std::move(db), std::move(offset), std::move(loader), std::move(alloc))
+{}
 
 
 inline basic_tx_aware_tree::tx_object::tx_object(
@@ -134,9 +141,35 @@ inline void basic_tx_aware_tree::tx_object::iterator_<LeafIterator>::seek_backwa
 
 
 template<typename KeyType, typename ValueType, typename... Augments>
-inline tx_aware_tree<KeyType, ValueType, Augments...>::tx_aware_tree(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const tx_aware_loader<KeyType, ValueType, Augments...>> loader)
-: impl_(*this, cycle_ptr::allocate_cycle<basic_tree>(std::move(db), offset, std::move(loader)))
+inline tx_aware_tree<KeyType, ValueType, Augments...>::tx_aware_tree(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const tx_aware_loader<KeyType, ValueType, Augments...>> loader, allocator_type alloc)
+: basic_tx_aware_tree(std::move(db), offset, std::move(loader), alloc)
 {}
+
+template<typename KeyType, typename ValueType, typename... Augments>
+inline auto tx_aware_tree<KeyType, ValueType, Augments...>::load(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const tx_aware_loader<KeyType, ValueType, Augments...>> loader)
+-> cycle_ptr::cycle_gptr<tx_aware_tree> {
+  return boost::polymorphic_pointer_downcast<tx_aware_tree>(
+      obj_cache(db)->get(
+          offset,
+          nullptr, // XXX should the db be its own domain?
+          [db, loader](allocator_type alloc, txfile::transaction::offset_type offset) -> cycle_ptr::cycle_gptr<tx_aware_tree> {
+            return cycle_ptr::allocate_cycle<tx_aware_tree>(
+                alloc,
+                db, offset, loader, alloc);
+          }));
+}
+
+template<typename KeyType, typename ValueType, typename... Augments>
+inline auto tx_aware_tree<KeyType, ValueType, Augments...>::create(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const tx_aware_loader<KeyType, ValueType, Augments...>> loader, std::size_t items_per_leaf, std::size_t items_per_branch)
+-> cycle_ptr::cycle_gptr<tx_aware_tree> {
+  return boost::polymorphic_pointer_downcast<tx_aware_tree>(
+      obj_cache(db)->get(
+          offset,
+          nullptr, // XXX should the db be its own domain?
+          [db, loader, items_per_leaf, items_per_branch](allocator_type alloc, txfile::transaction::offset_type offset) -> cycle_ptr::cycle_gptr<tx_aware_tree> {
+            return basic_tree::create<tx_aware_tree>(db, offset, loader, items_per_leaf, items_per_branch, alloc);
+          }));
+}
 
 
 template<typename ValueType, typename Iterator>
@@ -221,7 +254,7 @@ template<typename KeyType, typename ValueType, typename... Augments>
 inline tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::tx_object(
     db::transaction& tx,
     cycle_ptr::cycle_gptr<tx_aware_tree> tree)
-: impl_(*this, tx.on(tree.impl_))
+: impl_(cycle_ptr::allocate_cycle<basic_tx_aware_tree::tx_object>(tx.get_allocator(), tx, std::move(tree)))
 {}
 
 template<typename KeyType, typename ValueType, typename... Augments>
@@ -241,12 +274,12 @@ inline auto tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::end() con
 
 template<typename KeyType, typename ValueType, typename... Augments>
 inline auto tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::rbegin() const -> reverse_iterator {
-  return iterator(impl_->rbegin());
+  return reverse_iterator(impl_->rbegin());
 }
 
 template<typename KeyType, typename ValueType, typename... Augments>
 inline auto tx_aware_tree<KeyType, ValueType, Augments...>::tx_object::rend() const -> reverse_iterator {
-  return iterator(impl_->rend());
+  return reverse_iterator(impl_->rend());
 }
 
 

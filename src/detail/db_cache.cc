@@ -86,9 +86,6 @@ void db_cache::invalidate_on_rollback(
 }
 
 
-db_cache::domain::~domain() noexcept = default;
-
-
 db_cache::cache_obj::~cache_obj() noexcept = default;
 
 

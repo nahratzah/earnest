@@ -256,7 +256,7 @@ class earnest_export_ db::db_obj {
   db_obj& operator=(db_obj&&) = delete;
 
   db_obj(std::shared_ptr<class db> db);
-  virtual ~db_obj() noexcept = 0;
+  ~db_obj() noexcept = default;
 
   ///\brief The object cache of the database.
   auto obj_cache() const -> cycle_ptr::cycle_gptr<detail::db_cache>;

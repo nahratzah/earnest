@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <shared_mutex>
+#include <type_traits>
 
 #include <earnest/db.h>
 #include <earnest/detail/export_.h>
@@ -36,16 +37,18 @@ class earnest_export_ basic_tree
   using size_type = tree_size_type;
   using allocator_type = db_cache::allocator_type;
 
-  basic_tree(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const class loader> loader, allocator_type alloc = allocator_type());
-  ~basic_tree() noexcept override;
-
   protected:
+  basic_tree(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const class loader> loader, allocator_type alloc = allocator_type());
+  ~basic_tree() noexcept;
+
   static void create_(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, const class loader& loader, std::size_t items_per_leaf, std::size_t items_per_branch);
 
   public:
-  template<typename TreeImpl = basic_tree>
-  static auto create(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const class loader> loader, std::size_t items_per_leaf, std::size_t items_per_branch, allocator_type alloc = allocator_type())
-  -> std::enable_if_t<std::is_base_of_v<basic_tree, TreeImpl>, cycle_ptr::cycle_gptr<TreeImpl>>;
+  template<typename TreeImpl, typename Loader>
+  static auto create(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<Loader> loader, std::size_t items_per_leaf, std::size_t items_per_branch, allocator_type alloc = allocator_type())
+  -> std::enable_if_t<
+      std::is_base_of_v<basic_tree, TreeImpl> && std::is_base_of_v<class loader, std::remove_const_t<Loader>>,
+      cycle_ptr::cycle_gptr<TreeImpl>>;
 
   auto get_allocator() const -> allocator_type { return alloc_; }
 
@@ -79,7 +82,7 @@ class basic_tx_aware_tree
 
   class tx_object;
 
-  using basic_tree::basic_tree;
+  basic_tx_aware_tree(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const class loader> loader, allocator_type alloc = allocator_type());
   ~basic_tx_aware_tree() noexcept override;
 };
 
@@ -163,7 +166,7 @@ class basic_tx_aware_tree::tx_object::iterator_ {
 
 template<typename KeyType, typename ValueType, typename... Augments>
 class tx_aware_tree
-: public db::db_obj,
+: public basic_tx_aware_tree,
   public cycle_ptr::cycle_base
 {
   private:
@@ -174,15 +177,24 @@ class tx_aware_tree
   public:
   class tx_object;
 
-  tx_aware_tree(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const tx_aware_loader<KeyType, ValueType, Augments...>> loader);
+  ///\brief Cache bypassing constructor.
+  tx_aware_tree(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const tx_aware_loader<KeyType, ValueType, Augments...>> loader, allocator_type alloc = allocator_type());
 
-  private:
-  cycle_ptr::cycle_member_ptr<basic_tx_aware_tree> impl_;
+  ///\brief Load existing tree from database.
+  ///\details Uses the database cache to hold the tree.
+  static auto load(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const tx_aware_loader<KeyType, ValueType, Augments...>> loader)
+  -> cycle_ptr::cycle_gptr<tx_aware_tree>;
+  ///\brief Create a new tree in the database.
+  ///\details Uses the database cache to hold the tree.
+  static auto create(std::shared_ptr<class db> db, txfile::transaction::offset_type offset, std::shared_ptr<const tx_aware_loader<KeyType, ValueType, Augments...>> loader, std::size_t items_per_leaf, std::size_t items_per_branch)
+  -> cycle_ptr::cycle_gptr<tx_aware_tree>;
 };
 
 
 template<typename ValueType, typename Iterator>
 class tx_aware_tree_iterator {
+  template<typename, typename, typename...> friend class tx_aware_tree;
+
   public:
   using iterator_category = typename Iterator::iterator_category;
   using difference_type = typename Iterator::difference_type;

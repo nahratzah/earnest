@@ -38,11 +38,10 @@ class earnest_export_ db_cache
     {}
 
     auto operator==(const key& y) const noexcept -> bool {
-      auto x_domain = domain.lock(), y_domain = y.domain.lock();
       return off == y.off
-          && x_domain != nullptr
-          && y_domain != nullptr
-          && raw_domain_ptr == y.raw_domain_ptr;
+          && raw_domain_ptr == y.raw_domain_ptr
+          && domain.lock() != nullptr
+          && y.domain.lock() != nullptr;
     }
 
     auto operator!=(const key& y) const noexcept -> bool {
@@ -124,8 +123,8 @@ class earnest_export_ db_cache
 };
 
 class earnest_export_ db_cache::domain {
-  public:
-  virtual ~domain() noexcept = 0;
+  protected:
+  ~domain() noexcept = default;
 };
 
 class earnest_export_ db_cache::cache_obj {

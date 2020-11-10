@@ -120,7 +120,7 @@ class tree_fixture
   public:
   tree_fixture()
   : db_fixture(),
-    tree(tree::basic_tree::create(this->db, this->offset_advance(tree::basic_tree::SIZE), mk_loader_(), 4, 4))
+    tree(tree::basic_tree::create<tree::basic_tx_aware_tree>(this->db, this->offset_advance(tree::basic_tree::SIZE), mk_loader_(), 4, 4))
   {}
 
   private:
@@ -134,7 +134,7 @@ class tree_fixture
     }
   };
 
-  static auto mk_loader_() -> std::shared_ptr<tree::loader> {
+  static auto mk_loader_() -> std::shared_ptr<tree::tx_aware_loader<string_value_type, string_value_type>> {
     return std::make_shared<mock_loader>();
   }
 
@@ -323,6 +323,40 @@ class tree_fixture
   }
 
   const cycle_ptr::cycle_gptr<tree::basic_tree> tree;
+};
+
+
+class tx_tree_fixture
+: public db_fixture
+{
+  public:
+  tx_tree_fixture()
+  : db_fixture(),
+    tree(tree::tx_aware_tree<string_value_type, string_value_type>::create(this->db, this->offset_advance(tree::basic_tree::SIZE), mk_loader_(*this), 4, 4))
+  {}
+
+  private:
+  class mock_loader
+  : public tree::tx_aware_loader<string_value_type, string_value_type>
+  {
+    public:
+    explicit mock_loader(tx_tree_fixture& self)
+    : self(self)
+    {}
+
+    auto allocate_disk_space(earnest::txfile::transaction& tx, std::size_t bytes) const -> offset_type override {
+      return self.offset_advance(bytes);
+    }
+
+    tx_tree_fixture& self;
+  };
+
+  static auto mk_loader_(tx_tree_fixture& self) -> std::shared_ptr<tree::tx_aware_loader<string_value_type, string_value_type>> {
+    return std::make_shared<mock_loader>(self);
+  }
+
+  protected:
+  const cycle_ptr::cycle_gptr<tree::tx_aware_tree<string_value_type, string_value_type>> tree;
 };
 
 
@@ -769,6 +803,35 @@ SUITE(branch) {
   }
 
 } /* SUITE(branch) */
+
+
+SUITE(tx_tree) {
+
+  TEST_FIXTURE(tx_tree_fixture, empty_traverse) {
+    std::vector<std::string> values;
+
+    auto tx = db->begin();
+    std::transform(
+        tx.on(tree)->begin(), tx.on(tree)->end(),
+        std::back_inserter(values),
+        [](const string_value_type& s) -> const std::string& { return s.value; });
+
+    CHECK_EQUAL(std::vector<std::string>(), values);
+  }
+
+  TEST_FIXTURE(tx_tree_fixture, empty_reverse_traverse) {
+    std::vector<std::string> values;
+
+    auto tx = db->begin();
+    std::transform(
+        tx.on(tree)->rbegin(), tx.on(tree)->rend(),
+        std::back_inserter(values),
+        [](const string_value_type& s) -> const std::string& { return s.value; });
+
+    CHECK_EQUAL(std::vector<std::string>(), values);
+  }
+
+}
 
 
 int main() {

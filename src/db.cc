@@ -393,8 +393,6 @@ void db::transaction::rollback_() noexcept {
 }
 
 
-db::db_obj::~db_obj() noexcept = default;
-
 auto db::db_obj::obj_cache() const -> cycle_ptr::cycle_gptr<detail::db_cache> {
   return obj_cache(db());
 }
