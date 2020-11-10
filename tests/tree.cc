@@ -15,10 +15,10 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <string>
+#include <exception>
 #include <memory>
+#include <string>
 #include <vector>
-#include <algorithm>
 
 namespace tree = ::earnest::detail::tree;
 
@@ -807,9 +807,20 @@ SUITE(branch) {
 
 SUITE(tx_tree) {
 
+  TEST_FIXTURE(tx_tree_fixture, throws_when_there_are_no_pages) {
+    auto tx = db->begin();
+    auto ttx = tx.on(tree);
+
+    CHECK_THROW(ttx->begin(), std::exception);
+    CHECK_THROW(ttx->end(), std::exception);
+    CHECK_THROW(ttx->rbegin(), std::exception);
+    CHECK_THROW(ttx->rend(), std::exception);
+  }
+
   TEST_FIXTURE(tx_tree_fixture, empty_traverse) {
     std::vector<std::string> values;
 
+    tree->ensure_root_page_exists();
     auto tx = db->begin();
     std::transform(
         tx.on(tree)->begin(), tx.on(tree)->end(),
@@ -822,6 +833,7 @@ SUITE(tx_tree) {
   TEST_FIXTURE(tx_tree_fixture, empty_reverse_traverse) {
     std::vector<std::string> values;
 
+    tree->ensure_root_page_exists();
     auto tx = db->begin();
     std::transform(
         tx.on(tree)->rbegin(), tx.on(tree)->rend(),

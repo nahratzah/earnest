@@ -119,10 +119,16 @@ class earnest_export_ leaf final
       earnest::detail::unique_lock_ptr<cycle_ptr::cycle_gptr<value_type>>>;
   ///\brief Size in bytes of the key type.
   auto bytes_per_key_() const noexcept -> std::size_t;
+  ///\brief Size in bytes of the key type.
+  static auto bytes_per_key_(const class cfg& cfg) noexcept -> std::size_t;
   ///\brief Size in bytes of the value type.
   auto bytes_per_val_() const noexcept -> std::size_t;
+  ///\brief Size in bytes of the value type.
+  static auto bytes_per_val_(const class cfg& cfg) noexcept -> std::size_t;
   ///\brief Size in bytes of the page.
   auto bytes_per_page_() const noexcept -> std::size_t;
+  ///\brief Size in bytes of the page.
+  static auto bytes_per_page_(const class cfg& cfg) noexcept -> std::size_t;
   ///\brief Compute offset from slot index.
   auto offset_for_idx_(index_type idx) const noexcept -> offset_type;
 

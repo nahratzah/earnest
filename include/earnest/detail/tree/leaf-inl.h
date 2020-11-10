@@ -49,15 +49,27 @@ inline auto leaf::key() const -> cycle_ptr::cycle_gptr<const key_type> {
 }
 
 inline auto leaf::bytes_per_key_() const noexcept -> std::size_t {
-  return cfg->key_bytes;
+  return bytes_per_key_(*cfg);
+}
+
+inline auto leaf::bytes_per_key_(const class cfg& cfg) noexcept -> std::size_t {
+  return cfg.key_bytes;
 }
 
 inline auto leaf::bytes_per_val_() const noexcept -> std::size_t {
-  return cfg->val_bytes;
+  return bytes_per_val_(*cfg);
+}
+
+inline auto leaf::bytes_per_val_(const class cfg& cfg) noexcept -> std::size_t {
+  return cfg.val_bytes;
 }
 
 inline auto leaf::bytes_per_page_() const noexcept -> std::size_t {
-  return header::SIZE + bytes_per_key_() + cfg->items_per_leaf_page * bytes_per_val_();
+  return bytes_per_page_(*cfg);
+}
+
+inline auto leaf::bytes_per_page_(const class cfg& cfg) noexcept -> std::size_t {
+  return header::SIZE + bytes_per_key_(cfg) + cfg.items_per_leaf_page * bytes_per_val_(cfg);
 }
 
 inline auto leaf::offset_for_idx_(index_type idx) const noexcept -> offset_type {

@@ -12,6 +12,7 @@
 #include <boost/polymorphic_pointer_cast.hpp>
 #include <cassert>
 #include <memory>
+#include <stdexcept>
 
 namespace earnest::detail::tree {
 
@@ -140,8 +141,7 @@ auto ops::begin_end_leaf_(
   assert(f_lck.owns_lock());
   const basic_tree& f = *f_lck;
 
-  // XXX maybe throw an exception
-  assert(f.root_page_ != 0);
+  if (f.root_page_ == 0) throw std::runtime_error("tree has no pages"); // XXX maybe something better?
 
   shared_lock_ptr<cycle_ptr::cycle_gptr<const abstract_page>> locked_page(load_page_(f_lck.mutex(), f.root_page_));
   for (;;) {

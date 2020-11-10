@@ -70,6 +70,8 @@ struct earnest_local_ ops {
   static auto rend(
       const shared_lock_ptr<cycle_ptr::cycle_gptr<const Tree>>& f)
   -> std::enable_if_t<std::is_base_of_v<basic_tree, Tree>, reverse_leaf_iterator>;
+
+  static void ensure_root_page(basic_tree& f); // Locks are managed internally.
 };
 
 

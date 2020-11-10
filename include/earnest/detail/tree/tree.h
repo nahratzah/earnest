@@ -51,6 +51,7 @@ class earnest_export_ basic_tree
       cycle_ptr::cycle_gptr<TreeImpl>>;
 
   auto get_allocator() const -> allocator_type { return alloc_; }
+  void ensure_root_page_exists();
 
   void lock() { mtx_.lock(); }
   auto try_lock() -> bool { return mtx_.try_lock(); }

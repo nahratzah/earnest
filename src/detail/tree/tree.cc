@@ -99,6 +99,10 @@ void basic_tree::create_(std::shared_ptr<class db> db, txfile::transaction::offs
   tx.commit();
 }
 
+void basic_tree::ensure_root_page_exists() {
+  ops::ensure_root_page(*this);
+}
+
 auto basic_tree::has_pages() const -> bool {
   return root_page_ != 0u;
 }

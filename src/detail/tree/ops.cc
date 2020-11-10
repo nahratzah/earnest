@@ -2,9 +2,15 @@
 #include <earnest/detail/tree/branch.h>
 #include <earnest/detail/tree/leaf.h>
 #include <earnest/detail/tree/leaf_iterator.h>
+#include <earnest/txfile.h>
 #include <boost/system/error_code.hpp>
 #include <boost/system/system_error.hpp>
 #include <boost/polymorphic_pointer_cast.hpp>
+#include <boost/asio/write_at.hpp>
+#include <boost/asio/buffer.hpp>
+#include <boost/asio/completion_condition.hpp>
+#include <memory>
+#include <vector>
 
 namespace earnest::detail::tree {
 
@@ -43,6 +49,33 @@ auto ops::split_child_page(
     const unique_lock_ptr<cycle_ptr::cycle_gptr<leaf>>& child)
 -> unique_lock_ptr<cycle_ptr::cycle_gptr<leaf>> {
   return split_child_page_(f, self, child);
+}
+
+void ops::ensure_root_page(basic_tree& f) {
+  using buf_type = std::vector<
+      std::uint8_t,
+      typename std::allocator_traits<txfile::transaction::allocator_type>::template rebind_alloc<std::uint8_t>>;
+
+  {
+    std::shared_lock<basic_tree> lck(f);
+    if (f.root_page_ != 0) return;
+  }
+
+  std::lock_guard<basic_tree> lck(f);
+  if (f.root_page_ != 0) return; // Must re-check, because we released the lock in between.
+
+  auto tx = f.txfile_begin(false);
+  const auto offset = f.loader->allocate_disk_space(tx, leaf::bytes_per_page_(*f.cfg));
+
+  buf_type buf(leaf::bytes_per_page_(*f.cfg), std::uint8_t(0), tx.get_allocator());
+  leaf::header{ leaf::magic, 0u, 0u, 0u, 0u }.encode(boost::asio::buffer(buf));
+  boost::asio::write_at(tx, offset, boost::asio::buffer(buf), boost::asio::transfer_all());
+
+  tx.on_commit(
+      [&f, offset]() noexcept {
+        f.root_page_ = offset;
+      });
+  tx.commit();
 }
 
 
