@@ -46,7 +46,7 @@ endif()
 
 add_library (earnest
   src/fd.cc
-  src/detail/wal2.cc
+  src/detail/wal.cc
   src/detail/replacement_map.cc
   $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/lio_op.cc>
   $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/aio_op.cc>

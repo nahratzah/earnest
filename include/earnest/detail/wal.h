@@ -1,5 +1,5 @@
-#ifndef EARNEST_DETAIL_WAL2_H
-#define EARNEST_DETAIL_WAL2_H
+#ifndef EARNEST_DETAIL_WAL_H
+#define EARNEST_DETAIL_WAL_H
 
 #include <array>
 #include <cstddef>
@@ -581,6 +581,6 @@ extern template class wal<>;
 
 } /* namespace earnest::detail */
 
-#include "wal2-inl.h"
+#include "wal-inl.h"
 
-#endif /* EARNEST_DETAIL_WAL2_H */
+#endif /* EARNEST_DETAIL_WAL_H */

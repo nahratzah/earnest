@@ -1,4 +1,4 @@
-#include <earnest/detail/wal2.h>
+#include <earnest/detail/wal.h>
 
 namespace earnest::detail {
 
