@@ -827,6 +827,11 @@ void wal<Executor, WalAllocator>::tx<Allocator>::resize(size_type new_size, std:
       std::in_place_type<wal_tx_record<wal_entry::resize>>, new_size);
 
   wmap_.truncate(new_size);
+  if (file_end_ < new_size) {
+    auto ins = wmap_.insert(file_end_, new_size - file_end_);
+    std::memset(ins.second.data(), 0, ins.second.size());
+  }
+
   file_end_ = new_size;
   file_end_changed_ = true;
 
