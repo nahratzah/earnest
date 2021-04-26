@@ -105,7 +105,38 @@ endif ()
 install (TARGETS earnest DESTINATION lib)
 install (FILES
   include/earnest/fd.h
+  include/earnest/shared_resource_allocator.h
   DESTINATION include/earnest)
+install (FILES
+  include/earnest/detail/allocated_buffer.h
+  include/earnest/detail/allocated_object.h
+  include/earnest/detail/buffered_read_stream_at.h
+  include/earnest/detail/cheap_fn_ref.h
+  include/earnest/detail/clamp_buffer.h
+  include/earnest/detail/closeable_transaction.h
+  include/earnest/detail/completion_barrier.h
+  include/earnest/detail/completion_wrapper.h
+  include/earnest/detail/concat_buffer.h
+  include/earnest/detail/export_.h
+  include/earnest/detail/fanout.h
+  include/earnest/detail/locked_ptr.h
+  include/earnest/detail/replacement_map.h
+  include/earnest/detail/stop_continue.h
+  include/earnest/detail/unique_alloc_ptr.h
+  include/earnest/detail/wal-inl.h
+  include/earnest/detail/wal.h
+  DESTINATION include/earnest/detail)
+install (FILES
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/include/earnest/detail/aio/aio_op.h>
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/include/earnest/detail/aio/flush_op.h>
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/include/earnest/detail/aio/lio_op.h>
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/include/earnest/detail/aio/operation_impl.h>
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/include/earnest/detail/aio/buffer_holder.h>
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/include/earnest/detail/aio/aio_op_list.h>
+  $<$<STREQUAL:${IO_BACKEND},aio_kqueue>:modules/aio_kqueue/include/earnest/detail/aio/kqueue_fd.h>
+  $<$<STREQUAL:${IO_BACKEND},aio_kqueue>:modules/aio_kqueue/include/earnest/detail/aio/kqueue_aio.h>
+  $<$<STREQUAL:${IO_BACKEND},aio_kqueue>:modules/aio_kqueue/include/earnest/detail/aio/asio.h>
+  DESTINATION include/earnest/detail/aio)
 
 add_subdirectory (tests)
 
