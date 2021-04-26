@@ -1,20 +1,136 @@
 #ifndef EARNEST_DETAIL_REPLACEMENT_MAP_H
 #define EARNEST_DETAIL_REPLACEMENT_MAP_H
 
-#include <earnest/detail/export_.h>
-#include <algorithm>
+#include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <iterator>
+#include <limits>
 #include <memory>
-#include <vector>
+#include <stdexcept>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+#include <asio/buffer.hpp>
 #include <boost/intrusive/set.hpp>
-#include <boost/intrusive/options.hpp>
-#include <earnest/fd.h>
-#include <earnest/shared_resource_allocator.h>
-#include <earnest/detail/unique_alloc_ptr.h>
 
 namespace earnest::detail {
+
+
+using replacement_map_value_hook_ = boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true>>;
+
+
+class replacement_map_value
+: public replacement_map_value_hook_
+{
+  public:
+  using offset_type = std::uint64_t;
+  using size_type = std::size_t;
+
+  replacement_map_value() noexcept = default;
+
+  template<typename Alloc>
+  replacement_map_value(offset_type off, asio::const_buffer buf, Alloc&& alloc) {
+    asio::mutable_buffer my_buf;
+    std::tie(*this, my_buf) = allocate(off, buf.size(), std::forward<Alloc>(alloc));
+    asio::buffer_copy(my_buf, buf);
+  }
+
+  replacement_map_value(offset_type off, asio::const_buffer buf)
+  : replacement_map_value(off, buf, std::allocator<std::byte>())
+  {}
+
+  replacement_map_value(offset_type off, const replacement_map_value& buf)
+  : off_(off),
+    len_(buf.len_),
+    data_(buf.data_)
+  {
+    if (len_ > std::numeric_limits<offset_type>::max() - off_)
+      throw std::length_error("replacement_map buffer-end-offset overflow");
+  }
+
+  template<typename Alloc>
+  static auto allocate(offset_type off, size_type len, Alloc&& alloc) -> std::tuple<replacement_map_value, asio::mutable_buffer> {
+    std::tuple<replacement_map_value, asio::mutable_buffer> result;
+
+    if (len > std::numeric_limits<offset_type>::max() - off)
+      throw std::length_error("replacement_map buffer-end-offset overflow");
+
+    using alloc_traits = typename std::allocator_traits<std::decay_t<Alloc>>::template rebind_traits<std::byte>;
+    typename alloc_traits::allocator_type a = std::forward<Alloc>(alloc);
+#if __cpp_lib_shared_ptr_arrays >= 201707L
+    auto dptr = std::allocate_shared<std::byte[]>(a, len);
+#else
+    std::shared_ptr<std::byte> dptr;
+    {
+      auto raw_ptr = alloc_traits::allocate(a, len);
+      dptr.reset(
+          raw_ptr,
+          [a, len](std::byte* ptr) mutable noexcept -> void {
+            alloc_traits::deallocate(a, ptr, len);
+          },
+          a);
+    }
+#endif
+    std::get<1>(result) = asio::buffer(dptr.get(), len);
+
+    std::get<0>(result).off_ = off;
+    std::get<0>(result).len_ = len;
+    std::get<0>(result).data_ = std::move(dptr);
+
+    return result;
+  }
+
+  auto offset() const noexcept -> offset_type { return off_; }
+  auto size() const noexcept -> size_type { return len_; }
+  auto end_offset() const noexcept -> offset_type { return offset() + size(); }
+  auto data() const noexcept -> const void* { return data_.get(); }
+  auto buffer() const noexcept -> asio::const_buffer { return asio::buffer(data(), size()); }
+  auto shared_data() const noexcept -> std::shared_ptr<const void> { return data_; }
+
+  auto start_at(offset_type new_off) {
+    if (new_off < offset() || new_off > end_offset())
+      throw std::invalid_argument("replacement_map start_at invalid position");
+
+    const size_type shift = new_off - off_;
+    data_ = std::shared_ptr<const void>(data_, reinterpret_cast<const std::byte*>(data_.get()) + shift);
+    len_ -= shift;
+    off_ += shift;
+  }
+
+  auto truncate(size_type new_sz) {
+    if (new_sz > len_)
+      throw std::invalid_argument("replacement_map truncate may not grow size");
+
+    len_ = new_sz;
+  }
+
+  private:
+  offset_type off_ = 0;
+  size_type len_ = 0;
+  std::shared_ptr<const void> data_;
+};
+
+
+struct rmv_key_extractor_ {
+  using type = std::uint64_t;
+
+  auto operator()(const replacement_map_value& rmv) const noexcept -> type;
+};
+
+
+auto equal_(
+  const boost::intrusive::set<
+      replacement_map_value,
+      boost::intrusive::base_hook<replacement_map_value_hook_>,
+      boost::intrusive::constant_time_size<false>,
+      boost::intrusive::key_of_value<rmv_key_extractor_>>& x,
+  const boost::intrusive::set<
+      replacement_map_value,
+      boost::intrusive::base_hook<replacement_map_value_hook_>,
+      boost::intrusive::constant_time_size<false>,
+      boost::intrusive::key_of_value<rmv_key_extractor_>>& y) noexcept
+-> bool;
 
 
 /**
@@ -22,274 +138,345 @@ namespace earnest::detail {
  * \details
  * A replacement map holds on to file changes in memory and allows for them to
  * be applied during reads.
+ *
+ * \tparam Alloc An allocator type.
  */
-class earnest_export_ replacement_map {
+template<typename Alloc = std::allocator<std::byte>>
+class replacement_map
+: private std::allocator_traits<Alloc>::template rebind_alloc<replacement_map_value>
+{
   public:
-  class value_type
-  : public boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true>>
-  {
-    public:
-    using size_type = std::size_t;
+  using value_type = replacement_map_value;
+  using reference = value_type&;
+  using const_reference = const value_type&;
+  using pointer = value_type*;
+  using const_pointer = const value_type*;
+  using allocator_type = typename std::allocator_traits<Alloc>::template rebind_alloc<value_type>;
 
-    value_type() = default;
-
-#if __cpp_lib_shared_ptr_arrays >= 201611
-    public:
-    template<typename Deleter>
-    value_type(fd::offset_type first, std::unique_ptr<std::uint8_t[], Deleter>&& data, size_type size)
-    : first(first),
-      data_(std::move(data)),
-      size_(size)
-    {}
-#else
-    public:
-    template<typename Deleter>
-    value_type(fd::offset_type first, std::unique_ptr<std::uint8_t[], Deleter>&& data, size_type size)
-    : first(first),
-      data_(data.get(), data.get_deleter()),
-      size_(size)
-    {
-      data.release();
-    }
-#endif
-
-    public:
-    auto begin_offset() const noexcept -> fd::offset_type {
-      return first;
-    }
-
-    auto end_offset() const noexcept -> fd::offset_type {
-      return first + size();
-    }
-
-    auto size() const noexcept -> size_type {
-      return size_;
-    }
-
-    auto data() const noexcept -> const void* {
-      return data_.get();
-    }
-
-    ///\brief Remove bytes from the front of the entry.
-    ///\param[in] n Number of bytes to remove.
-    ///\return This entry.
-    ///\throw std::overflow_error if \p n is larger than the size of this entry.
-    auto pop_front(size_type n = 1) -> value_type&;
-
-    ///\brief Remove bytes from the rear of the entry.
-    ///\param[in] n Number of bytes to remove.
-    ///\return This entry.
-    ///\throw std::overflow_error if \p n is larger than the size of this entry.
-    auto pop_back(size_type n = 1) -> value_type&;
-
-    ///\brief Remove bytes from the rear of the entry, until the entry is exactly \p n bytes.
-    ///\param[in] n Number of bytes to keep.
-    ///\return This entry.
-    ///\throw std::overflow_error if \p n is larger than the size of this entry.
-    auto keep_front(size_type n) -> value_type&;
-
-    ///\brief Remove bytes from the front of the entry, until the entry is exactly \p n bytes.
-    ///\param[in] n Number of bytes to keep.
-    ///\return This entry.
-    ///\throw std::overflow_error if \p n is larger than the size of this entry.
-    auto keep_back(size_type n) -> value_type&;
-
-    ///\brief Test if this entry is empty.
-    ///\return True if this entry holds zero bytes. False otherwise.
-    auto empty() const noexcept -> bool {
-      return size() == 0u;
-    }
-
-    private:
-    fd::offset_type first = 0;
-#if __cpp_lib_shared_ptr_arrays >= 201611
-    std::shared_ptr<const std::uint8_t[]> data_;
-#else
-    std::shared_ptr<const std::uint8_t> data_;
-#endif
-    size_type size_ = 0;
-  };
-
-  using allocator_type = shared_resource_allocator<value_type>;
+  using offset_type = value_type::offset_type;
+  using size_type = value_type::size_type;
 
   private:
-  struct entry_key_extractor_ {
-    using type = fd::offset_type;
+  using alloc_traits = std::allocator_traits<allocator_type>;
+  using map_type = boost::intrusive::set<
+      replacement_map_value,
+      boost::intrusive::base_hook<replacement_map_value_hook_>,
+      boost::intrusive::constant_time_size<false>,
+      boost::intrusive::key_of_value<rmv_key_extractor_>>;
 
-    auto operator()(const value_type& e) const noexcept -> type {
-      return e.begin_offset();
+  class disposer_ {
+    public:
+    explicit disposer_(replacement_map& self) noexcept
+    : self_(&self)
+    {}
+
+    auto operator()(value_type* ptr) const noexcept {
+      alloc_traits::destroy(*self_, ptr);
+      alloc_traits::deallocate(*self_, ptr, 1);
     }
+
+    auto owner() const noexcept -> const allocator_type* { return self_; }
+
+    private:
+    allocator_type* self_ = nullptr;
   };
 
-  using map_type = boost::intrusive::set<
-      value_type,
-      boost::intrusive::key_of_value<entry_key_extractor_>,
-      boost::intrusive::constant_time_size<false>>;
-
   public:
-  using const_iterator = map_type::const_iterator;
-  using iterator = const_iterator;
-  class tx;
+  using iterator = map_type::const_iterator;
+  using const_iterator = iterator;
 
-  explicit replacement_map(allocator_type alloc = allocator_type()) : alloc_(alloc) {}
-  replacement_map(const replacement_map& y);
-
-  replacement_map(replacement_map&& y) noexcept
-  : map_(std::move(y.map_))
+  explicit replacement_map(allocator_type alloc = allocator_type())
+      noexcept(std::is_nothrow_move_constructible_v<allocator_type>)
+  : allocator_type(std::move(alloc))
   {}
 
-  auto operator=(const replacement_map& y) -> replacement_map&;
-  auto operator=(replacement_map&& y) noexcept -> replacement_map&;
+  replacement_map(const replacement_map& other)
+  : allocator_type(alloc_traits::select_on_container_copy_construction(other))
+  {
+    map_.clone_from(
+        other.map_,
+        [this](const_reference v) {
+          return make_value_(v);
+        },
+        disposer_(*this));
+  }
 
-  ~replacement_map() noexcept;
+  replacement_map(replacement_map&& other) noexcept(std::is_nothrow_move_constructible_v<allocator_type> && std::is_nothrow_move_constructible_v<map_type>)
+  : allocator_type(other.get_allocator()),
+    map_(std::move(other.map_))
+  {}
 
-  auto begin() const -> const_iterator {
+  auto operator=(const replacement_map& other) -> replacement_map& {
+    clear();
+
+    if constexpr(alloc_traits::propagate_on_container_copy_assignment::value) {
+      allocator_type& my_alloc = *this;
+      my_alloc = other.get_allocator();
+    }
+
+    map_.clone_from(
+        other.map_,
+        [this](const_reference v) {
+          return make_value_(v);
+        },
+        disposer_(*this));
+
+    return *this;
+  }
+
+  auto operator=(replacement_map&& other) noexcept -> replacement_map& {
+    clear();
+
+    if constexpr(alloc_traits::propagate_on_container_move_assignment::value) {
+      allocator_type& my_alloc = *this;
+      my_alloc = std::move(other.get_allocator());
+    } else {
+#ifndef NDEBUG
+      allocator_type& my_alloc = *this;
+      allocator_type& other_alloc = other;
+      assert(my_alloc == other_alloc);
+#endif
+    }
+
+    map_ = std::move(other.map_);
+
+    return *this;
+  }
+
+  ~replacement_map() {
+    clear();
+  }
+
+  void swap(replacement_map& other) noexcept {
+    using std::swap;
+
+    if constexpr(alloc_traits::propagate_on_container_swap::value) {
+      allocator_type& my_alloc = *this;
+      allocator_type& other_alloc = other;
+      swap(my_alloc, other_alloc);
+    } else {
+#ifndef NDEBUG
+      allocator_type& my_alloc = *this;
+      allocator_type& other_alloc = other;
+      assert(my_alloc == other_alloc);
+#endif
+    }
+
+    swap(map_, other.map_);
+  }
+
+  auto get_allocator() const -> allocator_type {
+    return *this;
+  }
+
+  auto operator==(const replacement_map& y) const noexcept -> bool {
+    return equal_(map_, y.map_);
+  }
+
+  auto operator!=(const replacement_map& y) const noexcept -> bool {
+    return !(*this == y);
+  }
+
+  auto empty() const noexcept -> bool {
+    return map_.empty();
+  }
+
+  void clear() {
+    map_.clear_and_dispose(disposer_(*this));
+  }
+
+  auto insert(offset_type off, asio::const_buffer buf) -> iterator {
+    return insert_(make_value_(off, buf, get_allocator()));
+  }
+
+  [[nodiscard]]
+  auto insert(offset_type off, size_type len) -> std::pair<iterator, asio::mutable_buffer> {
+    value_type vt;
+    asio::mutable_buffer buf;
+    std::tie(vt, buf) = value_type::allocate(off, len, get_allocator());
+
+    return std::make_pair(insert_(make_value_(std::move(vt))), buf);
+  }
+
+  template<typename OffsetIter>
+  auto insert_many(OffsetIter b, OffsetIter e, asio::const_buffer buf) -> std::shared_ptr<const void> {
+    if (b == e) return nullptr;
+
+    const auto source = insert_(make_value_(*b, buf, get_allocator()));
+    for (++b; b != e; ++b) insert_(make_value_(*b, *source));
+    return source.shared_data();
+  }
+
+  template<typename OffsetIter>
+  [[nodiscard]]
+  auto insert_many(OffsetIter b, OffsetIter e, size_type len) -> std::pair<std::shared_ptr<const void>, asio::mutable_buffer> {
+    replacement_map_value template_value;
+    asio::mutable_buffer buf;
+    std::tie(template_value, buf) = replacement_map_value::allocate(0, len, get_allocator());
+
+    for (++b; b != e; ++b) insert_(make_value_(*b, template_value));
+    return std::make_pair(template_value.shared_data(), buf);
+  }
+
+  auto erase(offset_type begin_off, offset_type end_off) -> iterator {
+    if (begin_off > end_off)
+      throw std::invalid_argument("range must go from low to high offsets");
+    return erase_(begin_off, end_off);
+  }
+
+  void truncate(offset_type new_sz) noexcept {
+    erase(new_sz, std::numeric_limits<offset_type>::max());
+  }
+
+  auto begin() -> iterator {
     return map_.begin();
   }
 
-  auto cbegin() const -> const_iterator {
-    return begin();
+  auto end() -> iterator {
+    return map_.end();
+  }
+
+  auto begin() const -> const_iterator {
+    return map_.begin();
   }
 
   auto end() const -> const_iterator {
     return map_.end();
   }
 
+  auto cbegin() const -> const_iterator {
+    return begin();
+  }
+
   auto cend() const -> const_iterator {
     return end();
   }
 
-  ///\brief Test if the replacement_map is empty.
-  ///\returns True if the replacement_map is empty, false otherwise.
-  auto empty() const noexcept -> bool {
-    return map_.empty();
+  template<typename OtherAlloc>
+  auto merge(const replacement_map<OtherAlloc>& other) -> replacement_map& {
+    std::for_each(other.begin(), other.end(),
+        [this](const replacement_map_value& v) {
+          insert_(make_value_(v.offset(), v));
+        });
+    return *this;
   }
 
-  ///\brief Remove all records from the replacement_map.
-  void clear() noexcept;
+  template<typename OtherAlloc>
+  auto merge(replacement_map&& other) noexcept -> replacement_map& {
+#ifndef NDEBUG
+    allocator_type& my_alloc = *this;
+    allocator_type& other_alloc = other;
+    assert(my_alloc == other_alloc);
+#endif
 
-  ///\brief Remove all data at offset \p new_size and above.
-  ///\param[in] new_size The upper limit to apply to the replacement_map.
-  void truncate(fd::size_type new_size) noexcept;
-
-  ///\brief Swap this map with another map.
-  void swap(replacement_map& y) noexcept {
-    map_.swap(y.map_);
+    other.map_.clear_and_dispose(
+        [this](replacement_map_value* v) {
+          auto ptr = std::unique_ptr<value_type, disposer_>(nullptr, disposer_(*this));
+          ptr.reset(v);
+          insert_(std::move(v));
+        });
+    return *this;
   }
 
-  /**
-   * \brief Read data from the replacement map if applicable.
-   * \details
-   * Data in the replacement map is sparse.
-   * Thus not all reads may succeed.
-   * When a read doesn't succeed, we'll indicate that by returning a zero-bytes-read return value.
-   *
-   * \param[in] off The offset at which the read happens.
-   * \param[out] buf Buffer into which to read data.
-   * \param[in,out] nbytes Number of bytes to read. If the read happens inside a gap of the replacement map, the value will be clamped to not exceed that gap.
-   * \return The number of bytes read from the replacement map, or 0 if no bytes could be read.
-   */
-  auto read_at(fd::offset_type off, void* buf, std::size_t& nbytes) const -> std::size_t;
-  /**
-   * \brief Write data into the replacement map.
-   * \details
-   * Prepares a transaction that writes \p nbytes from \p buf into the replacement map.
-   *
-   * The returned transaction is applied only if the commit method is invoked.
-   *
-   * The replacement_map only allows for a single transaction at a time.
-   * The exception begin that multiple transaction are allowed if all transactions
-   * are non-replacing and do not overlap.
-   * \param[in] off The offset at which the write takes place.
-   * \param[in] buf The buffer holding the bytes to be written.
-   * \param[in] nbytes Number of bytes that is to be written.
-   * \param[in] overwrite If set, allow this write to overwrite previous writes on this replacement_map.
-   * \throw std::overflow_error if \p buf + \p nbytes exceed the range of an offset.
-   * \throw std::bad_alloc if insufficient memory is available to complete the operation.
-   */
-  auto write_at(fd::offset_type off, const void* buf, std::size_t nbytes, bool overwrite = true) -> tx;
+  ///\brief Find the first element at-or-after offset \p off .
+  auto find(offset_type off) -> iterator {
+    auto iter = map_.lower_bound(off);
+    if (iter != map_.begin()) {
+      auto before = std::prev(iter);
+      if (before->end_offset() > off) return before;
+    }
+    return iter;
+  }
 
-  /**
-   * \brief Write data into the replacement map, from a file.
-   * \details
-   * Prepares a transaction that writes \p nbytes into the replacement map.
-   * The bytes written are sourced from \p fd at offset \p fd_off.
-   *
-   * The returned transaction is applied only if the commit method is invoked.
-   *
-   * The replacement_map only allows for a single transaction at a time.
-   * The exception begin that multiple transaction are allowed if all transactions
-   * are non-replacing and do not overlap.
-   * \param[in] off The offset at which the write takes place.
-   * \param[in] file The file holding the bytes to be written.
-   * \param[in] file_off The position in the file at which the bytes to be written reside.
-   * \param[in] nbytes Number of bytes that is to be written.
-   * \param[in] overwrite If set, allow this write to overwrite previous writes on this replacement_map.
-   * \throw std::overflow_error if \p buf + \p nbytes exceed the range of an offset.
-   * \throw std::bad_alloc if insufficient memory is available to complete the operation.
-   */
-  auto write_at_from_file(fd::offset_type off, fd& file, fd::offset_type file_off, std::size_t nbytes, bool overwrite = true) -> tx;
-
-  ///\brief Get the allocator for this replacement map.
-  auto get_allocator() const -> allocator_type { return alloc_; }
+  ///\brief Find the first element at-or-after offset \p off .
+  auto find(offset_type off) const -> const_iterator {
+    auto iter = map_.lower_bound(off);
+    if (iter != map_.begin()) {
+      auto before = std::prev(iter);
+      if (before->end_offset() > off) return before;
+    }
+    return iter;
+  }
 
   private:
-  class reader_intf_;
-  class buf_reader_;
-  class fd_reader_;
+  template<typename... Args>
+  auto make_value_(Args&&... args) -> std::unique_ptr<value_type, disposer_> {
+    auto ptr = std::unique_ptr<value_type, disposer_>(nullptr, disposer_(*this));
 
-  auto write_at_(fd::offset_type off, reader_intf_&, bool overwrite) -> tx;
-  auto write_at_with_overwrite_(fd::offset_type off, reader_intf_&) -> tx;
-  auto write_at_without_overwrite_(fd::offset_type off, reader_intf_&) -> tx;
+    auto raw_ptr = alloc_traits::allocate(*this, 1);
+    try {
+      alloc_traits::construct(*this, raw_ptr, std::forward<Args>(args)...);
+    } catch (...) {
+      alloc_traits::deallocate(*this, raw_ptr, 1);
+      throw;
+    }
+
+    ptr.reset(raw_ptr); // Never throws.
+    return ptr;
+  }
+
+  auto insert_(std::unique_ptr<value_type, disposer_>&& ptr) noexcept -> iterator {
+    assert(ptr.get_deleter().owner() == this);
+    assert(ptr != nullptr);
+    if (ptr->size() == 0) return map_.end(); // skip insert of empty entries
+
+    erase_(ptr->offset(), ptr->end_offset());
+
+    iterator ins_iter;
+    bool inserted;
+    std::tie(ins_iter, inserted) = map_.insert(*ptr);
+    assert(inserted);
+    ptr.release();
+    return ins_iter;
+  }
+
+  auto erase_(offset_type begin_offset, offset_type end_offset) noexcept -> iterator {
+    assert(begin_offset <= end_offset);
+
+    auto begin = map_.lower_bound(begin_offset);
+    if (begin != map_.begin()) {
+      auto before = std::prev(begin);
+      if (before->end_offset() > begin_offset) {
+        auto sibling = make_value_(*before);
+        sibling->start_at(begin_offset); // if this throws, this function is buggy
+
+        before->truncate(begin_offset - before->offset()); // if this throws, this function is buggy
+
+        bool insert_success;
+        std::tie(begin, insert_success) = map_.insert(*sibling);
+        assert(insert_success);
+        sibling.release();
+      }
+    }
+
+    auto end = map_.lower_bound(end_offset);
+    if (end != map_.begin()) {
+      auto before = std::prev(end);
+      if (before->end_offset() > end_offset) {
+        before->start_at(end_offset);
+        end = before;
+      }
+    }
+
+    return map_.erase_and_dispose(begin, end, disposer_(*this));
+  }
 
   map_type map_;
-  allocator_type alloc_;
 };
 
-inline void swap(replacement_map& x, replacement_map& y) noexcept {
+
+inline auto rmv_key_extractor_::operator()(const replacement_map_value& rmv) const noexcept -> type {
+  return rmv.offset();
+}
+
+
+template<typename Alloc>
+void swap(replacement_map<Alloc>& x, replacement_map<Alloc>& y) noexcept {
   x.swap(y);
 }
 
 
-///\brief Transactional write operation.
-///\details Holds the current write operation in such a way that it can be either committed or rolled back.
-///Only one transaction can be active at any moment.
-class earnest_export_ replacement_map::tx {
-  friend replacement_map;
-
-  public:
-  using allocator_type = shared_resource_allocator<value_type>;
-
-  tx(const tx&) = delete;
-  tx& operator=(const tx&) = delete;
-
-  explicit tx(allocator_type alloc = allocator_type())
-  : to_erase_(alloc),
-    to_insert_(alloc)
-  {}
-
-  tx(tx&& x) noexcept
-  : rm_(std::exchange(x.rm_, nullptr)),
-    to_erase_(std::move(x.to_erase_)),
-    to_insert_(std::move(x.to_insert_))
-  {}
-
-  tx& operator=(tx&& x) noexcept {
-    rm_ = std::exchange(x.rm_, nullptr);
-    to_erase_ = std::move(x.to_erase_);
-    to_insert_ = std::move(x.to_insert_);
-    return *this;
-  }
-
-  ~tx() noexcept;
-
-  void commit() noexcept;
-
-  private:
-  replacement_map* rm_ = nullptr; // No ownership.
-  std::vector<map_type::iterator, std::allocator_traits<allocator_type>::rebind_alloc<map_type::iterator>> to_erase_;
-  std::vector<unique_alloc_ptr<value_type, allocator_type>, std::allocator_traits<allocator_type>::rebind_alloc<unique_alloc_ptr<value_type, allocator_type>>> to_insert_;
-};
+extern template class replacement_map<>;
 
 
 } /* namespace earnest::detail */

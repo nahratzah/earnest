@@ -8,6 +8,27 @@ set(EARNEST_VERSION_MINOR 0 CACHE STRING "minor version" FORCE)
 set(EARNEST_VERSION ${EARNEST_VERSION_MAJOR}.${EARNEST_VERSION_MINOR} CACHE STRING "version" FORCE)
 
 include (CheckFunctionExists)
+include (CheckIncludeFile)
+
+check_include_file (aio.h HAS_AIO_H)
+mark_as_advanced (HAS_AIO_H)
+check_include_file (sys/event.h HAS_SYS_EVENT_H)
+mark_as_advanced (HAS_SYS_EVENT_H)
+
+if (WIN32)
+  set (IO_BACKEND "overlapped" CACHE STRING
+      "select backend to use for asynchronous IO (one of 'overlapped', 'aio_kqueue', 'aio', 'synchronous')")
+elseif (HAS_AIO_H AND HAS_SYS_EVENT_H)
+  set (IO_BACKEND "aio_kqueue" CACHE STRING
+      "select backend to use for asynchronous IO (one of 'overlapped', 'aio_kqueue', 'aio', 'synchronous')")
+elseif (HAS_AIO_H)
+  set (IO_BACKEND "aio" CACHE STRING
+      "select backend to use for asynchronous IO (one of 'overlapped', 'aio_kqueue', 'aio', 'synchronous')")
+else ()
+  set (IO_BACKEND "synchronous" CACHE STRING
+      "select backend to use for asynchronous IO (one of 'overlapped', 'aio_kqueue', 'aio', 'synchronous')")
+endif ()
+set_property (CACHE IO_BACKEND PROPERTY STRINGS overlapped aio_kqueue aio synchronous)
 
 enable_testing()
 find_package (Boost COMPONENTS container filesystem system REQUIRED)
@@ -24,44 +45,26 @@ if (UNIX AND
 endif()
 
 add_library (earnest
-  src/detail/tree/cfg.cc
-  src/detail/tree/page.cc
-  src/detail/tree/leaf.cc
-  src/detail/tree/branch.cc
-  src/detail/tree/tree.cc
-  src/detail/tree/key_type.cc
-  src/detail/tree/value_type.cc
-  src/detail/tree/tx_aware_value_type.cc
-  src/detail/tree/loader.cc
-  src/detail/tree/leaf_iterator.cc
-  src/detail/tree/augmented_page_ref.cc
-  src/detail/tree/ops.cc
-  src/detail/tree/loader_impl.cc
-  src/db.cc
-  src/db_errc.cc
   src/fd.cc
-  src/sequence.cc
-  src/tree.cc
-  src/tree_error.cc
-  src/tx_aware_data.cc
-  src/txfile.cc
-  src/detail/commit_manager.cc
-  src/detail/commit_manager_impl.cc
-  src/detail/db_cache.cc
-  src/detail/layout_domain.cc
+  src/detail/wal2.cc
   src/detail/replacement_map.cc
-  src/detail/tree_cfg.cc
-  src/detail/tree_page.cc
-  src/detail/tree_page_leaf_elems.cc
-  src/detail/tx_op.cc
-  src/detail/tx_sequencer.cc
-  src/detail/txfile_allocator.cc
-  src/detail/txfile_allocator_log.cc
-  src/detail/wal.cc
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/lio_op.cc>
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/aio_op.cc>
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/flush_op.cc>
+  $<$<IN_LIST:${IO_BACKEND},aio_kqueue;aio>:modules/base_aio/aio_op_list.cc>
+  $<$<STREQUAL:${IO_BACKEND},aio_kqueue>:modules/aio_kqueue/kqueue_fd.cc>
+  $<$<STREQUAL:${IO_BACKEND},aio_kqueue>:modules/aio_kqueue/kqueue_aio.cc>
 )
 target_include_directories (earnest PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
+target_include_directories (earnest PUBLIC
+  $<BUILD_INTERFACE:$<$<STREQUAL:${IO_BACKEND},aio_kqueue>:${CMAKE_CURRENT_SOURCE_DIR}/modules/aio_kqueue/include>>
+  $<BUILD_INTERFACE:$<$<STREQUAL:${IO_BACKEND},aio>:${CMAKE_CURRENT_SOURCE_DIR}/modules/aio/include>>
+  $<BUILD_INTERFACE:$<$<STREQUAL:${IO_BACKEND},overlapped>:${CMAKE_CURRENT_SOURCE_DIR}/modules/overlapped/include>>
+  $<BUILD_INTERFACE:$<$<STREQUAL:${IO_BACKEND},synchronous>:${CMAKE_CURRENT_SOURCE_DIR}/modules/sync_io/include>>
+  $<BUILD_INTERFACE:$<$<STREQUAL:${IO_BACKEND},aio_kqueue>:${CMAKE_CURRENT_SOURCE_DIR}/modules/base_aio/include>>
+  $<BUILD_INTERFACE:$<$<STREQUAL:${IO_BACKEND},aio>:${CMAKE_CURRENT_SOURCE_DIR}/modules/base_aio/include>>)
 target_include_directories (earnest PUBLIC ${Boost_INCLUDE_DIR})
 target_link_libraries (earnest PUBLIC
   instrumentation
@@ -101,68 +104,8 @@ endif ()
 
 install (TARGETS earnest DESTINATION lib)
 install (FILES
-  include/earnest/db-inl.h
-  include/earnest/db.h
-  include/earnest/db_errc.h
   include/earnest/fd.h
-  include/earnest/sequence.h
-  include/earnest/shared_resource_allocator.h
-  include/earnest/tree-inl.h
-  include/earnest/tree.h
-  include/earnest/tree_error.h
-  include/earnest/tx_aware_data.h
-  include/earnest/txfile-inl.h
-  include/earnest/txfile.h
   DESTINATION include/earnest)
-install (FILES
-  include/earnest/detail/buffered_read_stream_at.h
-  include/earnest/detail/buffered_write_stream_at.h
-  include/earnest/detail/cheap_fn_ref.h
-  include/earnest/detail/commit_manager-inl.h
-  include/earnest/detail/commit_manager.h
-  include/earnest/detail/commit_manager_impl-inl.h
-  include/earnest/detail/commit_manager_impl.h
-  include/earnest/detail/db_cache.h
-  include/earnest/detail/export_.h
-  include/earnest/detail/layout_domain.h
-  include/earnest/detail/replacement_map.h
-  include/earnest/detail/stop_continue.h
-  include/earnest/detail/tree_cfg.h
-  include/earnest/detail/tree_page-inl.h
-  include/earnest/detail/tree_page.h
-  include/earnest/detail/tree_page_leaf_elems-inl.h
-  include/earnest/detail/tree_page_leaf_elems.h
-  include/earnest/detail/tree_spec.h
-  include/earnest/detail/tx_op-inl.h
-  include/earnest/detail/tx_op.h
-  include/earnest/detail/tx_sequencer.h
-  include/earnest/detail/txfile_allocator-inl.h
-  include/earnest/detail/txfile_allocator.h
-  include/earnest/detail/txfile_allocator_log.h
-  include/earnest/detail/unique_alloc_ptr.h
-  include/earnest/detail/wal.h
-  include/earnest/detail/wal-inl.h
-  DESTINATION include/earnest/detail)
-install (FILES
-  include/earnest/detail/tree/fwd.h
-  include/earnest/detail/tree/loader.h
-  include/earnest/detail/tree/cfg.h
-  include/earnest/detail/tree/page.h
-  include/earnest/detail/tree/leaf.h
-  include/earnest/detail/tree/leaf-inl.h
-  include/earnest/detail/tree/branch.h
-  include/earnest/detail/tree/branch-inl.h
-  include/earnest/detail/tree/key_type.h
-  include/earnest/detail/tree/value_type.h
-  include/earnest/detail/tree/tx_aware_value_type.h
-  include/earnest/detail/tree/leaf_iterator.h
-  include/earnest/detail/tree/leaf_iterator-inl.h
-  include/earnest/detail/tree/augmented_page_ref.h
-  include/earnest/detail/tree/ops.h
-  include/earnest/detail/tree/ops-inl.h
-  include/earnest/detail/tree/loader_impl.h
-  include/earnest/detail/tree/loader_impl-inl.h
-  DESTINATION include/earnest/detail/tree)
 
 add_subdirectory (tests)
 
