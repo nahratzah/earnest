@@ -61,12 +61,13 @@ auto async_wal_entry_read(AsyncReadStream& reader, CompletionToken&& token) -> t
 
 
 constexpr wal_header_t::wal_header_t() noexcept
-: wal_header_t(0, 0)
+: wal_header_t(0, 0, 0)
 {}
 
-constexpr wal_header_t::wal_header_t(std::uint64_t foff, std::uint64_t fsize) noexcept
+constexpr wal_header_t::wal_header_t(std::uint64_t foff, std::uint64_t fsize, std::uint64_t wal_index) noexcept
 : foff(foff),
-  fsize(fsize)
+  fsize(fsize),
+  wal_index(wal_index)
 {}
 
 template<typename AsyncReadStream, typename CompletionToken>
@@ -95,12 +96,23 @@ auto wal_header_t::async_read(AsyncReadStream& reader, CompletionToken&& token) 
               if (header->magic != MAGIC) ec = wal_errc::invalid;
             }
 
-            boost::endian::big_to_native_inplace(header->foff);
-            boost::endian::big_to_native_inplace(header->fsize);
+            header->big_to_native_inplace();
             std::invoke(handler, ec, *header);
           }));
 
   return init.result.get();
+}
+
+inline void wal_header_t::big_to_native_inplace() {
+  boost::endian::big_to_native_inplace(foff);
+  boost::endian::big_to_native_inplace(fsize);
+  boost::endian::big_to_native_inplace(wal_index);
+}
+
+inline void wal_header_t::native_to_big_inplace() {
+  boost::endian::native_to_big_inplace(foff);
+  boost::endian::native_to_big_inplace(fsize);
+  boost::endian::native_to_big_inplace(wal_index);
 }
 
 

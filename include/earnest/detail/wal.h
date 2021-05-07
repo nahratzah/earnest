@@ -85,18 +85,22 @@ auto async_wal_entry_read(AsyncReadStream& reader, CompletionToken&& token) -> t
 
 class wal_header_t {
   public:
-  static constexpr std::size_t BYTES = 24;
-  static constexpr std::array<char, 8> MAGIC = { 'e', 'a', 'r', 'n', '-', 'W', 'A', 'L' };
+  static constexpr std::size_t BYTES = 32;
+  static constexpr std::array<char, 8> MAGIC = { 'e', 'a', 'r', 'n', '\x13', 'W', 'A', 'L' };
 
   std::array<char, 8> magic = MAGIC;
   std::uint64_t foff;
   std::uint64_t fsize;
+  std::uint64_t wal_index;
 
   constexpr wal_header_t() noexcept;
-  constexpr wal_header_t(std::uint64_t foff, std::uint64_t fsize) noexcept;
+  constexpr wal_header_t(std::uint64_t foff, std::uint64_t fsize, std::uint64_t wal_index) noexcept;
 
   template<typename AsyncReadStream, typename CompletionToken>
   static auto async_read(AsyncReadStream& reader, CompletionToken&& token) -> typename asio::async_result<std::decay_t<CompletionToken>, void(std::error_code, wal_header_t)>::return_type;
+
+  void big_to_native_inplace();
+  void native_to_big_inplace();
 };
 
 
