@@ -4,9 +4,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <system_error>
 #include <tuple>
 #include <type_traits>
+#include <utility>
 
+#include <asio/async_result.hpp>
 #include <asio/buffer.hpp>
 #include <boost/intrusive/set.hpp>
 
@@ -165,6 +168,55 @@ class replacement_map
   auto find(offset_type off) -> iterator;
   ///\brief Find the first element at-or-after offset \p off .
   auto find(offset_type off) const -> const_iterator;
+
+  /**
+   * \brief Insert data from the given random-access-device.
+   * \details
+   * Reads \p len bytes from the \p device starting at offset \p device_off .
+   * The data is inserted at position \p map_off .
+   *
+   * The region is inserted before the function completes, so it's
+   * deterministic to use overlapping regions.
+   *
+   * \attention Until the read completes successfully, the replacement_map will contain uninitialized memory.
+   * If the read fails, then the memory will remain in the map, and remain uninitialized.
+   *
+   * \param device An asynchronous random-access read device.
+   * \param device_off Offset at which the read on \p device happens.
+   * \param map_off Offset in this replacement_map at which the read data is to be inserted.
+   * \param len The length (in bytes) of data that is to be read.
+   * \param token Completion token.
+   */
+  template<
+      typename AsyncRandomAccessReadDevice,
+      typename CompletionToken = typename asio::default_completion_token<typename AsyncRandomAccessReadDevice::executor_type>::type>
+  auto async_read_at_and_insert(AsyncRandomAccessReadDevice& device, std::uint64_t device_off, offset_type map_off, size_type len, CompletionToken&& token = typename asio::default_completion_token<typename AsyncRandomAccessReadDevice::executor_type>::type{})
+  -> typename asio::async_result<std::decay_t<CompletionToken>, void(std::error_code)>::return_type;
+
+  /**
+   * \brief Insert data at many positions, from the given random-access-device.
+   * \details
+   * Reads \p len bytes from the \p device starting at offset \p device_off .
+   * The data is inserted many times, at the offsets described by iterator pairs \p map_off_begin and \p map_off_end .
+   *
+   * The regions are inserted in order of iteration, before the function completes, so it's
+   * deterministic to use overlapping regions.
+   *
+   * \attention Until the read completes successfully, the replacement_map will contain uninitialized memory.
+   * If the read fails, then the memory will remain in the map, and remain uninitialized.
+   *
+   * \param device An asynchronous random-access read device.
+   * \param device_off Offset at which the read on \p device happens.
+   * \param map_off_begin,map_off_end Iterator-range of offsets in this replacement_map at which the read data is to be inserted.
+   * \param len The length (in bytes) of data that is to be read.
+   * \param token Completion token.
+   */
+  template<
+      typename AsyncRandomAccessReadDevice,
+      typename OffsetIter,
+      typename CompletionToken = typename asio::default_completion_token<typename AsyncRandomAccessReadDevice::executor_type>::type>
+  auto async_read_at_and_insert_many(AsyncRandomAccessReadDevice& device, std::uint64_t device_off, OffsetIter map_off_begin, OffsetIter map_off_end, size_type len, CompletionToken&& token = typename asio::default_completion_token<typename AsyncRandomAccessReadDevice::executor_type>::type{})
+  -> typename asio::async_result<std::decay_t<CompletionToken>, void(std::error_code)>::return_type;
 
   private:
   template<typename... Args>

@@ -1,10 +1,15 @@
 #ifndef EARNEST_DETAIL_REPLACEMENT_MAP_INL_H
 #define EARNEST_DETAIL_REPLACEMENT_MAP_INL_H
 
+#include <algorithm>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
-#include <utility>
+#include <vector>
+
+#include <asio/read_at.hpp>
+
+#include <earnest/detail/completion_wrapper.h>
 
 namespace earnest::detail {
 
@@ -347,6 +352,71 @@ auto replacement_map<Alloc>::find(offset_type off) const -> const_iterator {
     if (before->end_offset() > off) return before;
   }
   return iter;
+}
+
+template<typename Alloc>
+template<typename AsyncRandomAccessReadDevice, typename CompletionToken>
+auto replacement_map<Alloc>::async_read_at_and_insert(AsyncRandomAccessReadDevice& device, std::uint64_t device_off, offset_type map_off, size_type len, CompletionToken&& token)
+-> typename asio::async_result<std::decay_t<CompletionToken>, void(std::error_code)>::return_type {
+  asio::async_completion<CompletionToken, void(std::error_code)> init(token);
+  asio::mutable_buffer buf;
+  std::unique_ptr<value_type, disposer_> vtptr;
+
+  // Allocate an entry.
+  // We don't insert it yet, in case the starting of the async operation fails.
+  {
+    value_type vt;
+    std::tie(vt, buf) = value_type::allocate(map_off, len, get_allocator());
+    vtptr = make_value_(std::move(vt));
+  }
+
+  // Start the asynchronous operation.
+  asio::async_read_at(
+      device, device_off, buf,
+      completion_wrapper<void(std::error_code, std::size_t)>(
+          std::move(init.completion_handler),
+          [buffer_ownership=vtptr->shared_data()](auto&& handler, std::error_code ec, std::size_t bytes) {
+            handler(ec);
+          }));
+
+  insert_(std::move(vtptr)); // Never throws.
+  return init.result.get();
+}
+
+template<typename Alloc>
+template<typename AsyncRandomAccessReadDevice, typename OffsetIter, typename CompletionToken>
+auto replacement_map<Alloc>::async_read_at_and_insert_many(AsyncRandomAccessReadDevice& device, std::uint64_t device_off, OffsetIter map_off_begin, OffsetIter map_off_end, size_type len, CompletionToken&& token)
+-> typename asio::async_result<std::decay_t<CompletionToken>, void(std::error_code)>::return_type {
+  asio::async_completion<CompletionToken, void(std::error_code)> init(token);
+  value_type vt;
+  asio::mutable_buffer buf;
+  std::vector<std::unique_ptr<value_type, disposer_>> vtptrs;
+
+  // Allocate an entry.
+  // We don't insert it yet, in case the starting of the async operation fails.
+  std::tie(vt, buf) = value_type::allocate(0, len, get_allocator());
+  std::transform(
+      std::move(map_off_begin), std::move(map_off_end),
+      std::back_inserter(vtptrs),
+      [this, &vt](offset_type map_off) {
+        return make_value_(map_off, vt);
+      });
+
+  // Start the asynchronous operation.
+  asio::async_read_at(
+      device, device_off, buf,
+      completion_wrapper<void(std::error_code, std::size_t)>(
+          std::move(init.completion_handler),
+          [buffer_ownership=vt.shared_data()](auto&& handler, std::error_code ec, std::size_t bytes) {
+            handler(ec);
+          }));
+
+  std::for_each(
+      std::make_move_iterator(vtptrs.begin()), std::make_move_iterator(vtptrs.end()),
+      [this](auto&& ptr) {
+        insert_(std::move(ptr));
+      }); // Never throws.
+  return init.result.get();
 }
 
 template<typename Alloc>
