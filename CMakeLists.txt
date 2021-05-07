@@ -121,6 +121,7 @@ install (FILES
   include/earnest/detail/fanout.h
   include/earnest/detail/locked_ptr.h
   include/earnest/detail/replacement_map.h
+  include/earnest/detail/replacement_map-inl.h
   include/earnest/detail/stop_continue.h
   include/earnest/detail/unique_alloc_ptr.h
   include/earnest/detail/wal-inl.h
