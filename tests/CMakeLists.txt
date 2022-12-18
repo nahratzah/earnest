@@ -1,4 +1,3 @@
-include(CTest)
 find_package(UnitTest++)
 
 macro (do_test binary)
@@ -18,4 +17,5 @@ if (UnitTest++_FOUND)
   # do_test (sequence)
   # do_test (commit_manager_impl)
   # do_test (tree)
+  do_test (tx_mode)
 endif ()

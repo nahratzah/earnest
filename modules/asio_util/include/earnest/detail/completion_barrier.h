@@ -113,6 +113,13 @@ class completion_barrier {
 };
 
 
+template<typename Handler, typename Executor>
+auto make_completion_barrier(Handler&& handler, Executor&& executor)
+-> completion_barrier<std::decay_t<Handler>, std::decay_t<Executor>> {
+  return completion_barrier<std::decay_t<Handler>, std::decay_t<Executor>>(std::forward<Handler>(handler), std::forward<Executor>(executor));
+}
+
+
 } /* namespace earnest::detail */
 
 #endif /* EARNEST_DETAIL_COMPLETION_BARRIER_H */

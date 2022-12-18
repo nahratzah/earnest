@@ -20,6 +20,7 @@ class kqueue_aio
 {
   public:
   using key_type = kqueue_aio;
+  static const asio::execution_context::id id;
 
   explicit kqueue_aio(asio::execution_context& ctx);
   ~kqueue_aio() override;

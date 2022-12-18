@@ -1,0 +1,13 @@
+add_library(asio INTERFACE)
+target_include_directories(asio INTERFACE asio/asio/include)
+find_package (Threads REQUIRED)
+if (CMAKE_USE_PTHREADS_INIT)
+  target_link_libraries(asio INTERFACE ${CMAKE_THREAD_LIBS_INIT})
+endif ()
+
+add_subdirectory(util)
+add_subdirectory(asio_util)
+add_subdirectory(asio_aio)
+add_subdirectory(io)
+add_subdirectory(xdr)
+add_subdirectory(wal)

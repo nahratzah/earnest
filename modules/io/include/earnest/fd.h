@@ -1,8 +1,6 @@
 #ifndef EARNEST_FD_H
 #define EARNEST_FD_H
 
-#include <earnest/detail/export_.h>
-
 #include <cassert>
 #include <condition_variable>
 #include <cstdint>
@@ -37,17 +35,18 @@ namespace earnest {
 
 
 template<typename Executor = asio::executor>
-class earnest_export_ fd;
+class fd;
+class dir;
 
 
 namespace detail {
 
 
-class earnest_export_ basic_fd {
+class basic_fd {
   template<typename Executor> friend class ::earnest::fd;
 
   private:
-  struct earnest_export_ sync_queue
+  struct sync_queue
   : public boost::intrusive::list_base_hook<>
   {
     explicit sync_queue(basic_fd& owner);
@@ -114,7 +113,7 @@ class earnest_export_ basic_fd {
   : basic_fd()
   {
     // Lock ordering is irrelevant.
-    std::unique_lock<std::mutex> other_lck = lock_and_drain_(), this_lck(mtx_);
+    std::unique_lock<std::mutex> other_lck = other.lock_and_drain_(), this_lck(mtx_);
     swap_(other, other_lck, this_lck);
   }
 
@@ -295,6 +294,11 @@ class earnest_export_ basic_fd {
   auto close_(const std::unique_lock<std::mutex>& lck) -> std::error_code;
   auto cancel_(std::unique_lock<std::mutex>& lck) -> std::error_code; // Called without draining queues.
 
+  // The versions with a `parent` are implemented in dir.cc
+  // (because the windows code required ntdll).
+  static auto open_(const dir& parent, const std::filesystem::path& filename, open_mode mode, std::error_code& ec) -> basic_fd;
+  static auto create_(const dir& parent, const std::filesystem::path& filename, std::error_code& ec) -> basic_fd;
+
   void swap_(basic_fd& other, [[maybe_unused]] const std::unique_lock<std::mutex>& lck1, [[maybe_unused]] const std::unique_lock<std::mutex>& lck2) noexcept {
     using std::swap;
 
@@ -344,11 +348,12 @@ class earnest_export_ basic_fd {
 
 
 template<typename Executor>
-class earnest_export_ fd
+class fd
 : public detail::basic_fd
 {
   public:
   using executor_type = Executor;
+  using lowest_layer_type = fd;
 
   template<typename OtherExecutor>
   struct rebind_executor {
@@ -390,6 +395,8 @@ class earnest_export_ fd
   ~fd() noexcept {
     close();
   }
+
+  auto lowest_layer() -> lowest_layer_type& { return *this; }
 
   void swap(fd& other) noexcept(std::is_nothrow_swappable_v<executor_type>) {
     using std::swap;
@@ -451,6 +458,18 @@ class earnest_export_ fd
     if (!ec) *this = std::move(new_fd);
   }
 
+  void open(const dir& parent, const std::filesystem::path& filename, open_mode mode) {
+    std::error_code ec;
+    open(parent, filename, mode, ec);
+    if (ec) throw std::system_error(ec, "earnest::fd::open");
+  }
+
+  void open(const dir& parent, const std::filesystem::path& filename, open_mode mode, std::error_code& ec) {
+    auto new_fd = fd(ex_);
+    new_fd.detail::basic_fd::operator=(detail::basic_fd::open_(parent, filename, mode, ec));
+    if (!ec) *this = std::move(new_fd);
+  }
+
   void create(const std::filesystem::path& filename) {
     std::error_code ec;
     create(filename, ec);
@@ -460,6 +479,18 @@ class earnest_export_ fd
   void create(const std::filesystem::path& filename, std::error_code& ec) {
     auto new_fd = fd(ex_);
     new_fd.detail::basic_fd::operator=(detail::basic_fd::create_(filename, ec));
+    if (!ec) *this = std::move(new_fd);
+  }
+
+  void create(const dir& parent, const std::filesystem::path& filename) {
+    std::error_code ec;
+    create(parent, filename, ec);
+    if (ec) throw std::system_error(ec, "earnest::fd::create");
+  }
+
+  void create(const dir& parent, const std::filesystem::path& filename, std::error_code& ec) {
+    auto new_fd = fd(ex_);
+    new_fd.detail::basic_fd::operator=(detail::basic_fd::create_(parent, filename, ec));
     if (!ec) *this = std::move(new_fd);
   }
 

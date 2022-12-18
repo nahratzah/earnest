@@ -13,8 +13,6 @@
 #include <asio/buffer.hpp>
 #include <boost/intrusive/set.hpp>
 
-#include <earnest/detail/export_.h>
-
 namespace earnest::detail {
 
 
@@ -63,7 +61,7 @@ struct rmv_key_extractor_ {
 };
 
 
-auto earnest_export_ equal_(
+auto equal_(
   const boost::intrusive::set<
       replacement_map_value,
       boost::intrusive::base_hook<replacement_map_value_hook_>,
@@ -238,6 +236,6 @@ extern template class replacement_map<>;
 
 } /* namespace earnest::detail */
 
-#include "replacement_map-inl.h"
+#include "replacement_map.ii"
 
 #endif /* EARNEST_DETAIL_REPLACEMENT_MAP_H */

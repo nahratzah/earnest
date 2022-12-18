@@ -7,6 +7,8 @@
 namespace earnest::detail::aio {
 
 
+const asio::execution_context::id kqueue_aio::id{};
+
 kqueue_aio::kqueue_aio(asio::execution_context& ctx)
 : asio::execution_context::service(ctx),
   kq_(kqueue_fd::create())

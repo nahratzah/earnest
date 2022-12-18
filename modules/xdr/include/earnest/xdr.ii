@@ -1,0 +1,3586 @@
+#pragma once
+
+#include <stdexcept>
+
+#include <asio/associated_allocator.hpp>
+#include <asio/associated_executor.hpp>
+#include <asio/async_result.hpp>
+#include <asio/dispatch.hpp>
+#include <asio/executor_work_guard.hpp>
+#include <asio/post.hpp>
+#include <asio/read.hpp>
+#include <asio/write.hpp>
+
+#include <earnest/detail/constexpr_sum.h>
+
+namespace earnest {
+
+
+inline auto xdr_category() -> const std::error_category& {
+  class xdr_category_impl
+  : public std::error_category
+  {
+    public:
+    constexpr xdr_category_impl() noexcept = default;
+
+    auto name() const noexcept -> const char* override {
+      return "earnest::xdr";
+    }
+
+    auto message(int condition) const -> std::string override {
+      switch (static_cast<xdr_errc>(condition)) {
+        default:
+          return "unrecognized condition";
+        case xdr_errc::decoding_error:
+          return "decoding_error";
+        case xdr_errc::encoding_error:
+          return "encoding_error";
+      }
+    }
+  };
+
+  static xdr_category_impl impl;
+  return impl;
+}
+
+inline auto make_error_code(xdr_errc e) -> std::error_code {
+  return std::error_code(static_cast<int>(e), xdr_category());
+}
+
+
+template<typename Impl>
+inline xdr<Impl>::xdr() = default;
+
+template<typename Impl>
+inline xdr<Impl>::xdr(Impl&& impl) noexcept(std::is_nothrow_move_constructible_v<Impl>)
+: impl_(std::move(impl))
+{}
+
+
+template<typename... X, typename... Y>
+inline auto operator+(xdr<detail::xdr_reader::reader<X...>>&& x, xdr<detail::xdr_reader::reader<Y...>>&& y) -> xdr<detail::xdr_reader::reader<X..., Y...>> {
+  detail::xdr_reader::extract_reader<xdr<detail::xdr_reader::reader<X...>>> extract_x;
+  detail::xdr_reader::extract_reader<xdr<detail::xdr_reader::reader<Y...>>> extract_y;
+
+  return xdr<detail::xdr_reader::reader<X..., Y...>>(extract_x(std::move(x)) + extract_y(std::move(y)));
+}
+
+template<typename... X, typename... Y>
+inline auto operator+(xdr<detail::xdr_writer::writer<X...>>&& x, xdr<detail::xdr_writer::writer<Y...>>&& y) -> xdr<detail::xdr_writer::writer<X..., Y...>> {
+  detail::xdr_writer::extract_writer<xdr<detail::xdr_writer::writer<X...>>> extract_x;
+  detail::xdr_writer::extract_writer<xdr<detail::xdr_writer::writer<Y...>>> extract_y;
+
+  return xdr<detail::xdr_writer::writer<X..., Y...>>(extract_x(std::move(x)) + extract_y(std::move(y)));
+}
+
+
+} /* namespace earnest */
+
+namespace earnest::detail::xdr_reader {
+
+
+template<typename... Factories>
+inline auto extract_reader<xdr<reader<Factories...>>>::operator()(xdr<reader<Factories...>>&& x) noexcept -> reader<Factories...>&& {
+  return std::move(x.impl_);
+}
+
+template<typename... Factories>
+inline auto extract_reader<xdr<reader<Factories...>>>::operator()(const xdr<reader<Factories...>>& x) noexcept -> const reader<Factories...>& {
+  return x.impl_;
+}
+
+
+inline buffer_factory::buffer_factory(asio::mutable_buffer buf) noexcept
+: buf_(std::move(buf))
+{}
+
+inline auto buffer_factory::buffers() const -> std::array<asio::mutable_buffer, 1> {
+  return std::array<asio::mutable_buffer, 1>{ buf_ };
+}
+
+
+template<std::size_t Bytes>
+inline constant_size_buffer_factory<Bytes>::constant_size_buffer_factory(asio::mutable_buffer buf)
+: buf_(buf.data())
+{
+  if (buf.size() != Bytes) throw std::logic_error("fixed buffer has the wrong size");
+}
+
+template<std::size_t Bytes>
+inline auto constant_size_buffer_factory<Bytes>::buffers() const -> std::array<asio::mutable_buffer, 1> {
+  return std::array<asio::mutable_buffer, 1>{ asio::mutable_buffer(buf_, Bytes) };
+}
+
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn>
+#endif
+inline post_processor<Fn>::post_processor(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
+: fn_(std::move(fn))
+{}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn>
+#endif
+inline post_processor<Fn>::post_processor(const Fn& fn) noexcept(std::is_nothrow_copy_constructible_v<Fn>)
+: fn_(fn)
+{}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn>
+#endif
+inline auto post_processor<Fn>::callback() const & -> const Fn& {
+  return fn_;
+}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn>
+#endif
+inline auto post_processor<Fn>::callback() && -> Fn&& {
+  return std::move(fn_);
+}
+
+
+template<typename Fn>
+inline auto make_post_processor(Fn&& fn) -> post_processor<std::decay_t<Fn>> {
+  return post_processor<std::decay_t<Fn>>(std::forward<Fn>(fn));
+}
+
+template<typename IntType>
+#if __cpp_concepts >= 201907L
+requires std::integral<IntType>
+#endif
+inline auto maybe_big_endian_to_native_post_processor_tpl(IntType& v) {
+  if constexpr(boost::endian::order::native == boost::endian::order::big) {
+    return std::tuple<>();
+  } else {
+    return std::make_tuple(
+        make_post_processor(
+            [&v]() -> std::error_code {
+              boost::endian::big_to_native_inplace(v);
+              return {};
+            }));
+  }
+}
+
+
+template<typename Fn, typename T>
+inline auto temporary_resolve_(Fn&& fn, T& v) {
+  auto xdr_reader = (xdr<reader<>>() & v);
+  auto reader = extract_reader<decltype(xdr_reader)>{}(std::move(xdr_reader));
+  return std::move(reader).post_processor([fn=std::forward<Fn>(fn), &v]() { return std::invoke(fn, v); });
+}
+
+template<typename T>
+inline auto noop_callback::operator()([[maybe_unused]] const T& v) const -> std::error_code {
+  return {};
+}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires readable<T> && callback<Fn, T>
+#endif
+inline temporary<T, Fn>::temporary(Fn&& fn, T v) noexcept(std::is_nothrow_move_constructible_v<Fn>)
+: fn_(std::move(fn)),
+  initial_(std::move(v))
+{}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires readable<T> && callback<Fn, T>
+#endif
+inline temporary<T, Fn>::temporary(const Fn& fn, T v) noexcept(std::is_nothrow_copy_constructible_v<Fn>)
+: fn_(fn),
+  initial_(std::move(v))
+{}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires readable<T> && callback<Fn, T>
+#endif
+inline auto temporary<T, Fn>::resolve(temporary_type& v) const -> reader_type {
+  return ::earnest::detail::xdr_reader::temporary_resolve_(fn_, v);
+}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires readable<T> && callback<Fn, T>
+#endif
+inline auto temporary<T, Fn>::initial() const & -> const temporary_type& {
+  return initial_;
+}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires readable<T> && callback<Fn, T>
+#endif
+inline auto temporary<T, Fn>::initial() && -> temporary_type&& {
+  return std::move(initial_);
+}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires readable<T> && callback<std::decay_t<Fn>, T>
+#endif
+inline auto make_temporary(Fn&& fn, T v) -> temporary<T, std::decay_t<Fn>> {
+  return temporary<T, std::decay_t<Fn>>(std::forward<Fn>(fn), std::move(v));
+}
+
+
+inline auto buffers_1_(const buffer_factory& bf) -> std::array<asio::mutable_buffer, 1> {
+  return bf.buffers();
+}
+
+template<std::size_t Bytes>
+inline auto buffers_1_(const constant_size_buffer_factory<Bytes>& bf) -> std::array<asio::mutable_buffer, 1> {
+  return bf.buffers();
+}
+
+template<typename Fn>
+inline auto buffers_1_([[maybe_unused]] const post_processor<Fn>& pp) -> std::array<asio::mutable_buffer, 0> {
+  return {};
+}
+
+template<typename... Factories, std::size_t... Idx>
+inline auto buffers_(const std::tuple<Factories...>& factories, [[maybe_unused]] std::index_sequence<Idx...> seq) {
+  return array_cat(std::array<asio::mutable_buffer, 0>(), buffers_1_(std::get<Idx>(factories))...);
+}
+
+
+inline auto callbacks_n_() {
+  return []() -> std::error_code {
+    return {};
+  };
+}
+
+template<typename... Tail>
+inline auto callbacks_n_([[maybe_unused]] const buffer_factory& bf, Tail&&... tail) {
+  return callbacks_n_(std::forward<Tail>(tail)...);
+}
+
+template<std::size_t Bytes, typename... Tail>
+inline auto callbacks_n_([[maybe_unused]] const constant_size_buffer_factory<Bytes>& bf, Tail&&... tail) {
+  return callbacks_n_(std::forward<Tail>(tail)...);
+}
+
+template<typename Fn, typename... Tail>
+inline auto callbacks_n_(const post_processor<Fn>& pp, Tail&&... tail) {
+  return [ tail_cb=callbacks_n_(std::forward<Tail>(tail)...),
+           fn=pp.callback()
+         ]() mutable -> std::error_code {
+           std::error_code ec = std::invoke(fn);
+           if (!ec) ec = std::invoke(tail_cb);
+           return ec;
+         };
+}
+
+template<typename... Factories, std::size_t... Idx>
+inline auto callbacks_(const std::tuple<Factories...>& factories, [[maybe_unused]] std::index_sequence<Idx...> seq) {
+  return callbacks_n_(std::get<Idx>(factories)...);
+}
+
+
+template<typename... T>
+template<typename Alloc>
+inline auto temporaries_factory<T...>::operator()(Alloc&& alloc) const -> std::shared_ptr<type> {
+  return std::allocate_shared<type>(alloc, std::allocator_arg, alloc);
+}
+
+template<typename... T>
+inline auto temporaries_factory<T...>::operator()() const -> std::shared_ptr<type> {
+  return std::make_shared<type>();
+}
+
+
+template<typename Alloc>
+inline auto temporaries_factory<>::operator()(Alloc&& alloc) const -> pretend_pointer {
+  return {};
+}
+
+inline auto temporaries_factory<>::operator()() const -> pretend_pointer {
+  return {};
+}
+
+
+inline auto temporaries_factory<>::pretend_pointer::operator*() const noexcept -> std::tuple<>& {
+  return t_;
+}
+
+inline auto temporaries_factory<>::pretend_pointer::operator->() const noexcept -> std::tuple<>* {
+  return &t_;
+}
+
+
+template<typename... X, typename... Y>
+constexpr auto operator+(const temporaries_factory<X...>& x, const temporaries_factory<Y...>& y) -> temporaries_factory<X..., Y...> {
+  return {};
+}
+
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+// requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
+#endif
+inline decoder<T, Fn>::decoder(const Fn& fn, T initial)
+: fn(fn),
+  initial(std::move(initial))
+{}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+// requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
+#endif
+inline decoder<T, Fn>::decoder(Fn&& fn, T initial)
+: fn(std::move(fn)),
+  initial(std::move(initial))
+{}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+// requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
+#endif
+inline decoder<void, Fn>::decoder(const Fn& fn)
+: fn(fn)
+{}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+// requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
+#endif
+inline decoder<void, Fn>::decoder(Fn&& fn)
+: fn(std::move(fn))
+{}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+// requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
+#endif
+inline auto make_decoder(Fn&& fn) -> decoder<T, std::decay_t<Fn>> {
+  return decoder<T, std::decay_t<Fn>>(std::forward<Fn>(fn));
+}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+// requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
+#endif
+inline auto make_decoder(Fn&& fn, T&& initial) -> decoder<std::decay_t<T>, std::decay_t<Fn>> {
+  return decoder<std::decay_t<T>, std::decay_t<Fn>>(std::forward<Fn>(fn), std::forward<T>(initial));
+}
+
+
+template<typename DoneCb, bool HasTemporaries>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+inline completion_fn_wrapper_<DoneCb, HasTemporaries>::completion_fn_wrapper_(DoneCb&& done_cb, std::shared_ptr<void> temporaries)
+: done_cb_(std::move(done_cb)),
+  temporaries_(std::move(temporaries))
+{}
+
+template<typename DoneCb, bool HasTemporaries>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+inline completion_fn_wrapper_<DoneCb, HasTemporaries>::completion_fn_wrapper_(const DoneCb& done_cb, std::shared_ptr<void> temporaries)
+: done_cb_(done_cb),
+  temporaries_(std::move(temporaries))
+{}
+
+template<typename DoneCb, bool HasTemporaries>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+template<typename Stream>
+inline void completion_fn_wrapper_<DoneCb, HasTemporaries>::operator()([[maybe_unused]] Stream& stream, std::error_code ec) {
+  temporaries_.reset(); // Free memory.
+  std::invoke(done_cb_, ec);
+}
+
+template<typename DoneCb>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+template<typename Temporaries>
+inline completion_fn_wrapper_<DoneCb, false>::completion_fn_wrapper_(DoneCb&& done_cb, [[maybe_unused]] const Temporaries& temporaries)
+: done_cb_(std::move(done_cb))
+{}
+
+template<typename DoneCb>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+template<typename Temporaries>
+inline completion_fn_wrapper_<DoneCb, false>::completion_fn_wrapper_(const DoneCb& done_cb, [[maybe_unused]] const Temporaries& temporaries)
+: done_cb_(done_cb)
+{}
+
+template<typename DoneCb>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+template<typename Stream>
+inline void completion_fn_wrapper_<DoneCb, false>::operator()([[maybe_unused]] Stream& stream, std::error_code ec) {
+  std::invoke(done_cb_, ec);
+}
+
+
+template<typename Dfn, typename Nested, typename Alloc>
+inline decoder_callback<Dfn, Nested, Alloc>::decoder_callback(Dfn&& dfn, std::tuple<reader_type, completion_fn>&& rc, Alloc alloc)
+: alloc(std::move(alloc)),
+  dfn_(std::move(dfn)),
+  r_(std::get<0>(std::move(rc))),
+  cfn_(std::get<1>(std::move(rc)))
+{}
+
+template<typename Dfn, typename Nested, typename Alloc>
+inline auto decoder_callback<Dfn, Nested, Alloc>::get_allocator() const -> allocator_type {
+  return alloc;
+}
+
+template<typename Dfn, typename Nested, typename Alloc>
+template<typename Stream>
+inline void decoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std::error_code ec) {
+  if (ec) {
+    std::invoke(cfn_, stream, ec);
+  } else {
+    std::invoke(
+        dfn_,
+        stream,
+        [self=std::move(*this), &stream](std::error_code ec) mutable {
+          self.continue_(stream, ec);
+        });
+  }
+}
+
+template<typename Dfn, typename Nested, typename Alloc>
+template<typename Stream>
+inline void decoder_callback<Dfn, Nested, Alloc>::continue_(Stream& stream, std::error_code ec) {
+  if (ec) {
+    std::invoke(cfn_, stream, ec);
+  } else {
+    async_read(stream, buffers(r_),
+        [ done_cb=std::move(cfn_),
+          reader_callbacks=callbacks(r_),
+          &stream
+        ](std::error_code ec, std::size_t bytes) mutable {
+          if (!ec) ec = std::invoke(reader_callbacks);
+          std::invoke(done_cb, stream, ec);
+        });
+  }
+}
+
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple) const -> std::tuple<reader_type, completion_fn> {
+  return std::make_tuple(reader_type(std::tuple<>()), completion_fn(std::move(done_cb), temporaries_tuple));
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename... Tail>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, buffer_factory, Tail...>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, buffer_factory&& bf, Tail&&... tail) -> std::tuple<reader_type, completion_fn> {
+  auto nested_outcome = nested_t{}(std::move(done_cb), temporaries_tuple, std::move(tail)...);
+  return std::make_tuple(
+      reader<buffer_factory>(std::make_tuple(std::move(bf))) + std::get<0>(std::move(nested_outcome)),
+      std::get<1>(std::move(nested_outcome)));
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, std::size_t Bytes, typename... Tail>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, constant_size_buffer_factory<Bytes>, Tail...>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, constant_size_buffer_factory<Bytes>&& bf, Tail&&... tail) -> std::tuple<reader_type, completion_fn> {
+  auto nested_outcome = nested_t{}(std::move(done_cb), temporaries_tuple, std::move(tail)...);
+  return std::make_tuple(
+      reader<constant_size_buffer_factory<Bytes>>(std::make_tuple(std::move(bf))) + std::get<0>(std::move(nested_outcome)),
+      std::get<1>(std::move(nested_outcome)));
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename Fn, typename... Tail>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, post_processor<Fn>, Tail...>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, post_processor<Fn>&& pp, Tail&&... tail) -> std::tuple<reader_type, completion_fn> {
+  auto nested_outcome = nested_t{}(std::move(done_cb), temporaries_tuple, std::move(tail)...);
+  return std::make_tuple(
+      reader<post_processor<Fn>>(std::make_tuple(std::move(pp))) + std::get<0>(std::move(nested_outcome)),
+      std::get<1>(std::move(nested_outcome)));
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename T, typename Fn, typename... Tail>
+template<typename... TT>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...>::operator()(DoneCb&& done_cb, const std::shared_ptr<std::tuple<TT...>>& temporaries_tuple, temporary<T, Fn>&& tmp, Tail&&... tail) -> std::tuple<reader_type, completion_fn> {
+  static_assert(std::is_same_v<temporary_type, typename std::tuple_element<AccumulatedTupleSize, std::tuple<TT...>>::type>,
+      "temporary is not of expected type!");
+
+  std::get<AccumulatedTupleSize>(*temporaries_tuple) = std::move(tmp).initial();
+  return std::apply(
+      [&done_cb, &temporaries_tuple, &tail...](auto&&... elems) {
+        return nested_t{}(std::move(done_cb), temporaries_tuple, std::forward<decltype(elems)>(elems)..., std::move(tail)...);
+      },
+      std::move(tmp).resolve(std::get<AccumulatedTupleSize>(*temporaries_tuple)).get_factories());
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename Fn, typename... Tail>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, decoder<void, Fn>, Tail...>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, decoder<void, Fn>&& d, Tail&&... tail) -> std::tuple<reader_type, completion_fn> {
+  return std::make_tuple(
+      reader_type(std::tuple<>()),
+      completion_fn(
+          std::move(d.fn),
+          nested_t{}(std::move(done_cb), temporaries_tuple, std::forward<Tail>(tail)...)));
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename T, typename Fn, typename... Tail>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, decoder<T, Fn>, Tail...>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, decoder<T, Fn>&& d, Tail&&... tail) -> std::tuple<reader_type, completion_fn> {
+  return nested_t{}(std::move(done_cb), temporaries_tuple,
+      ::earnest::detail::xdr_reader::make_temporary(noop_callback(), std::move(d.initial)),
+      helper_type::wrap(std::get<AccumulatedTupleSize>(*temporaries_tuple), std::move(d.fn)),
+      std::move(tail)...);
+}
+
+template<typename Alloc, typename DoneCb, typename... Factories, std::size_t... Idx>
+inline auto resolve_(
+    [[maybe_unused]] std::allocator_arg_t use_alloc, Alloc&& alloc, DoneCb&& done_cb,
+    std::tuple<Factories...>&& factories,
+    [[maybe_unused]] std::index_sequence<Idx...> seq) {
+  using resolver_type = resolve_n_<std::decay_t<DoneCb>, 0, Factories...>;
+  auto tmp = typename resolver_type::temporaries{}(std::forward<Alloc>(alloc));
+  auto [bound_reader, completion_fn] = resolver_type{}(std::forward<DoneCb>(done_cb), tmp, std::get<Idx>(std::move(factories))...);
+  return std::make_tuple(std::move(tmp), std::move(bound_reader), std::move(completion_fn));
+}
+
+
+template<typename... Factories>
+inline auto make_reader(std::tuple<Factories...>&& factories) -> reader<Factories...> {
+  return reader<Factories...>(std::move(factories));
+}
+
+template<typename... X, typename... Y>
+inline auto operator+(reader<X...>&& x, reader<Y...>&& y) -> reader<X..., Y...> {
+  return reader<X..., Y...>(
+      std::tuple_cat(
+          std::move(x).get_factories(),
+          std::move(y).get_factories()));
+}
+
+template<typename... Factories>
+constexpr auto reader<Factories...>::bytes() noexcept -> std::optional<std::size_t> {
+  if constexpr(known_size_at_compile_time::value) {
+    return constexpr_sum(Factories::bytes...);
+  } else {
+    return std::nullopt;
+  }
+}
+
+template<typename... Factories>
+inline reader<Factories...>::reader(factories_tuple&& factories) noexcept(std::is_nothrow_move_constructible_v<factories_tuple>)
+: factories_(std::move(factories))
+{}
+
+template<typename... Factories>
+template<typename Fn>
+inline auto reader<Factories...>::post_processor(Fn&& fn) && {
+  return make_reader(
+      std::tuple_cat(
+          std::move(factories_),
+          std::make_tuple(make_post_processor(std::forward<Fn>(fn)))));
+}
+
+template<typename... Factories>
+inline auto reader<Factories...>::get_factories() && -> factories_tuple&& {
+  return std::move(factories_);
+}
+
+template<typename... Factories>
+inline auto reader<Factories...>::get_factories() const & -> const factories_tuple& {
+  return factories_;
+}
+
+template<typename Alloc, typename DoneCb, typename... Factories>
+inline auto resolve(std::allocator_arg_t aa, Alloc&& alloc, DoneCb&& done_cb, reader<Factories...>&& r) {
+  return ::earnest::detail::xdr_reader::resolve_(
+      aa, std::forward<Alloc>(alloc), std::forward<DoneCb>(done_cb),
+      std::move(r).get_factories(), std::index_sequence_for<Factories...>());
+}
+
+template<typename... Factories>
+inline auto buffers(const reader<Factories...>& r) {
+  return ::earnest::detail::xdr_reader::buffers_(r.get_factories(), std::index_sequence_for<Factories...>());
+}
+
+template<typename... Factories>
+inline auto callbacks(const reader<Factories...>& r) {
+  return ::earnest::detail::xdr_reader::callbacks_(r.get_factories(), std::index_sequence_for<Factories...>());
+}
+
+
+} /* namespace earnest::detail::xdr_reader */
+
+namespace earnest::detail::xdr_writer {
+
+
+template<typename... Factories>
+inline auto extract_writer<xdr<writer<Factories...>>>::operator()(xdr<writer<Factories...>>&& x) noexcept -> writer<Factories...>&& {
+  return std::move(x.impl_);
+}
+
+template<typename... Factories>
+inline auto extract_writer<xdr<writer<Factories...>>>::operator()(const xdr<writer<Factories...>>& x) noexcept -> const writer<Factories...>& {
+  return x.impl_;
+}
+
+
+inline buffer_factory::buffer_factory(asio::const_buffer buf) noexcept
+: buf_(buf)
+{}
+
+inline auto buffer_factory::buffers() const -> std::array<asio::const_buffer, 1> {
+  return std::array<asio::const_buffer, 1>{ buf_ };
+}
+
+
+template<std::size_t Bytes>
+inline constant_size_buffer_factory<Bytes>::constant_size_buffer_factory(asio::const_buffer buf)
+: buf_(buf.data())
+{
+  if (buf.size() != Bytes) throw std::logic_error("fixed buffer has the wrong size");
+}
+
+template<std::size_t Bytes>
+inline auto constant_size_buffer_factory<Bytes>::buffers() const -> std::array<asio::const_buffer, 1> {
+  return std::array<asio::const_buffer, 1>{ asio::const_buffer(buf_, Bytes) };
+}
+
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn>
+#endif
+inline pre_processor<Fn>::pre_processor(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
+: fn_(std::move(fn))
+{}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn>
+#endif
+inline pre_processor<Fn>::pre_processor(const Fn& fn) noexcept(std::is_nothrow_copy_constructible_v<Fn>)
+: fn_(fn)
+{}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn>
+#endif
+inline auto pre_processor<Fn>::callback() const & -> const Fn& {
+  return fn_;
+}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn>
+#endif
+inline auto pre_processor<Fn>::callback() && -> Fn&& {
+  return fn_;
+}
+
+template<typename Fn>
+inline auto make_pre_processor(Fn&& fn) -> pre_processor<std::decay_t<Fn>> {
+  return pre_processor<std::decay_t<Fn>>(std::forward<Fn>(fn));
+}
+
+
+inline auto temporary_resolve_ec_pp_(std::error_code ec) {
+  return [ec]() mutable -> std::error_code { return ec; };
+}
+
+template<typename T, typename Fn>
+inline auto temporary_resolve_(T& v, Fn&& fn) {
+  std::error_code ec = std::invoke(fn, v);
+  auto pp = make_pre_processor(temporary_resolve_ec_pp_(ec));
+  auto pp_writer = writer<decltype(pp)>(std::make_tuple(std::move(pp)));
+
+  auto xdr_writer = (xdr<writer<>>() & v);
+  auto v_writer = extract_writer<decltype(xdr_writer)>{}(std::move(xdr_writer));
+
+  return std::move(pp_writer) + std::move(v_writer);
+}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires writeable<T> && callback<Fn, T&>
+#endif
+inline temporary<T, Fn>::temporary(Fn&& fn, temporary_type initial)
+: fn_(std::move(fn)),
+  initial_(std::move(initial))
+{}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires writeable<T> && callback<Fn, T&>
+#endif
+inline temporary<T, Fn>::temporary(const Fn& fn, temporary_type initial)
+: fn_(fn),
+  initial_(std::move(initial))
+{}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires writeable<T> && callback<Fn, T&>
+#endif
+inline auto temporary<T, Fn>::resolve(temporary_type& v) const -> writer_type {
+  return ::earnest::detail::xdr_writer::temporary_resolve_(v, fn_);
+}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires writeable<T> && callback<Fn, T&>
+#endif
+inline auto temporary<T, Fn>::initial() const & -> const temporary_type& {
+  return initial_;
+}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires writeable<T> && callback<Fn, T&>
+#endif
+inline auto temporary<T, Fn>::initial() && -> temporary_type&& {
+  return std::move(initial_);
+}
+
+template<typename T, typename Fn>
+#if __cpp_concepts >= 201907L
+requires writeable<T> && callback<std::decay_t<Fn>, T&>
+#endif
+inline auto make_temporary(Fn&& fn, T v) -> temporary<T, std::decay_t<Fn>> {
+  return temporary<T, std::decay_t<Fn>>(std::forward<Fn>(fn), std::move(v));
+}
+
+
+inline auto buffers_1_(const buffer_factory& bf) -> std::array<asio::const_buffer, 1> {
+  return bf.buffers();
+}
+
+template<std::size_t Bytes>
+inline auto buffers_1_(const constant_size_buffer_factory<Bytes>& bf) -> std::array<asio::const_buffer, 1> {
+  return bf.buffers();
+}
+
+template<typename Fn>
+inline auto buffers_1_([[maybe_unused]] const pre_processor<Fn>& pp) -> std::array<asio::const_buffer, 0> {
+  return {};
+}
+
+template<typename... Factories, std::size_t... Idx>
+inline auto buffers_(const std::tuple<Factories...>& factories, [[maybe_unused]] std::index_sequence<Idx...> seq) {
+  return array_cat(std::array<asio::const_buffer, 0>(), buffers_1_(std::get<Idx>(factories))...);
+}
+
+
+inline auto callbacks_n_() {
+  return []() -> std::error_code {
+    return {};
+  };
+}
+
+template<typename... Tail>
+inline auto callbacks_n_([[maybe_unused]] const buffer_factory& bf, Tail&&... tail) {
+  return callbacks_n_(std::forward<Tail>(tail)...);
+}
+
+template<std::size_t Bytes, typename... Tail>
+inline auto callbacks_n_([[maybe_unused]] const constant_size_buffer_factory<Bytes>& bf, Tail&&... tail) {
+  return callbacks_n_(std::forward<Tail>(tail)...);
+}
+
+template<typename Fn, typename... Tail>
+inline auto callbacks_n_(const pre_processor<Fn>& pp, Tail&&... tail) {
+  return [ tail_cb=callbacks_n_(std::forward<Tail>(tail)...),
+           fn=pp.callback()
+         ]() mutable -> std::error_code {
+           std::error_code ec = std::invoke(fn);
+           if (!ec) ec = std::invoke(tail_cb);
+           return ec;
+         };
+}
+
+template<typename... Factories, std::size_t... Idx>
+inline auto callbacks_(const std::tuple<Factories...>& factories, [[maybe_unused]] std::index_sequence<Idx...> seq) {
+  return callbacks_n_(std::get<Idx>(factories)...);
+}
+
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+// requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
+#endif
+inline encoder<Fn>::encoder(const Fn& fn)
+: fn(fn)
+{}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+// requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
+#endif
+inline encoder<Fn>::encoder(Fn&& fn)
+: fn(std::move(fn))
+{}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+// requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
+#endif
+inline auto make_encoder(Fn&& fn) -> encoder<std::decay_t<Fn>> {
+  return encoder<std::decay_t<Fn>>(std::forward<Fn>(fn));
+}
+
+
+template<typename Dfn, typename Nested, typename Alloc>
+inline decoder_callback<Dfn, Nested, Alloc>::decoder_callback(Dfn&& dfn, std::tuple<writer_type, completion_fn>&& rc, allocator_type alloc)
+: alloc(std::move(alloc)),
+  dfn_(std::move(dfn)),
+  r_(std::get<0>(std::move(rc))),
+  cfn_(std::get<1>(std::move(rc)))
+{}
+
+template<typename Dfn, typename Nested, typename Alloc>
+inline auto decoder_callback<Dfn, Nested, Alloc>::get_allocator() const -> allocator_type {
+  return alloc;
+}
+
+template<typename Dfn, typename Nested, typename Alloc>
+template<typename Stream>
+inline void decoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std::error_code ec) {
+  if (ec) {
+    std::invoke(cfn_, stream, ec);
+  } else {
+    std::invoke(
+        dfn_,
+        stream,
+        [self=std::move(*this), &stream](std::error_code ec) mutable {
+          self.continue_(stream, ec);
+        });
+  }
+}
+
+template<typename Dfn, typename Nested, typename Alloc>
+template<typename Stream>
+inline void decoder_callback<Dfn, Nested, Alloc>::continue_(Stream& stream, std::error_code ec) {
+  if (!ec) ec = std::invoke(callbacks(r_));
+  if (ec) {
+    std::invoke(cfn_, stream, ec);
+  } else {
+    async_write(stream, buffers(r_),
+        [ done_cb=cfn_,
+          &stream
+        ](std::error_code ec, std::size_t bytes) mutable {
+          std::invoke(done_cb, stream, ec);
+        });
+  }
+}
+
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple) const -> std::tuple<writer_type, completion_fn> {
+  return std::make_tuple(writer_type(), completion_fn(std::move(done_cb), temporaries_tuple));
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename... Tail>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, buffer_factory, Tail...>::operator()(DoneCb&& done_cb, [[maybe_unused]] const TTPointer& temporaries_tuple, buffer_factory&& bf, Tail&&... tail) -> std::tuple<writer_type, completion_fn> {
+  auto nested_outcome = nested_t{}(std::move(done_cb), temporaries_tuple, std::move(tail)...);
+  return std::make_tuple(
+      writer<buffer_factory>(std::make_tuple(std::move(bf))) + std::get<0>(std::move(nested_outcome)),
+      std::get<1>(std::move(nested_outcome)));
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, std::size_t Bytes, typename... Tail>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, constant_size_buffer_factory<Bytes>, Tail...>::operator()(DoneCb&& done_cb, [[maybe_unused]] const TTPointer& temporaries_tuple, constant_size_buffer_factory<Bytes>&& bf, Tail&&... tail) -> std::tuple<writer_type, completion_fn> {
+  auto nested_outcome = nested_t{}(std::move(done_cb), temporaries_tuple, std::move(tail)...);
+  return std::make_tuple(
+      writer<constant_size_buffer_factory<Bytes>>(std::make_tuple(std::move(bf))) + std::get<0>(std::move(nested_outcome)),
+      std::get<1>(std::move(nested_outcome)));
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename Fn, typename... Tail>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, pre_processor<Fn>, Tail...>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, pre_processor<Fn>&& pp, Tail&&... tail) -> std::tuple<writer_type, completion_fn> {
+  auto nested_outcome = nested_t{}(std::move(done_cb), temporaries_tuple, std::move(tail)...);
+  return std::make_tuple(
+      writer<pre_processor<Fn>>(std::make_tuple(std::move(pp))) + std::get<0>(std::move(nested_outcome)),
+      std::get<1>(std::move(nested_outcome)));
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename T, typename Fn, typename... Tail>
+template<typename... TT>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...>::operator()(DoneCb&& done_cb, const std::shared_ptr<std::tuple<TT...>>& temporaries_tuple, temporary<T, Fn>&& tmp, Tail&&... tail) -> std::tuple<writer_type, completion_fn> {
+  static_assert(std::is_same_v<temporary_type, typename std::tuple_element<AccumulatedTupleSize, std::tuple<TT...>>::type>,
+      "temporary is not of expected type!");
+
+  std::get<AccumulatedTupleSize>(*temporaries_tuple) = std::move(tmp).initial();
+  return std::apply(
+      [&done_cb, &temporaries_tuple, &tail...](auto&&... elems) mutable {
+        return nested_t{}(std::move(done_cb), temporaries_tuple, std::forward<decltype(elems)>(elems)..., std::move(tail)...);
+      },
+      std::move(tmp).resolve(std::get<AccumulatedTupleSize>(*temporaries_tuple)).get_factories());
+}
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename Fn, typename... Tail>
+template<typename TTPointer>
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, encoder<Fn>, Tail...>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, encoder<Fn>&& d, Tail&&... tail) -> std::tuple<writer_type, completion_fn> {
+  return std::make_tuple(
+      writer_type(std::tuple<>()),
+      completion_fn(
+          std::move(d.fn),
+          nested_t{}(std::move(done_cb), temporaries_tuple, std::forward<Tail>(tail)...)));
+}
+
+template<typename Alloc, typename DoneCb, typename... Factories, std::size_t... Idx>
+inline auto resolve_(
+    [[maybe_unused]] std::allocator_arg_t use_alloc, Alloc&& alloc, DoneCb&& done_cb,
+    std::tuple<Factories...>&& factories,
+    [[maybe_unused]] std::index_sequence<Idx...> seq) {
+  using resolver_type = resolve_n_<std::decay_t<DoneCb>, 0, Factories...>;
+  auto tmp = typename resolver_type::temporaries{}(std::forward<Alloc>(alloc));
+  auto [bound_reader, completion_fn] = resolver_type{}(std::forward<DoneCb>(done_cb), tmp, std::get<Idx>(std::move(factories))...);
+  return std::make_tuple(std::move(tmp), std::move(bound_reader), std::move(completion_fn));
+}
+
+
+template<typename T>
+inline auto operator&([[maybe_unused]] xdr<writer<>>&& w, const network_byte_order_int_<T>& v) {
+  using factory = constant_size_buffer_factory<sizeof(T)>;
+  using writer_type = writer<factory>;
+
+  return xdr<writer_type>(
+      writer_type(
+          std::make_tuple(
+              factory(asio::const_buffer(&v.value, sizeof(v.value))))));
+}
+
+
+template<typename... Factories>
+constexpr auto writer<Factories...>::bytes() noexcept -> std::optional<std::size_t> {
+  if constexpr(known_size_at_compile_time::value) {
+    return constexpr_sum(Factories::bytes...);
+  } else {
+    return std::nullopt;
+  }
+}
+
+template<typename... Factories>
+inline writer<Factories...>::writer(factories_tuple&& factories) noexcept(std::is_nothrow_move_constructible_v<factories_tuple>)
+: factories_(std::move(factories))
+{}
+
+template<typename... Factories>
+template<typename Fn>
+inline auto writer<Factories...>::pre_processor(Fn&& fn) && {
+  return make_writer(
+      std::tuple_cat(
+          std::move(factories_),
+          std::make_tuple(make_pre_processor(std::forward<Fn>(fn)))));
+}
+
+template<typename... Factories>
+inline auto writer<Factories...>::get_factories() const & -> const factories_tuple& {
+  return factories_;
+}
+
+template<typename... Factories>
+inline auto writer<Factories...>::get_factories() && -> factories_tuple&& {
+  return std::move(factories_);
+}
+
+
+template<typename... Factories>
+inline auto make_writer(std::tuple<Factories...>&& factories) -> writer<Factories...> {
+  return writer<Factories...>(std::move(factories));
+}
+
+template<typename... X, typename... Y>
+inline auto operator+(writer<X...>&& x, writer<Y...>&& y) -> writer<X..., Y...> {
+  return make_writer(
+      std::tuple_cat(
+          std::move(x).get_factories(),
+          std::move(y).get_factories()));
+}
+
+
+template<typename Alloc, typename DoneCb, typename... Factories>
+inline auto resolve(std::allocator_arg_t aa, Alloc&& alloc, DoneCb&& done_cb, writer<Factories...>&& w) {
+  return ::earnest::detail::xdr_writer::resolve_(
+      aa, std::forward<Alloc>(alloc), std::forward<DoneCb>(done_cb),
+      std::move(w).get_factories(), std::index_sequence_for<Factories...>());
+}
+
+template<typename... Factories>
+inline auto buffers(const writer<Factories...>& w) {
+  return ::earnest::detail::xdr_writer::buffers_(w.get_factories(), std::index_sequence_for<Factories...>());
+}
+
+template<typename... Factories>
+inline auto callbacks(const writer<Factories...>& w) {
+  return ::earnest::detail::xdr_writer::callbacks_(w.get_factories(), std::index_sequence_for<Factories...>());
+}
+
+
+} /* namespace earnest::detail::xdr_writer */
+
+namespace earnest {
+
+
+template<typename AsioAsyncReadStream, typename... Factories, typename CompletionToken>
+inline auto async_read(
+    AsioAsyncReadStream& stream,
+    xdr<detail::xdr_reader::reader<Factories...>>&& r,
+    CompletionToken&& token) {
+  detail::xdr_reader::extract_reader<xdr<detail::xdr_reader::reader<Factories...>>> er;
+
+  return asio::async_result<std::decay_t<CompletionToken>, void(std::error_code)>::initiate(
+      [](auto completion_handler, AsioAsyncReadStream& stream, detail::xdr_reader::reader<Factories...>&& r) {
+        auto alloc = asio::get_associated_allocator(completion_handler);
+        auto ex = asio::get_associated_executor(completion_handler, stream.get_executor());
+
+        auto [temporaries_ptr, resolved_reader, callback] = resolve(std::allocator_arg, alloc,
+            [wg=asio::make_work_guard(ex), fn=std::move(completion_handler)](std::error_code ec) mutable {
+              asio::dispatch(
+                  wg.get_executor(),
+                  [fn=std::move(fn), ec]() mutable {
+                    std::invoke(fn, ec);
+                  });
+              wg.reset();
+            },
+            std::move(r));
+
+        asio::async_read(
+            stream, buffers(resolved_reader),
+            [ callback=std::move(callback),
+              reader_callbacks=callbacks(resolved_reader),
+              temporaries_ptr=std::move(temporaries_ptr),
+              &stream
+            ](std::error_code ec, [[maybe_unused]] std::size_t bytes) mutable {
+              if (!ec) ec = std::invoke(reader_callbacks);
+              std::invoke(callback, stream, ec);
+            });
+      },
+      std::forward<CompletionToken>(token),
+      stream, er(std::move(r)));
+}
+
+template<typename AsioAsyncReadStream, typename... Factories>
+inline auto async_read(
+    AsioAsyncReadStream& stream,
+    xdr<detail::xdr_reader::reader<Factories...>>&& r) {
+  using completion_token = typename asio::default_completion_token<typename asio::associated_executor<AsioAsyncReadStream>::type>::type;
+  return async_read(stream, std::move(r), completion_token());
+}
+
+template<typename AsioAsyncWriteStream, typename... Factories, typename CompletionToken>
+inline auto async_write(
+    AsioAsyncWriteStream& stream,
+    xdr<detail::xdr_writer::writer<Factories...>>&& w,
+    CompletionToken&& token) {
+  detail::xdr_writer::extract_writer<xdr<detail::xdr_writer::writer<Factories...>>> ew;
+
+  return asio::async_result<std::decay_t<CompletionToken>, void(std::error_code)>::initiate(
+      [](auto completion_handler, AsioAsyncWriteStream& stream, detail::xdr_writer::writer<Factories...>&& w) {
+        auto alloc = asio::get_associated_allocator(completion_handler);
+        auto ex = asio::get_associated_executor(completion_handler, stream.get_executor());
+
+        auto [temporaries_ptr, resolved_writer, callback] = resolve(std::allocator_arg, alloc,
+            [wg=asio::make_work_guard(ex), fn=std::move(completion_handler)](std::error_code ec) mutable {
+              asio::dispatch(
+                  wg.get_executor(),
+                  [fn=std::move(fn), ec]() mutable {
+                    std::invoke(std::move(fn), ec);
+                  });
+              wg.reset();
+            },
+            std::move(w));
+
+        std::error_code ec = std::invoke(callbacks(resolved_writer));
+        if (ec) {
+          asio::post(ex,
+              [ec, &stream, c=std::move(callback)]() mutable {
+                std::invoke(std::move(c), stream, ec);
+              });
+        } else {
+          asio::async_write(
+              stream, buffers(resolved_writer),
+              [ callback=std::move(callback),
+                temporaries_ptr=std::move(temporaries_ptr),
+                &stream
+              ](std::error_code ec, [[maybe_unused]] std::size_t bytes) mutable {
+                std::invoke(callback, stream, ec);
+              });
+        }
+      },
+      std::forward<CompletionToken>(token),
+      stream, ew(std::move(w)));
+}
+
+template<typename AsioAsyncWriteStream, typename... Factories>
+inline auto async_write(
+    AsioAsyncWriteStream& stream,
+    xdr<detail::xdr_writer::writer<Factories...>>&& r) {
+  using completion_token = typename asio::default_completion_token<typename asio::associated_executor<AsioAsyncWriteStream>::type>::type;
+  return async_write(stream, std::move(r), completion_token());
+}
+
+
+} /* namespace earnest */
+
+namespace earnest::detail::xdr_types {
+
+
+template<typename SimulatedInt, typename ActualInt, typename Arg>
+#if __cpp_concepts >= 201907L
+requires std::integral<SimulatedInt> && std::integral<ActualInt> && std::integral<Arg>
+#endif
+inline auto xdr_convert_int_(ActualInt& v, Arg x) -> std::error_code {
+  using signed_simulated_int = std::make_signed_t<SimulatedInt>;
+  using signed_actual_int = std::make_signed_t<ActualInt>;
+  using common_min_type = std::common_type_t<signed_simulated_int, signed_actual_int>;
+
+  using unsigned_simulated_int = std::make_unsigned_t<SimulatedInt>;
+  using unsigned_actual_int = std::make_unsigned_t<ActualInt>;
+  using common_max_type = std::common_type_t<unsigned_simulated_int, unsigned_actual_int>;
+
+  using signed_arg_type = std::make_signed_t<Arg>;
+  using unsigned_arg_type = std::make_unsigned_t<Arg>;
+
+  if constexpr(std::is_signed_v<Arg>) {
+    if (x < std::min<common_min_type>(
+            signed_simulated_int(std::numeric_limits<SimulatedInt>::min()),
+            signed_actual_int(std::numeric_limits<ActualInt>::min())))
+      return make_error_code(xdr_errc::encoding_error);
+  }
+
+  if (x >= 0) {
+    if (unsigned_arg_type(x) > std::max<common_max_type>(
+            unsigned_simulated_int(std::numeric_limits<SimulatedInt>::max()),
+            unsigned_actual_int(std::numeric_limits<ActualInt>::max())))
+      return make_error_code(xdr_errc::encoding_error);
+  }
+
+  if constexpr(std::is_unsigned_v<ActualInt>) {
+    v = unsigned_arg_type(x);
+  } else {
+    v = signed_arg_type(x);
+  }
+
+  return {};
+}
+
+
+template<typename X>
+inline auto add_raw(xdr<X>&& x) -> xdr<X> {
+  return x;
+}
+
+template<typename... X, typename Y, typename... Tail>
+inline auto add_raw(xdr<xdr_reader::reader<X...>>&& x, Y&& y, Tail&&... tail) {
+  using xdr_reader::reader;
+
+  return add_raw(
+      std::move(x) + xdr<reader<std::decay_t<Y>>>(reader<std::decay_t<Y>>(std::make_tuple(std::forward<Y>(y)))),
+      std::forward<Tail>(tail)...);
+}
+
+template<typename... X, typename Y, typename... Tail>
+inline auto add_raw(xdr<xdr_writer::writer<X...>>&& x, Y&& y, Tail&&... tail) {
+  using xdr_writer::writer;
+
+  return add_raw(
+      std::move(x) + xdr<writer<std::decay_t<Y>>>(writer<std::decay_t<Y>>(std::make_tuple(std::forward<Y>(y)))),
+      std::forward<Tail>(tail)...);
+}
+
+
+template<typename T>
+inline auto xdr_identity_t::operator()(const T& v) const noexcept -> const T& {
+  return v;
+}
+
+template<typename T>
+inline auto xdr_identity_t::operator()(T& v) const noexcept -> T& {
+  return v;
+}
+
+template<typename T>
+inline auto xdr_identity_t::operator()(T&& v) const noexcept -> T&& {
+  return std::move(v);
+}
+
+
+template<typename SimulatedInt, typename ActualInt, typename T>
+#if __cpp_concepts >= 201907L
+requires std::integral<std::remove_const_t<T>> &&
+    (
+      (std::signed_integral<SimulatedInt> && std::signed_integral<ActualInt>)
+      ||
+      (std::unsigned_integral<SimulatedInt> && std::unsigned_integral<ActualInt>)
+    )
+#endif
+inline xdr_integral_ref<SimulatedInt, ActualInt, T>::xdr_integral_ref(T& ref) noexcept
+: ref(ref)
+{}
+
+
+template<typename X, typename SimulatedInt, typename ActualInt, typename T>
+inline auto operator&(xdr<X>&& x, xdr_integral_ref<SimulatedInt, ActualInt, T> v) {
+  using tmp_integral = temporary_with_spec<ActualInt, typename int_spec_selector_<ActualInt>::type>;
+
+  static_assert(xdr<X>::is_reader || xdr<X>::is_writer);
+  constexpr bool has_same_sign = (std::is_signed_v<ActualInt> == std::is_signed_v<std::decay_t<T>>);
+
+  if constexpr(xdr<X>::is_reader) {
+    using xdr_reader::make_temporary;
+    using xdr_reader::constant_size_buffer_factory;
+    using xdr_reader::maybe_big_endian_to_native_post_processor_tpl;
+
+    if constexpr(has_same_sign && sizeof(SimulatedInt) == sizeof(ActualInt) && sizeof(std::decay_t<T>) == sizeof(ActualInt)) {
+      return std::apply(
+          [&x, v](auto... tpl_elems) {
+            return add_raw(
+                std::move(x),
+                constant_size_buffer_factory<sizeof(T)>(asio::mutable_buffer(&v.ref, sizeof(T))),
+                std::move(tpl_elems)...);
+          },
+          maybe_big_endian_to_native_post_processor_tpl(v.ref));
+    } else {
+      return add_raw(
+          std::move(x),
+          xdr_reader::make_temporary<tmp_integral>(
+              [v](const tmp_integral& x) -> std::error_code {
+                return xdr_convert_int_<SimulatedInt>(v.ref, x.value);
+              }));
+    }
+  } else {
+    using xdr_writer::make_temporary;
+    using xdr_writer::constant_size_buffer_factory;
+    using xdr_writer::network_byte_order_int_;
+
+    if constexpr(has_same_sign && sizeof(SimulatedInt) == sizeof(ActualInt) && sizeof(std::decay_t<T>) == sizeof(ActualInt)) {
+      if constexpr(boost::endian::order::native == boost::endian::order::big) {
+        return add_raw(
+            std::move(x),
+            constant_size_buffer_factory<sizeof(T)>(asio::const_buffer(&v.ref, sizeof(T))));
+      } else {
+        return add_raw(
+            std::move(x),
+            make_temporary<network_byte_order_int_<ActualInt>>(
+                [v](network_byte_order_int_<ActualInt>& x) {
+                  std::error_code ec = xdr_convert_int_<SimulatedInt>(x.value, v.ref);
+                  boost::endian::native_to_big_inplace(x.value);
+                  return ec;
+                }));
+      }
+    } else {
+      return add_raw(
+          std::move(x),
+          make_temporary<tmp_integral>(
+              [v](tmp_integral& x) -> std::error_code {
+                return xdr_convert_int_<SimulatedInt>(x.value, v.ref);
+              }));
+    }
+  }
+}
+
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::integral<T>
+#endif
+inline auto xdr_uint8_t::operator()(T& ref) const -> std::enable_if_t<std::is_integral_v<std::remove_const_t<T>>, xdr_integral_ref<std::uint8_t, std::uint32_t, T>> {
+  return xdr_integral_ref<std::uint8_t, std::uint32_t, T>(ref);
+}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::integral<T>
+#endif
+inline auto xdr_uint16_t::operator()(T& ref) const -> std::enable_if_t<std::is_integral_v<std::remove_const_t<T>>, xdr_integral_ref<std::uint16_t, std::uint32_t, T>> {
+  return xdr_integral_ref<std::uint16_t, std::uint32_t, T>(ref);
+}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::integral<T>
+#endif
+inline auto xdr_uint32_t::operator()(T& ref) const -> std::enable_if_t<std::is_integral_v<std::remove_const_t<T>>, xdr_integral_ref<std::uint32_t, std::uint32_t, T>> {
+  return xdr_integral_ref<std::uint32_t, std::uint32_t, T>(ref);
+}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::integral<T>
+#endif
+inline auto xdr_uint64_t::operator()(T& ref) const -> std::enable_if_t<std::is_integral_v<std::remove_const_t<T>>, xdr_integral_ref<std::uint64_t, std::uint64_t, T>> {
+  return xdr_integral_ref<std::uint64_t, std::uint64_t, T>(ref);
+}
+
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::integral<T>
+#endif
+inline auto xdr_int8_t::operator()(T& ref) const -> std::enable_if_t<std::is_integral_v<std::remove_const_t<T>>, xdr_integral_ref<std::int8_t, std::int32_t, T>> {
+  return xdr_integral_ref<std::int8_t, std::int32_t, T>(ref);
+}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::integral<T>
+#endif
+inline auto xdr_int16_t::operator()(T& ref) const -> std::enable_if_t<std::is_integral_v<std::remove_const_t<T>>, xdr_integral_ref<std::int16_t, std::int32_t, T>> {
+  return xdr_integral_ref<std::int16_t, std::int32_t, T>(ref);
+}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::integral<T>
+#endif
+inline auto xdr_int32_t::operator()(T& ref) const -> std::enable_if_t<std::is_integral_v<std::remove_const_t<T>>, xdr_integral_ref<std::int32_t, std::int32_t, T>> {
+  return xdr_integral_ref<std::int32_t, std::int32_t, T>(ref);
+}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::integral<T>
+#endif
+inline auto xdr_int64_t::operator()(T& ref) const -> std::enable_if_t<std::is_integral_v<std::remove_const_t<T>>, xdr_integral_ref<std::int64_t, std::int64_t, T>> {
+  return xdr_integral_ref<std::int64_t, std::int64_t, T>(ref);
+}
+
+
+template<typename T, typename Spec>
+inline temporary_with_spec<T, Spec>::temporary_with_spec(Spec&& spec)
+: spec(std::move(spec))
+{}
+
+template<typename T, typename Spec>
+inline temporary_with_spec<T, Spec>::temporary_with_spec(const Spec& spec)
+: spec(spec)
+{}
+
+template<typename T, typename Spec>
+inline temporary_with_spec<T, Spec>::temporary_with_spec(Spec&& spec, const T& value)
+: spec(std::move(spec)),
+  value(value)
+{}
+
+template<typename T, typename Spec>
+inline temporary_with_spec<T, Spec>::temporary_with_spec(const Spec& spec, const T& value)
+: spec(spec),
+  value(value)
+{}
+
+template<typename Fn, typename T, typename Spec>
+#if __cpp_concepts >= 201907L
+requires xdr_writer::getter<Fn, T> || xdr_reader::setter<Fn, T>
+#endif
+inline constexpr getset_impl<Fn, T, Spec>::getset_impl(Fn fn, Spec spec)
+: fn(std::move(fn)),
+  spec(std::move(spec))
+{}
+
+template<typename Fn, typename T>
+#if __cpp_concepts >= 201907L
+requires xdr_writer::getter<Fn, T> || xdr_reader::setter<Fn, T>
+#endif
+inline constexpr getset_impl<Fn, T, xdr_identity_t>::getset_impl(Fn fn, xdr_identity_t spec)
+: fn(std::move(fn)),
+  spec(std::move(spec))
+{}
+
+template<typename Fn, typename T>
+#if __cpp_concepts >= 201907L
+requires xdr_writer::getter<Fn, T> || xdr_reader::setter<Fn, T>
+#endif
+template<typename OtherSpec>
+inline constexpr auto getset_impl<Fn, T, xdr_identity_t>::as(OtherSpec&& other_spec) const & -> getset_impl<Fn, T, std::decay_t<OtherSpec>> {
+  return getset_impl<Fn, T, std::decay_t<OtherSpec>>(fn, std::forward<OtherSpec>(other_spec));
+}
+
+template<typename Fn, typename T>
+#if __cpp_concepts >= 201907L
+requires xdr_writer::getter<Fn, T> || xdr_reader::setter<Fn, T>
+#endif
+template<typename OtherSpec>
+inline constexpr auto getset_impl<Fn, T, xdr_identity_t>::as(OtherSpec&& other_spec) && -> getset_impl<Fn, T, std::decay_t<OtherSpec>> {
+  return getset_impl<Fn, T, std::decay_t<OtherSpec>>(std::move(fn), std::forward<OtherSpec>(other_spec));
+}
+
+
+template<typename... X, typename T, typename Spec>
+auto operator&(xdr<xdr_reader::reader<X...>>&& x, temporary_with_spec<T, Spec>& tws) {
+  return std::move(x) & tws.spec(tws.value);
+}
+
+template<typename... X, typename T, typename Spec>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, const temporary_with_spec<T, Spec>& tws) {
+  return std::move(x) & tws.spec(tws.value);
+}
+
+
+template<typename... X, typename Fn, typename T, typename Spec>
+auto operator&(xdr<xdr_reader::reader<X...>>&& x, getset_impl<Fn, T, Spec> gs) {
+  using xdr_reader::make_temporary;
+
+  return add_raw(
+      std::move(x),
+      make_temporary(
+          [setter=std::move(gs.fn)](const temporary_with_spec<T, Spec>& v) -> std::error_code {
+            std::invoke(setter, v.value);
+            return {};
+          },
+          temporary_with_spec<T, Spec>(std::move(gs.spec))));
+}
+
+template<typename... X, typename Fn, typename T, typename Spec>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, getset_impl<Fn, T, Spec> gs) {
+  using xdr_writer::make_temporary;
+
+  return add_raw(
+      std::move(x),
+      make_temporary(
+          [getter=std::move(gs.fn)](temporary_with_spec<T, Spec>& v) -> std::error_code {
+            v.value = std::invoke(getter);
+            return {};
+          },
+          temporary_with_spec<T, Spec>(std::move(gs.spec))));
+}
+
+
+template<typename T, typename Spec>
+constexpr inline xdr_getset_t<T, Spec>::xdr_getset_t(Spec spec)
+: spec(spec)
+{}
+
+template<typename T, typename Spec>
+template<typename Fn>
+inline auto xdr_getset_t<T, Spec>::operator()(Fn&& fn) const -> getset_impl<std::decay_t<Fn>, T, Spec> {
+  return getset_impl<std::decay_t<Fn>, T, Spec>(std::forward<Fn>(fn), spec);
+}
+
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::floating_point<std::remove_const_t<T>>
+#endif
+inline xdr_float32_ref<T>::xdr_float32_ref(T& ref) noexcept
+: ref_(ref)
+{}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::floating_point<std::remove_const_t<T>>
+#endif
+inline auto xdr_float32_ref<T>::ref() const noexcept -> T& {
+  return ref_;
+}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::floating_point<std::remove_const_t<T>>
+#endif
+inline xdr_float64_ref<T>::xdr_float64_ref(T& ref) noexcept
+: ref_(ref)
+{}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::floating_point<std::remove_const_t<T>>
+#endif
+inline auto xdr_float64_ref<T>::ref() const noexcept -> T& {
+  return ref_;
+}
+
+
+template<typename... X, typename T>
+#if __cpp_concepts >= 201907L
+requires (!std::is_const_v<T>)
+#endif
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const xdr_float32_ref<T>& v) {
+  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+  using xdr_reader::make_temporary;
+
+  static_assert(std::numeric_limits<float>::is_iec559,
+      "XDR requires the floating point types are encoded as iec559");
+
+  return add_raw(
+      std::move(x),
+      make_temporary<tmp_integral>(
+          [v](tmp_integral x) -> std::error_code {
+            float tmp;
+            static_assert(sizeof(x.value) == 4 && sizeof(tmp) == 4);
+            std::memcpy(&tmp, &x.value, 4);
+
+#if 0 // XXX somehow rejects everything?
+            // Validation.
+            if (std::isfinite(tmp) && (tmp < std::numeric_limits<std::remove_const_t<T>>::min() || tmp > std::numeric_limits<std::remove_const_t<T>>::max()))
+              return make_error_code(xdr_errc::decoding_error);
+#endif
+
+            v.ref() = tmp;
+            return {};
+          }));
+}
+
+template<typename... X, typename T>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const xdr_float32_ref<T>& v) {
+  using xdr_writer::network_byte_order_int_;
+  using xdr_writer::make_temporary;
+
+  static_assert(std::numeric_limits<float>::is_iec559,
+      "XDR requires the floating point types are encoded as iec559");
+
+  return add_raw(
+      std::move(x),
+      make_temporary<network_byte_order_int_<std::uint32_t>>(
+          [v](network_byte_order_int_<std::uint32_t>& x) -> std::error_code {
+#if 0 // XXX somehow rejects everything?
+            // Validation.
+            if (std::isfinite(v.ref()) && (v.ref() < std::numeric_limits<float>::min() || v.ref() > std::numeric_limits<float>::max()))
+              return make_error_code(xdr_errc::encoding_error);
+#endif
+
+            float tmp = v.ref();
+            static_assert(sizeof(x.value) == 4 && sizeof(tmp) == 4);
+            std::memcpy(&x.value, &tmp, 4);
+            boost::endian::native_to_big_inplace(x.value);
+            return {};
+          }));
+}
+
+template<typename... X, typename T>
+#if __cpp_concepts >= 201907L
+requires (!std::is_const_v<T>)
+#endif
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const xdr_float64_ref<T>& v) {
+  using tmp_integral = temporary_with_spec<std::uint64_t, typename int_spec_selector_<std::uint64_t>::type>;
+  using xdr_reader::make_temporary;
+
+  static_assert(std::numeric_limits<double>::is_iec559,
+      "XDR requires the floating point types are encoded as iec559");
+
+  return add_raw(
+      std::move(x),
+      make_temporary<tmp_integral>(
+          [v](tmp_integral x) -> std::error_code {
+            double tmp;
+            static_assert(sizeof(x.value) == 8 && sizeof(tmp) == 8);
+            std::memcpy(&tmp, &x.value, 8);
+
+#if 0 // XXX somehow rejects everything?
+            // Validation.
+            if (std::isfinite(tmp) && tmp < std::numeric_limits<std::remove_const_t<T>>::min() || tmp > std::numeric_limits<std::remove_const_t<T>>::max())
+              return make_error_code(xdr_errc::decoding_error);
+#endif
+
+            v.ref() = tmp;
+            return {};
+          }));
+}
+
+template<typename... X, typename T>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const xdr_float64_ref<T>& v) {
+  using xdr_writer::network_byte_order_int_;
+  using xdr_writer::make_temporary;
+
+  static_assert(std::numeric_limits<double>::is_iec559,
+      "XDR requires the floating point types are encoded as iec559");
+
+  return add_raw(
+      std::move(x),
+      make_temporary<network_byte_order_int_<std::uint64_t>>(
+          [v](network_byte_order_int_<std::uint64_t>& x) -> std::error_code {
+#if 0 // XXX somehow rejects everything?
+            // Validation.
+            if (std::isfinite(v.ref()) && (v.ref() < std::numeric_limits<double>::min() || v.ref() > std::numeric_limits<double>::max()))
+              return make_error_code(xdr_errc::encoding_error);
+#endif
+
+            double tmp = v.ref();
+            static_assert(sizeof(x.value) == 8 && sizeof(tmp) == 8);
+            std::memcpy(&x.value, &tmp, 8);
+            boost::endian::native_to_big_inplace(x.value);
+            return {};
+          }));
+}
+
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::floating_point<T>
+#endif
+inline auto xdr_float32_t::operator()(T& ref) const -> std::enable_if_t<std::is_floating_point_v<std::remove_const_t<T>>, xdr_float32_ref<T>> {
+  return xdr_float32_ref<T>(ref);
+}
+
+template<typename T>
+#if __cpp_concepts >= 201907L
+requires std::floating_point<T>
+#endif
+inline auto xdr_float64_t::operator()(T& ref) const -> std::enable_if_t<std::is_floating_point_v<std::remove_const_t<T>>, xdr_float64_ref<T>> {
+  return xdr_float64_ref<T>(ref);
+}
+
+
+inline dynamic_padding::dynamic_padding(std::size_t size)
+: size_(size)
+{
+  if (size > buf_.size()) throw std::logic_error("too many padding bytes");
+  std::fill(buf_.begin(), buf_.end(), std::byte{0});
+}
+
+inline auto dynamic_padding::buffer() const noexcept -> asio::const_buffer {
+  return asio::buffer(buf_, size_);
+}
+
+inline auto dynamic_padding::buffer() noexcept -> asio::mutable_buffer {
+  return asio::buffer(buf_, size_);
+}
+
+inline auto dynamic_padding::validate() const noexcept -> std::error_code {
+  if (std::all_of(buf_.begin(), buf_.end(), [](std::byte b) { return b == std::byte(0); }))
+    return std::error_code();
+  else
+    return make_error_code(xdr_errc::decoding_error);
+}
+
+template<std::size_t N>
+inline constant_size_padding<N>::constant_size_padding() noexcept {
+  std::fill(buf_.begin(), buf_.end(), std::byte{0});
+}
+
+template<std::size_t N>
+inline auto constant_size_padding<N>::buffer() const noexcept -> asio::const_buffer {
+  return asio::buffer(buf_);
+}
+
+template<std::size_t N>
+inline auto constant_size_padding<N>::buffer() noexcept -> asio::mutable_buffer {
+  return asio::buffer(buf_);
+}
+
+template<std::size_t N>
+inline auto constant_size_padding<N>::validate() const noexcept -> std::error_code {
+  if (std::all_of(buf_.begin(), buf_.end(), [](std::byte b) { return b == std::byte(0); }))
+    return std::error_code();
+  else
+    return make_error_code(xdr_errc::decoding_error);
+}
+
+
+inline dynamic_padding_holder::dynamic_padding_holder(std::size_t size)
+: size_(size)
+{
+  if (size >= 4) throw std::logic_error("too many padding bytes");
+}
+
+inline auto dynamic_padding_holder::size() const noexcept -> std::size_t {
+  return size_;
+}
+
+
+template<typename... X>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, dynamic_padding& p) {
+  using xdr_reader::reader;
+  using xdr_reader::buffer_factory;
+
+  return std::move(x) + xdr<reader<buffer_factory>>(
+      reader<buffer_factory>(
+          std::make_tuple(
+              buffer_factory(p.buffer()))));
+}
+
+template<typename... X>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const dynamic_padding& p) {
+  using xdr_writer::buffer_factory;
+
+  return add_raw(std::move(x), buffer_factory(p.buffer()));
+}
+
+template<typename... X, std::size_t N>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, constant_size_padding<N>& p) {
+  using xdr_reader::constant_size_buffer_factory;
+
+  return add_raw(std::move(x), constant_size_buffer_factory<N>(p.buffer()));
+}
+
+template<typename... X, std::size_t N>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_size_padding<N>& p) {
+  using xdr_writer::constant_size_buffer_factory;
+
+  return add_raw(std::move(x), constant_size_buffer_factory<N>(p.buffer()));
+}
+
+
+template<typename... X>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const dynamic_padding_holder& h) {
+  using xdr_reader::make_temporary;
+
+  return add_raw(
+      std::move(x),
+      make_temporary<dynamic_padding>(
+          &dynamic_padding::validate,
+          dynamic_padding(h.size())));
+}
+
+template<typename... X>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const dynamic_padding_holder& h) {
+  using xdr_writer::make_temporary;
+
+  return add_raw(
+      std::move(x),
+      make_temporary<dynamic_padding>(
+          [](const dynamic_padding& p) { return std::error_code(); },
+          dynamic_padding(h.size())));
+}
+
+template<typename... X, std::size_t N>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const constant_size_padding_holder<N>& h) {
+  if constexpr(N == 0) {
+    return std::move(x);
+  } else {
+    using xdr_reader::make_temporary;
+
+    return add_raw(
+        std::move(x),
+        make_temporary<constant_size_padding<N>>(
+            &constant_size_padding<N>::validate,
+            constant_size_padding<N>()));
+  }
+}
+
+template<typename... X, std::size_t N>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_size_padding_holder<N>& h) {
+  if constexpr(N == 0) {
+    return x;
+  } else {
+    using xdr_writer::make_temporary;
+
+    return add_raw(
+        std::move(x),
+        make_temporary<constant_size_padding<N>>(
+            [](const constant_size_padding<N>& p) { return std::error_code(); },
+            constant_size_padding<N>()));
+  }
+}
+
+
+inline auto xdr_dynamic_padding(std::size_t size) -> dynamic_padding_holder {
+  return dynamic_padding_holder(size);
+}
+
+
+template<typename Buffer>
+inline dynamic_buffer<Buffer>::dynamic_buffer(const Buffer& buf)
+: buf_(buf)
+{}
+
+template<typename Buffer>
+inline auto dynamic_buffer<Buffer>::buffer() const noexcept -> const Buffer& {
+  return buf_;
+}
+
+template<std::size_t Bytes>
+inline constant_size_mutable_buffer<Bytes>::constant_size_mutable_buffer(const asio::mutable_buffer& buf)
+: addr_(buf.data())
+{
+  if (buf.size() != Bytes) throw std::logic_error("fixed buffer has the wrong size");
+}
+
+template<std::size_t Bytes>
+inline auto constant_size_mutable_buffer<Bytes>::buffer() const noexcept -> asio::mutable_buffer {
+  return asio::mutable_buffer(addr_, Bytes);
+}
+
+template<std::size_t Bytes>
+inline constant_size_const_buffer<Bytes>::constant_size_const_buffer(const asio::const_buffer& buf)
+: addr_(buf.data())
+{
+  if (buf.size() != Bytes) throw std::logic_error("fixed buffer has the wrong size");
+}
+
+template<std::size_t Bytes>
+inline constant_size_const_buffer<Bytes>::constant_size_const_buffer(const constant_size_mutable_buffer<Bytes>& b) noexcept
+: addr_(b.buffer().data())
+{}
+
+template<std::size_t Bytes>
+inline auto constant_size_const_buffer<Bytes>::buffer() const noexcept -> asio::const_buffer {
+  return asio::const_buffer(addr_, Bytes);
+}
+
+
+template<typename... X, typename Buffer>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const dynamic_buffer<Buffer>& b) {
+  using xdr_reader::reader;
+  using xdr_reader::buffer_factory;
+
+  const std::size_t buffer_size = b.buffer().size();
+  const std::size_t rounded_up_size = (buffer_size + 3u) / 4u * 4u;
+  const std::size_t padding_size = rounded_up_size - buffer_size;
+
+  return add_raw(std::move(x), buffer_factory(b.buffer())) & xdr_dynamic_padding(padding_size);
+}
+
+template<typename... X, typename Buffer>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const dynamic_buffer<Buffer>& b) {
+  using xdr_writer::writer;
+  using xdr_writer::buffer_factory;
+
+  const std::size_t buffer_size = b.buffer().size();
+  const std::size_t rounded_up_size = (buffer_size + 3u) / 4u * 4u;
+  const std::size_t padding_size = rounded_up_size - buffer_size;
+
+  return add_raw(std::move(x), buffer_factory(b.buffer())) & xdr_dynamic_padding(padding_size);
+}
+
+template<typename... X, std::size_t Bytes>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const constant_size_mutable_buffer<Bytes>& b) {
+  using xdr_reader::reader;
+  using buffer_factory = xdr_reader::constant_size_buffer_factory<Bytes>;
+
+  constexpr std::size_t rounded_up_size = (Bytes + 3u) / 4u * 4u;
+  constexpr std::size_t padding_size = rounded_up_size - Bytes;
+
+  return add_raw(std::move(x), buffer_factory(b.buffer())) & xdr_padding<padding_size>;
+}
+
+template<typename... X, std::size_t Bytes>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_size_const_buffer<Bytes>& b) {
+  using xdr_writer::writer;
+  using buffer_factory = xdr_writer::constant_size_buffer_factory<Bytes>;
+
+  constexpr std::size_t rounded_up_size = (Bytes + 3u) / 4u * 4u;
+  constexpr std::size_t padding_size = rounded_up_size - Bytes;
+
+  return add_raw(std::move(x), buffer_factory(b.buffer())) & xdr_padding<padding_size>;
+}
+
+template<typename... X, std::size_t Bytes>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_size_mutable_buffer<Bytes>& b) {
+  return std::move(x) & constant_size_const_buffer<Bytes>(b);
+}
+
+
+inline auto xdr_dynamic_raw_bytes_t::operator()(asio::mutable_buffer buf) const -> dynamic_buffer<asio::mutable_buffer> {
+  return dynamic_buffer<asio::mutable_buffer>(buf);
+}
+
+inline auto xdr_dynamic_raw_bytes_t::operator()(asio::const_buffer buf) const -> dynamic_buffer<asio::const_buffer> {
+  return dynamic_buffer<asio::const_buffer>(buf);
+}
+
+template<std::size_t Bytes>
+template<typename T, typename Alloc>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_raw_bytes_t<Bytes>::operator()(std::vector<T, Alloc>& buf) const -> constant_size_mutable_buffer<Bytes> {
+  return (*this)(asio::buffer(buf));
+}
+
+template<std::size_t Bytes>
+template<typename T, typename Alloc>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_raw_bytes_t<Bytes>::operator()(const std::vector<T, Alloc>& buf) const -> constant_size_const_buffer<Bytes> {
+  return (*this)(asio::buffer(buf));
+}
+
+template<std::size_t Bytes>
+template<typename T, typename CharT, typename Alloc>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_raw_bytes_t<Bytes>::operator()(std::basic_string<T, CharT, Alloc>& buf) const -> constant_size_mutable_buffer<Bytes> {
+  return (*this)(asio::buffer(buf));
+}
+
+template<std::size_t Bytes>
+template<typename T, typename CharT, typename Alloc>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_raw_bytes_t<Bytes>::operator()(const std::basic_string<T, CharT, Alloc>& buf) const -> constant_size_const_buffer<Bytes> {
+  return (*this)(asio::buffer(buf));
+}
+
+template<std::size_t Bytes>
+inline auto xdr_raw_bytes_t<Bytes>::operator()(asio::mutable_buffer buf) const -> constant_size_mutable_buffer<Bytes> {
+  return constant_size_mutable_buffer<Bytes>(buf);
+}
+
+template<std::size_t Bytes>
+inline auto xdr_raw_bytes_t<Bytes>::operator()(asio::const_buffer buf) const -> constant_size_const_buffer<Bytes> {
+  return constant_size_const_buffer<Bytes>(buf);
+}
+
+
+template<typename ContiguousCollection>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+#endif
+inline sized_buffer<ContiguousCollection>::sized_buffer(ContiguousCollection& buf, std::size_t max_size)
+: max_size_(max_size),
+  buf_(&buf)
+{}
+
+template<typename ContiguousCollection>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+#endif
+inline auto sized_buffer<ContiguousCollection>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename ContiguousCollection>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+#endif
+inline auto sized_buffer<ContiguousCollection>::buffer() const -> asio::mutable_buffer {
+  return asio::buffer(*buf_);
+}
+
+template<typename ContiguousCollection>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+#endif
+inline void sized_buffer<ContiguousCollection>::resize(std::size_t len) {
+  buf_->resize(len);
+}
+
+template<typename ContiguousCollection>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+#endif
+inline sized_const_buffer<ContiguousCollection>::sized_const_buffer(const ContiguousCollection& buf, std::size_t max_size)
+: max_size_(max_size),
+  buf_(&buf)
+{}
+
+template<typename ContiguousCollection>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+#endif
+inline sized_const_buffer<ContiguousCollection>::sized_const_buffer(const sized_buffer<ContiguousCollection>& b)
+: max_size_(b.max_size()),
+  buf_(b.buf_)
+{}
+
+template<typename ContiguousCollection>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+#endif
+inline auto sized_const_buffer<ContiguousCollection>::size() const noexcept -> std::size_t {
+  return buf_->size();
+}
+
+template<typename ContiguousCollection>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+#endif
+inline auto sized_const_buffer<ContiguousCollection>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename ContiguousCollection>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+#endif
+inline auto sized_const_buffer<ContiguousCollection>::buffer() const -> asio::const_buffer {
+  return asio::buffer(*buf_);
+}
+
+
+template<typename... X, typename ContiguousCollection>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const sized_buffer<ContiguousCollection>& b) {
+  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+  using xdr_reader::reader;
+  using xdr_reader::make_decoder;
+
+  return add_raw(
+      std::move(x),
+      make_decoder<tmp_integral>(
+          [b=b](tmp_integral len, auto& stream, auto callback) mutable {
+            if (len.value > b.max_size()) {
+              std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+              return;
+            }
+            b.resize(len.value);
+
+            async_read(
+                stream,
+                xdr<reader<>>() & xdr_dynamic_raw_bytes(b.buffer()),
+                std::move(callback));
+          }));
+}
+
+template<typename... X, typename ContiguousCollection>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const sized_const_buffer<ContiguousCollection>& b) {
+  using xdr_writer::writer;
+
+  std::error_code ec;
+  if (b.size() > b.max_size() || b.size() > std::numeric_limits<std::uint32_t>::max())
+    ec = make_error_code(xdr_errc::encoding_error);
+
+  return add_raw(std::move(x), xdr_writer::make_pre_processor([ec]() -> std::error_code { return ec; }))
+      & xdr_getset<std::remove_cvref_t<decltype(b.size())>>([bsize=b.size()]() { return bsize; }).as(xdr_uint32)
+      & xdr_dynamic_raw_bytes(b.buffer());
+}
+
+template<typename... X, typename ContiguousCollection>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const sized_buffer<ContiguousCollection>& b) {
+  return std::move(x) & sized_const_buffer<ContiguousCollection>(b);
+}
+
+
+template<typename T, typename Alloc>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_bytes_t::operator()(std::vector<T, Alloc>& v, std::size_t max_size) const -> sized_buffer<std::vector<T, Alloc>> {
+  return sized_buffer<std::vector<T, Alloc>>(v, max_size);
+}
+
+template<typename T, typename Alloc>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_bytes_t::operator()(const std::vector<T, Alloc>& v, std::size_t max_size) const -> sized_const_buffer<std::vector<T, Alloc>> {
+  return sized_const_buffer<std::vector<T, Alloc>>(v, max_size);
+}
+
+template<typename T, typename CharT, typename Alloc>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_bytes_t::operator()(std::basic_string<T, CharT, Alloc>& v, std::size_t max_size) const -> sized_buffer<std::basic_string<T, CharT, Alloc>> {
+  return sized_buffer<std::basic_string<T, CharT, Alloc>>(v, max_size);
+}
+
+template<typename T, typename CharT, typename Alloc>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_bytes_t::operator()(const std::basic_string<T, CharT, Alloc>& v, std::size_t max_size) const -> sized_const_buffer<std::basic_string<T, CharT, Alloc>> {
+  return sized_const_buffer<std::basic_string<T, CharT, Alloc>>(v, max_size);
+}
+
+
+inline bool_ref::bool_ref(bool& b) noexcept
+: ref_(&b)
+{}
+
+inline auto bool_ref::address() const noexcept -> bool* {
+  return ref_;
+}
+
+inline const_bool_ref::const_bool_ref(const bool& b) noexcept
+: ref_(&b)
+{}
+
+inline const_bool_ref::const_bool_ref(const bool_ref& b) noexcept
+: ref_(b.address())
+{}
+
+inline auto const_bool_ref::address() const noexcept -> const bool* {
+  return ref_;
+}
+
+
+template<typename... X>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, bool_ref b) {
+  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+
+  return add_raw(
+      std::move(x),
+      xdr_reader::make_temporary<tmp_integral>(
+          [b](const tmp_integral& x) -> std::error_code {
+            switch (x.value) {
+              default:
+                return make_error_code(xdr_errc::decoding_error);
+              case 0:
+                *b.address() = false;
+                break;
+              case 1:
+                *b.address() = true;
+                break;
+            }
+            return {};
+          }));
+}
+
+template<typename... X>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const_bool_ref b) {
+  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+
+  return add_raw(
+      std::move(x),
+      xdr_writer::make_temporary<tmp_integral>(
+          [b](tmp_integral& x) -> std::error_code {
+            x.value = (*b.address() ? 1u : 0u);
+            return {};
+          }));
+}
+
+template<typename... X>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, bool_ref b) {
+  return std::move(x) & const_bool_ref(b);
+}
+
+
+inline auto xdr_bool_t::operator()(bool& b) const -> bool_ref {
+  return bool_ref(b);
+}
+
+inline auto xdr_bool_t::operator()(const bool& b) const -> const_bool_ref {
+  return const_bool_ref(b);
+}
+
+
+template<typename... X>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, tmp_bool& b) {
+  return std::move(x) & xdr_bool(b.value);
+}
+
+template<typename... X>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const tmp_bool& b) {
+  return std::move(x) & xdr_bool(b.value);
+}
+
+
+template<typename T, typename Spec>
+inline opt_ref<T, Spec>::opt_ref(std::optional<T>& ref, Spec spec) noexcept(std::is_nothrow_move_constructible_v<Spec>)
+: ref(ref),
+  spec(std::move(spec))
+{}
+
+template<typename T, typename Spec>
+inline opt_cref<T, Spec>::opt_cref(const std::optional<T>& ref, Spec spec) noexcept(std::is_nothrow_move_constructible_v<Spec>)
+: ref(ref),
+  spec(std::move(spec))
+{}
+
+template<typename T, typename Spec>
+inline opt_cref<T, Spec>::opt_cref(const opt_ref<T, Spec>& r) noexcept(std::is_nothrow_copy_constructible_v<Spec>)
+: ref(r.ref),
+  spec(r.spec)
+{}
+
+template<typename T, typename Spec>
+inline opt_cref<T, Spec>::opt_cref(opt_ref<T, Spec>&& r) noexcept(std::is_nothrow_move_constructible_v<Spec>)
+: ref(r.ref),
+  spec(std::move(r.spec))
+{}
+
+template<typename T>
+inline opt_ref<T, xdr_identity_t>::opt_ref(std::optional<T>& ref, xdr_identity_t spec) noexcept
+: ref(ref),
+  spec(std::move(spec))
+{}
+
+template<typename T>
+template<typename OtherSpec>
+inline auto opt_ref<T, xdr_identity_t>::as(OtherSpec&& other_spec) const -> opt_ref<T, std::decay_t<OtherSpec>> {
+  return opt_ref<T, std::decay_t<OtherSpec>>(ref, std::forward<OtherSpec>(other_spec));
+}
+
+template<typename T>
+inline opt_cref<T, xdr_identity_t>::opt_cref(const std::optional<T>& ref, xdr_identity_t spec) noexcept
+: ref(ref),
+  spec(std::move(spec))
+{}
+
+template<typename T>
+inline opt_cref<T, xdr_identity_t>::opt_cref(const opt_ref<T, xdr_identity_t>& r) noexcept
+: ref(r.ref),
+  spec(r.spec)
+{}
+
+template<typename T>
+inline opt_cref<T, xdr_identity_t>::opt_cref(opt_ref<T, xdr_identity_t>&& r) noexcept
+: ref(r.ref),
+  spec(std::move(r.spec))
+{}
+
+template<typename T>
+template<typename OtherSpec>
+inline auto opt_cref<T, xdr_identity_t>::as(OtherSpec&& other_spec) const -> opt_cref<T, std::decay_t<OtherSpec>> {
+  return opt_cref<T, std::decay_t<OtherSpec>>(ref, std::forward<OtherSpec>(other_spec));
+}
+
+
+template<typename... X, typename T, typename Spec>
+auto operator&(xdr<xdr_reader::reader<X...>>&& x, opt_ref<T, Spec> s) {
+  using xdr_reader::make_decoder;
+
+  return add_raw(
+      std::move(x),
+      make_decoder<temporary_with_spec<bool, xdr_bool_t>>(
+          [s](const temporary_with_spec<bool, xdr_bool_t>& b, auto& stream, auto callback) {
+            if (b.value) {
+              if (!s.ref.has_value()) s.ref.emplace();
+              async_read(
+                  stream,
+                  xdr<xdr_reader::reader<>>() & s.spec(*s.ref),
+                  std::move(callback));
+            } else {
+              s.ref.reset();
+              std::invoke(callback, std::error_code());
+            }
+          }));
+}
+
+template<typename... X, typename T, typename Spec>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, opt_cref<T, Spec> s) {
+  using xdr_writer::make_encoder;
+
+  return add_raw(
+      std::move(x) & xdr_getset<bool>([s]() -> bool { return s.ref.has_value(); }).as(xdr_bool),
+      make_encoder(
+          [s](auto& stream, auto callback) {
+            if (s.ref.has_value()) {
+              async_write(
+                  stream,
+                  xdr<xdr_writer::writer<>>() & s.spec(*s.ref),
+                  std::move(callback));
+            } else {
+              std::invoke(callback, std::error_code());
+            }
+          }));
+}
+
+template<typename... X, typename T, typename Spec>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, opt_ref<T, Spec> s) {
+  return std::move(x) & opt_cref<T, Spec>(std::move(s));
+}
+
+
+template<typename Spec>
+inline xdr_opt_t<Spec>::xdr_opt_t(Spec spec)
+: spec(std::move(spec))
+{}
+
+template<typename Spec>
+template<typename T>
+inline auto xdr_opt_t<Spec>::operator()(std::optional<T>& opt) const -> opt_ref<T> {
+  return opt_ref<T>(opt).of(spec);
+}
+
+template<typename Spec>
+template<typename T>
+inline auto xdr_opt_t<Spec>::operator()(const std::optional<T>& opt) const -> opt_cref<T> {
+  return opt_cref<T>(opt).of(spec);
+}
+
+template<typename T>
+inline auto xdr_opt_t<xdr_identity_t>::operator()(std::optional<T>& opt) const -> opt_ref<T> {
+  return opt_ref<T>(opt);
+}
+
+template<typename T>
+inline auto xdr_opt_t<xdr_identity_t>::operator()(const std::optional<T>& opt) const -> opt_cref<T> {
+  return opt_cref<T>(opt);
+}
+
+template<typename Spec>
+inline auto xdr_opt_t<xdr_identity_t>::of(Spec&& spec) const -> xdr_opt_t<std::decay_t<Spec>> {
+  return xdr_opt_t<std::decay_t<Spec>>(std::forward<Spec>(spec));
+}
+
+
+template<typename Iter, typename U>
+inline auto unpack_emplace_result_(const std::pair<Iter, U>& result) noexcept -> const U& {
+  return result.second;
+}
+
+template<typename Iter>
+inline auto unpack_emplace_result_(const Iter& result) noexcept -> bool {
+  return true;
+}
+
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline sequence_holder<Collection, Spec>::sequence_holder(Collection& collection, std::size_t max_size, Spec spec)
+: max_size_(max_size),
+  collection_(&collection),
+  spec_(std::move(spec))
+{}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto sequence_holder<Collection, Spec>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto sequence_holder<Collection, Spec>::collection() const noexcept -> Collection& {
+  return *collection_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto sequence_holder<Collection, Spec>::spec() const & noexcept -> const Spec& {
+  return spec_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto sequence_holder<Collection, Spec>::spec() && noexcept -> Spec&& {
+  return std::move(spec_);
+}
+
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline sequence_holder<Collection, xdr_identity_t>::sequence_holder(Collection& collection, std::size_t max_size)
+: max_size_(max_size),
+  collection_(&collection)
+{}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto sequence_holder<Collection, xdr_identity_t>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto sequence_holder<Collection, xdr_identity_t>::collection() const noexcept -> Collection& {
+  return *collection_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto sequence_holder<Collection, xdr_identity_t>::spec() const noexcept -> xdr_identity_t {
+  return xdr_identity;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+template<typename OtherSpec>
+inline auto sequence_holder<Collection, xdr_identity_t>::of(OtherSpec&& other_spec) const -> sequence_holder<Collection, std::decay_t<OtherSpec>> {
+  return sequence_holder<Collection, std::decay_t<OtherSpec>>(collection(), max_size(), std::forward<OtherSpec>(other_spec));
+}
+
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline const_sequence_holder<Collection, Spec>::const_sequence_holder(const Collection& collection, std::size_t max_size, Spec spec)
+: max_size_(max_size),
+  collection_(&collection),
+  spec_(std::move(spec))
+{}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline const_sequence_holder<Collection, Spec>::const_sequence_holder(sequence_holder<Collection, Spec> c) noexcept
+: const_sequence_holder(c.collection(), c.max_size(), std::move(c).spec())
+{}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto const_sequence_holder<Collection, Spec>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto const_sequence_holder<Collection, Spec>::collection() const noexcept -> const Collection& {
+  return *collection_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto const_sequence_holder<Collection, Spec>::spec() const & noexcept -> const Spec& {
+  return spec_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto const_sequence_holder<Collection, Spec>::spec() && noexcept -> Spec&& {
+  return std::move(spec_);
+}
+
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline const_sequence_holder<Collection, xdr_identity_t>::const_sequence_holder(const Collection& collection, std::size_t max_size)
+: max_size_(max_size),
+  collection_(&collection)
+{}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline const_sequence_holder<Collection, xdr_identity_t>::const_sequence_holder(const sequence_holder<Collection, xdr_identity_t>& c) noexcept
+: const_sequence_holder(c.collection(), c.max_size())
+{}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto const_sequence_holder<Collection, xdr_identity_t>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto const_sequence_holder<Collection, xdr_identity_t>::collection() const noexcept -> const Collection& {
+  return *collection_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+inline auto const_sequence_holder<Collection, xdr_identity_t>::spec() const noexcept -> xdr_identity_t {
+  return xdr_identity;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires sequence<Collection>
+#endif
+template<typename OtherSpec>
+inline auto const_sequence_holder<Collection, xdr_identity_t>::of(OtherSpec&& other_spec) const -> const_sequence_holder<Collection, std::decay_t<OtherSpec>> {
+  return const_sequence_holder<Collection, std::decay_t<OtherSpec>>(collection(), max_size(), std::forward<OtherSpec>(other_spec));
+}
+
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline set_holder<Collection, Spec>::set_holder(Collection& collection, std::size_t max_size, Spec spec)
+: max_size_(max_size),
+  collection_(&collection),
+  spec_(std::move(spec))
+{}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto set_holder<Collection, Spec>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto set_holder<Collection, Spec>::collection() const noexcept -> Collection& {
+  return *collection_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto set_holder<Collection, Spec>::spec() const & noexcept -> const Spec& {
+  return spec_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto set_holder<Collection, Spec>::spec() && noexcept -> Spec&& {
+  return std::move(spec_);
+}
+
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline set_holder<Collection, xdr_identity_t>::set_holder(Collection& collection, std::size_t max_size)
+: max_size_(max_size),
+  collection_(&collection)
+{}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto set_holder<Collection, xdr_identity_t>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto set_holder<Collection, xdr_identity_t>::collection() const noexcept -> Collection& {
+  return *collection_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto set_holder<Collection, xdr_identity_t>::spec() const noexcept -> xdr_identity_t {
+  return xdr_identity;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+template<typename OtherSpec>
+inline auto set_holder<Collection, xdr_identity_t>::of(OtherSpec&& other_spec) const -> set_holder<Collection, std::decay_t<OtherSpec>> {
+  return set_holder<Collection, std::decay_t<OtherSpec>>(collection(), max_size(), std::forward<OtherSpec>(other_spec));
+}
+
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline const_set_holder<Collection, Spec>::const_set_holder(const Collection& collection, std::size_t max_size, Spec spec)
+: max_size_(max_size),
+  collection_(&collection),
+  spec_(std::move(spec))
+{}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline const_set_holder<Collection, Spec>::const_set_holder(set_holder<Collection, Spec> c) noexcept
+: const_set_holder(c.collection(), c.max_size(), std::move(c).spec())
+{}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto const_set_holder<Collection, Spec>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto const_set_holder<Collection, Spec>::collection() const noexcept -> const Collection& {
+  return *collection_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto const_set_holder<Collection, Spec>::spec() const & noexcept -> const Spec& {
+  return spec_;
+}
+
+template<typename Collection, typename Spec>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto const_set_holder<Collection, Spec>::spec() && noexcept -> Spec&& {
+  return std::move(spec_);
+}
+
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline const_set_holder<Collection, xdr_identity_t>::const_set_holder(const Collection& collection, std::size_t max_size)
+: max_size_(max_size),
+  collection_(&collection)
+{}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline const_set_holder<Collection, xdr_identity_t>::const_set_holder(const set_holder<Collection, xdr_identity_t>& c) noexcept
+: const_set_holder(c.collection(), c.max_size())
+{}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto const_set_holder<Collection, xdr_identity_t>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto const_set_holder<Collection, xdr_identity_t>::collection() const noexcept -> const Collection& {
+  return *collection_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+inline auto const_set_holder<Collection, xdr_identity_t>::spec() const noexcept -> xdr_identity_t {
+  return xdr_identity;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires set<Collection>
+#endif
+template<typename OtherSpec>
+inline auto const_set_holder<Collection, xdr_identity_t>::of(OtherSpec&& other_spec) const -> const_set_holder<Collection, std::decay_t<OtherSpec>> {
+  return const_set_holder<Collection, std::decay_t<OtherSpec>>(collection(), max_size(), std::forward<OtherSpec>(other_spec));
+}
+
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline map_holder<Collection, KeySpec, MappedSpec>::map_holder(Collection& collection, std::size_t max_size, KeySpec key_spec, MappedSpec mapped_spec)
+: max_size_(max_size),
+  collection_(&collection),
+  key_spec_(std::move(key_spec)),
+  mapped_spec_(std::move(mapped_spec))
+{}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, KeySpec, MappedSpec>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, KeySpec, MappedSpec>::collection() const noexcept -> Collection& {
+  return *collection_;
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, KeySpec, MappedSpec>::key_spec() const & noexcept -> const KeySpec& {
+  return key_spec_;
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, KeySpec, MappedSpec>::key_spec() && noexcept -> KeySpec&& {
+  return std::move(key_spec_);
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, KeySpec, MappedSpec>::mapped_spec() const & noexcept -> const MappedSpec& {
+  return mapped_spec_;
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, KeySpec, MappedSpec>::mapped_spec() && noexcept -> MappedSpec&& {
+  return std::move(mapped_spec_);
+}
+
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline map_holder<Collection, xdr_identity_t, xdr_identity_t>::map_holder(Collection& collection, std::size_t max_size)
+: max_size_(max_size),
+  collection_(&collection)
+{}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, xdr_identity_t, xdr_identity_t>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, xdr_identity_t, xdr_identity_t>::collection() const noexcept -> Collection& {
+  return *collection_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, xdr_identity_t, xdr_identity_t>::key_spec() const noexcept -> xdr_identity_t {
+  return xdr_identity;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto map_holder<Collection, xdr_identity_t, xdr_identity_t>::mapped_spec() const noexcept -> xdr_identity_t {
+  return xdr_identity;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+template<typename KeySpec, typename MappedSpec>
+inline auto map_holder<Collection, xdr_identity_t, xdr_identity_t>::of(KeySpec&& key_spec, MappedSpec&& mapped_spec) const -> map_holder<Collection, std::decay_t<KeySpec>, std::decay_t<MappedSpec>> {
+  return map_holder<Collection, std::decay_t<KeySpec>, std::decay_t<MappedSpec>>(collection(), max_size(), std::forward<KeySpec>(key_spec), std::forward<MappedSpec>(mapped_spec));
+}
+
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline const_map_holder<Collection, KeySpec, MappedSpec>::const_map_holder(const Collection& collection, std::size_t max_size, KeySpec key_spec, MappedSpec mapped_spec)
+: max_size_(max_size),
+  collection_(&collection),
+  key_spec_(std::move(key_spec)),
+  mapped_spec_(std::move(mapped_spec))
+{}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline const_map_holder<Collection, KeySpec, MappedSpec>::const_map_holder(map_holder<Collection, KeySpec, MappedSpec> c) noexcept
+: const_map_holder(c.collection(), c.max_size(), std::move(c).key_spec(), std::move(c).mapped_spec())
+{}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, KeySpec, MappedSpec>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, KeySpec, MappedSpec>::collection() const noexcept -> const Collection& {
+  return *collection_;
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, KeySpec, MappedSpec>::key_spec() const & noexcept -> const KeySpec& {
+  return key_spec_;
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, KeySpec, MappedSpec>::key_spec() && noexcept -> KeySpec&& {
+  return std::move(key_spec_);
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, KeySpec, MappedSpec>::mapped_spec() const & noexcept -> const MappedSpec& {
+  return mapped_spec_;
+}
+
+template<typename Collection, typename KeySpec, typename MappedSpec>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, KeySpec, MappedSpec>::mapped_spec() && noexcept -> MappedSpec&& {
+  return std::move(mapped_spec_);
+}
+
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline const_map_holder<Collection, xdr_identity_t, xdr_identity_t>::const_map_holder(const Collection& collection, std::size_t max_size)
+: max_size_(max_size),
+  collection_(&collection)
+{}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline const_map_holder<Collection, xdr_identity_t, xdr_identity_t>::const_map_holder(const map_holder<Collection, xdr_identity_t, xdr_identity_t>& c) noexcept
+: const_map_holder(c.collection(), c.max_size())
+{}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, xdr_identity_t, xdr_identity_t>::max_size() const noexcept -> std::size_t {
+  return max_size_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, xdr_identity_t, xdr_identity_t>::collection() const noexcept -> const Collection& {
+  return *collection_;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, xdr_identity_t, xdr_identity_t>::key_spec() const noexcept -> xdr_identity_t {
+  return xdr_identity;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+inline auto const_map_holder<Collection, xdr_identity_t, xdr_identity_t>::mapped_spec() const noexcept -> xdr_identity_t {
+  return xdr_identity;
+}
+
+template<typename Collection>
+#if __cpp_concepts >= 201907L
+requires map<Collection>
+#endif
+template<typename KeySpec, typename MappedSpec>
+inline auto const_map_holder<Collection, xdr_identity_t, xdr_identity_t>::of(KeySpec&& key_spec, MappedSpec&& mapped_spec) const -> const_map_holder<Collection, std::decay_t<KeySpec>, std::decay_t<MappedSpec>> {
+  return const_map_holder<Collection, std::decay_t<KeySpec>, std::decay_t<MappedSpec>>(collection(), max_size(), std::forward<KeySpec>(key_spec), std::forward<MappedSpec>(mapped_spec));
+}
+
+
+template<typename Stream, typename Iter, typename Sentinel, typename Callback, typename Spec>
+inline void read_sequence_(Stream& stream, Iter b, Sentinel e, Callback callback, const Spec& spec) {
+  using xdr_reader::reader;
+
+  if (b == e) {
+    std::invoke(callback, std::error_code());
+    return;
+  }
+
+  async_read(
+      stream,
+      xdr<reader<>>() & spec(*b),
+      [&stream, callback=std::move(callback), b, e, spec](std::error_code ec) mutable {
+        if (ec)
+          std::invoke(callback, ec);
+        else
+          read_sequence_(stream, std::next(b), std::move(e), std::move(callback), spec);
+      });
+}
+
+template<typename Stream, typename Iter, typename Sentinel, typename Callback, typename Spec>
+inline void write_sequence_(Stream& stream, Iter b, Sentinel e, Callback callback, const Spec& spec) {
+  using xdr_writer::writer;
+
+  if (b == e) {
+    std::invoke(callback, std::error_code());
+    return;
+  }
+
+  async_write(
+      stream,
+      xdr<writer<>>() & spec(*b),
+      [&stream, callback=std::move(callback), b, e, spec](std::error_code ec) mutable {
+        if (ec)
+          std::invoke(callback, ec);
+        else
+          write_sequence_(stream, std::next(b), std::move(e), std::move(callback), spec);
+      });
+}
+
+
+template<typename Stream, typename Set, typename Callback, typename Spec>
+inline void read_set_(std::uint32_t count, Stream& stream, Set& c, Callback callback, const Spec& spec) {
+  using xdr_reader::reader;
+  using xdr_reader::make_temporary;
+
+  if (count == 0u) {
+    std::invoke(callback, std::error_code());
+    return;
+  }
+
+  async_read(
+      stream,
+      add_raw(
+          xdr<reader<>>(),
+          make_temporary<temporary_with_spec<typename Set::value_type, Spec>>(
+              [&c](temporary_with_spec<typename Set::value_type, Spec> v) -> std::error_code {
+                if (unpack_emplace_result_(c.emplace(std::move(v.value)))) return {};
+                // insertion failure is a decoding error
+                return make_error_code(xdr_errc::decoding_error);
+              },
+              temporary_with_spec<typename Set::value_type, Spec>(spec))),
+      [&stream, callback=std::move(callback), &c, count, spec](std::error_code ec) mutable {
+        if (ec)
+          std::invoke(callback, ec);
+        else
+          read_set_(count - 1u, stream, c, std::move(callback), spec);
+      });
+}
+
+template<typename Stream, typename Set, typename Callback, typename Spec>
+inline void write_set_(Stream& stream, const Set& c, Callback callback, const Spec& spec) {
+  // Sequence code works fine.
+  using std::begin;
+  using std::end;
+  write_sequence_(stream, begin(c), end(c), std::move(callback), spec);
+}
+
+
+template<typename Stream, typename Map, typename Callback, typename KeySpec, typename MappedSpec>
+inline void read_map_(std::uint32_t count, Stream& stream, Map& c, Callback callback, const KeySpec& key_spec, const MappedSpec& mapped_spec) {
+  using xdr_reader::reader;
+  using xdr_reader::make_temporary;
+
+  if (count == 0u) {
+    std::invoke(callback, std::error_code());
+    return;
+  }
+
+  async_read(
+      stream,
+      add_raw(
+          xdr<reader<>>(),
+          make_temporary<std::pair<temporary_with_spec<typename Map::key_type, KeySpec>, temporary_with_spec<typename Map::mapped_type, MappedSpec>>>(
+              [&c](auto v) -> std::error_code {
+                if (unpack_emplace_result_(c.emplace(std::move(v.first.value), std::move(v.second.value)))) return {};
+                // insertion failure is a decoding error
+                return make_error_code(xdr_errc::decoding_error);
+              })),
+      [&stream, callback=std::move(callback), &c, count, key_spec, mapped_spec](std::error_code ec) mutable {
+        if (ec)
+          std::invoke(callback, ec);
+        else
+          read_map_(count - 1u, stream, c, std::move(callback), key_spec, mapped_spec);
+      });
+}
+
+template<typename Stream, typename Iter, typename Sentinel, typename Callback, typename Spec>
+inline void write_map_(Stream& stream, Iter b, Sentinel e, Callback callback, const Spec& spec) {
+  using xdr_writer::writer;
+
+  if (b == e) {
+    std::invoke(callback, std::error_code());
+    return;
+  }
+
+  async_write(
+      stream,
+      xdr<writer<>>() & spec(*b),
+      [&stream, callback=std::move(callback), b, e, spec](std::error_code ec) mutable {
+        if (ec)
+          std::invoke(callback, ec);
+        else
+          write_map_(stream, std::next(b), std::move(e), std::move(callback), spec);
+      });
+}
+
+
+template<typename... X, typename Collection, typename Spec>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, sequence_holder<Collection, Spec> c) {
+  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+  using xdr_reader::make_decoder;
+  using std::begin;
+  using std::end;
+
+  return add_raw(
+      std::move(x),
+      make_decoder<tmp_integral>(
+          [c](tmp_integral len, auto& stream, auto callback) {
+            if (len.value > c.max_size()) {
+              std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+              return;
+            }
+
+            c.collection().resize(len.value);
+            read_sequence_(stream, begin(c.collection()), end(c.collection()), std::move(callback), c.spec());
+          }));
+}
+
+template<typename... X, typename Collection, typename Spec>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const_sequence_holder<Collection, Spec> c) {
+  using xdr_writer::make_encoder;
+  using xdr_writer::make_pre_processor;
+  using std::begin;
+  using std::end;
+
+  return add_raw(
+      add_raw(
+          std::move(x),
+          make_pre_processor(
+              [c]() -> std::error_code {
+                std::error_code ec;
+                if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
+                return ec;
+              }))
+      & xdr_getset<std::remove_cvref_t<decltype(std::declval<const Collection&>().size())>>([c]() { return c.collection().size(); }).as(xdr_uint32),
+      make_encoder(
+          [c](auto& stream, auto callback) {
+            write_sequence_(stream, begin(c.collection()), end(c.collection()), std::move(callback), c.spec());
+          }));
+}
+
+template<typename... X, typename Collection, typename Spec>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, sequence_holder<Collection, Spec> c) {
+  return std::move(x) & const_sequence_holder<Collection, Spec>(std::move(c));
+}
+
+template<typename... X, typename Collection, typename Spec>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, set_holder<Collection, Spec> c) {
+  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+  using xdr_reader::make_decoder;
+  using std::begin;
+  using std::end;
+
+  return add_raw(
+      std::move(x),
+      make_decoder<tmp_integral>(
+          [c](tmp_integral len, auto& stream, auto callback) {
+            if (len.value > c.max_size()) {
+              std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+              return;
+            }
+
+            c.collection().clear();
+            read_set_(len.value, stream, c.collection(), std::move(callback), c.spec());
+          }));
+}
+
+template<typename... X, typename Collection, typename Spec>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const_set_holder<Collection, Spec> c) {
+  using xdr_writer::make_encoder;
+  using xdr_writer::make_pre_processor;
+  using std::begin;
+  using std::end;
+
+  return add_raw(
+      add_raw(
+          std::move(x),
+          make_pre_processor(
+              [c]() -> std::error_code {
+                std::error_code ec;
+                if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
+                return ec;
+              }))
+      & xdr_getset<std::remove_cvref_t<decltype(std::declval<const Collection&>().size())>>([c]() { return c.collection().size(); }).as(xdr_uint32),
+      make_encoder(
+          [c](auto& stream, auto callback) {
+            write_set_(stream, c.collection(), std::move(callback), c.spec());
+          }));
+}
+
+template<typename... X, typename Collection, typename Spec>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, set_holder<Collection, Spec> c) {
+  return std::move(x) & const_set_holder<Collection, Spec>(c);
+}
+
+template<typename... X, typename Collection, typename KeySpec, typename MappedSpec>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, map_holder<Collection, KeySpec, MappedSpec> c) {
+  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+  using xdr_reader::make_decoder;
+  using std::begin;
+  using std::end;
+
+  return add_raw(
+      std::move(x),
+      make_decoder<tmp_integral>(
+          [c](tmp_integral len, auto& stream, auto callback) {
+            if (len.value > c.max_size()) {
+              std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+              return;
+            }
+
+            c.collection().clear();
+            read_map_(len.value, stream, c.collection(), std::move(callback), c.key_spec(), c.mapped_spec());
+          }));
+}
+
+template<typename... X, typename Collection, typename KeySpec, typename MappedSpec>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const_map_holder<Collection, KeySpec, MappedSpec> c) {
+  using xdr_writer::make_encoder;
+  using xdr_writer::make_pre_processor;
+  using std::begin;
+  using std::end;
+
+  return add_raw(
+      add_raw(
+          std::move(x),
+          make_pre_processor(
+              [c]() -> std::error_code {
+                std::error_code ec;
+                if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
+                return ec;
+              }))
+      & xdr_getset<std::remove_cvref_t<decltype(std::declval<const Collection&>().size())>>([c]() { return c.collection().size(); }).as(xdr_uint32),
+      make_encoder(
+          [c](auto& stream, auto callback) {
+            write_map_(stream, begin(c.collection()), end(c.collection()), std::move(callback), xdr_pair.of(c.key_spec(), c.mapped_spec()));
+          }));
+}
+
+template<typename... X, typename Collection, typename KeySpec, typename MappedSpec>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, map_holder<Collection, KeySpec, MappedSpec> c) {
+  return std::move(x) & const_map_holder<Collection, KeySpec, MappedSpec>(c);
+}
+
+
+template<typename Spec>
+inline xdr_sequence_t<Spec>::xdr_sequence_t(Spec spec)
+: spec(std::move(spec))
+{}
+
+template<typename Spec>
+template<typename Collection>
+inline auto xdr_sequence_t<Spec>::operator()(Collection& c, std::size_t max_size) const -> sequence_holder<Collection, Spec> {
+  return sequence_holder<Collection>(c, max_size).of(spec);
+}
+
+template<typename Spec>
+template<typename Collection>
+inline auto xdr_sequence_t<Spec>::operator()(const Collection& c, std::size_t max_size) const -> const_sequence_holder<Collection, Spec> {
+  return const_sequence_holder<Collection>(c, max_size).of(spec);
+}
+
+template<typename Collection>
+inline auto xdr_sequence_t<xdr_identity_t>::operator()(Collection& c, std::size_t max_size) const -> sequence_holder<Collection> {
+  return sequence_holder<Collection>(c, max_size);
+}
+
+template<typename Collection>
+inline auto xdr_sequence_t<xdr_identity_t>::operator()(const Collection& c, std::size_t max_size) const -> const_sequence_holder<Collection> {
+  return const_sequence_holder<Collection>(c, max_size);
+}
+
+template<typename Spec>
+inline auto xdr_sequence_t<xdr_identity_t>::of(Spec&& spec) const -> xdr_sequence_t<std::decay_t<Spec>> {
+  return xdr_sequence_t<std::decay_t<Spec>>(std::forward<Spec>(spec));
+}
+
+
+template<typename Spec>
+inline xdr_set_t<Spec>::xdr_set_t(Spec spec)
+: spec(std::move(spec))
+{}
+
+template<typename Spec>
+template<typename Collection>
+inline auto xdr_set_t<Spec>::operator()(Collection& c, std::size_t max_size) const -> set_holder<Collection, Spec> {
+  return set_holder<Collection>(c, max_size).of(spec);
+}
+
+template<typename Spec>
+template<typename Collection>
+inline auto xdr_set_t<Spec>::operator()(const Collection& c, std::size_t max_size) const -> const_set_holder<Collection, Spec> {
+  return const_set_holder<Collection>(c, max_size).of(spec);
+}
+
+template<typename Collection>
+inline auto xdr_set_t<xdr_identity_t>::operator()(Collection& c, std::size_t max_size) const -> set_holder<Collection> {
+  return set_holder<Collection>(c, max_size);
+}
+
+template<typename Collection>
+inline auto xdr_set_t<xdr_identity_t>::operator()(const Collection& c, std::size_t max_size) const -> const_set_holder<Collection> {
+  return const_set_holder<Collection>(c, max_size);
+}
+
+template<typename Spec>
+inline auto xdr_set_t<xdr_identity_t>::of(Spec&& spec) const -> xdr_set_t<std::decay_t<Spec>> {
+  return xdr_set_t<std::decay_t<Spec>>(std::forward<Spec>(spec));
+}
+
+
+template<typename KeySpec, typename MappedSpec>
+inline xdr_map_t<KeySpec, MappedSpec>::xdr_map_t(KeySpec key_spec, MappedSpec mapped_spec)
+: key_spec(std::move(key_spec)),
+  mapped_spec(std::move(mapped_spec))
+{}
+
+template<typename KeySpec, typename MappedSpec>
+template<typename Collection>
+inline auto xdr_map_t<KeySpec, MappedSpec>::operator()(Collection& c, std::size_t max_size) const -> map_holder<Collection, KeySpec, MappedSpec> {
+  return map_holder<Collection>(c, max_size).of(key_spec, mapped_spec);
+}
+
+template<typename KeySpec, typename MappedSpec>
+template<typename Collection>
+inline auto xdr_map_t<KeySpec, MappedSpec>::operator()(const Collection& c, std::size_t max_size) const -> const_map_holder<Collection, KeySpec, MappedSpec> {
+  return const_map_holder<Collection>(c, max_size).of(key_spec, mapped_spec);
+}
+
+template<typename Collection>
+inline auto xdr_map_t<xdr_identity_t, xdr_identity_t>::operator()(Collection& c, std::size_t max_size) const -> map_holder<Collection> {
+  return map_holder<Collection>(c, max_size);
+}
+
+template<typename Collection>
+inline auto xdr_map_t<xdr_identity_t, xdr_identity_t>::operator()(const Collection& c, std::size_t max_size) const -> const_map_holder<Collection> {
+  return const_map_holder<Collection>(c, max_size);
+}
+
+template<typename KeySpec, typename MappedSpec>
+inline auto xdr_map_t<xdr_identity_t, xdr_identity_t>::of(KeySpec&& key_spec, MappedSpec&& mapped_spec) const -> xdr_map_t<std::decay_t<KeySpec>, std::decay_t<MappedSpec>> {
+  return xdr_map_t<std::decay_t<KeySpec>, std::decay_t<MappedSpec>>(std::forward<KeySpec>(key_spec), std::forward<MappedSpec>(mapped_spec));
+}
+
+
+template<typename TupleOrPair>
+template<typename... Spec>
+inline auto tuple_holder<TupleOrPair>::of(Spec&&... spec) -> std::enable_if_t<sizeof...(Spec) == std::tuple_size_v<std::remove_const_t<TupleOrPair>>, tuple_holder<TupleOrPair, std::decay_t<Spec>...>> {
+  if constexpr(sizeof...(Spec) == 0) {
+    return *this;
+  } else {
+    return tuple_holder<TupleOrPair, std::decay_t<Spec>...>{
+      .ref = ref,
+      .specs = std::make_tuple(std::forward<Spec>(spec)...)
+    };
+  }
+}
+
+
+template<typename X, typename TupleOrPair, typename... Spec, std::size_t... Idx>
+inline auto do_tuple_(xdr<X>&& x, const tuple_holder<TupleOrPair, Spec...>& t, [[maybe_unused]] std::index_sequence<Idx...> seq) {
+  if constexpr(sizeof...(Spec) == 0) {
+    return (std::move(x) &...& std::get<Idx>(t.ref));
+  } else {
+    return (std::move(x) &...& std::get<Idx>(t.specs)(std::get<Idx>(t.ref)));
+  }
+}
+
+template<typename X, typename TupleOrPair, typename... Spec>
+inline auto operator&(xdr<X>&& x, const tuple_holder<TupleOrPair, Spec...>& t) {
+  return do_tuple_(std::move(x), t,
+      std::make_index_sequence<std::tuple_size_v<std::remove_const_t<TupleOrPair>>>());
+}
+
+
+template<typename FirstSpec, typename SecondSpec>
+template<typename T, typename U>
+inline auto xdr_pair_t<FirstSpec, SecondSpec>::operator()(std::pair<T, U>& tpl) const -> tuple_holder<std::pair<T, U>, FirstSpec, SecondSpec> {
+  return tuple_holder<std::pair<T, U>, FirstSpec, SecondSpec>{
+    .ref = tpl,
+    .specs = std::make_tuple(first_spec, second_spec)
+  };
+}
+
+template<typename FirstSpec, typename SecondSpec>
+template<typename T, typename U>
+inline auto xdr_pair_t<FirstSpec, SecondSpec>::operator()(const std::pair<T, U>& tpl) const -> tuple_holder<const std::pair<T, U>, FirstSpec, SecondSpec> {
+  return tuple_holder<const std::pair<T, U>, FirstSpec, SecondSpec>{
+    .ref = tpl,
+    .specs = std::make_tuple(first_spec, second_spec)
+  };
+}
+
+template<typename T, typename U>
+inline auto xdr_pair_t<xdr_identity_t, xdr_identity_t>::operator()(std::pair<T, U>& tpl) const -> tuple_holder<std::pair<T, U>> {
+  return tuple_holder<std::pair<T, U>>{
+    .ref = tpl
+  };
+}
+
+template<typename T, typename U>
+inline auto xdr_pair_t<xdr_identity_t, xdr_identity_t>::operator()(const std::pair<T, U>& tpl) const -> tuple_holder<const std::pair<T, U>> {
+  return tuple_holder<const std::pair<T, U>>{
+    .ref = tpl
+  };
+}
+
+template<typename FirstSpec, typename SecondSpec>
+inline auto xdr_pair_t<xdr_identity_t, xdr_identity_t>::of(FirstSpec&& first_spec, SecondSpec&& second_spec) const -> xdr_pair_t<std::decay_t<FirstSpec>, std::decay_t<SecondSpec>> {
+  if constexpr(std::is_same_v<xdr_identity_t, std::decay_t<FirstSpec>> && std::is_same_v<xdr_identity_t, std::decay_t<SecondSpec>>)
+    return xdr_pair_t<std::decay_t<FirstSpec>, std::decay_t<SecondSpec>>();
+  else {
+    return xdr_pair_t<std::decay_t<FirstSpec>, std::decay_t<SecondSpec>>{
+      .first_spec = std::forward<FirstSpec>(first_spec),
+      .second_spec = std::forward<SecondSpec>(second_spec)
+    };
+  }
+}
+
+
+template<typename... Spec>
+template<typename... T>
+#if __cpp_concepts >= 201907L
+requires (sizeof...(Spec) == sizeof...(T))
+#endif
+inline auto xdr_tuple_t<Spec...>::operator()(std::tuple<T...>& tpl) const -> tuple_holder<std::tuple<T...>, Spec...> {
+  return tuple_holder<std::tuple<T...>, Spec...>{
+    .ref = tpl,
+    .specs = specs
+  };
+}
+
+template<typename... Spec>
+template<typename... T>
+#if __cpp_concepts >= 201907L
+requires (sizeof...(Spec) == sizeof...(T))
+#endif
+inline auto xdr_tuple_t<Spec...>::operator()(const std::tuple<T...>& tpl) const -> tuple_holder<const std::tuple<T...>, Spec...> {
+  return tuple_holder<const std::tuple<T...>, Spec...>{
+    .ref = tpl,
+    .specs = specs
+  };
+}
+
+template<typename... T>
+inline auto xdr_tuple_t<>::operator()(std::tuple<T...>& tpl) const -> tuple_holder<std::tuple<T...>> {
+  return tuple_holder<std::tuple<T...>>{
+    .ref = tpl
+  };
+}
+
+template<typename... T>
+inline auto xdr_tuple_t<>::operator()(const std::tuple<T...>& tpl) const -> tuple_holder<const std::tuple<T...>> {
+  return tuple_holder<const std::tuple<T...>>{
+    .ref = tpl
+  };
+}
+
+template<typename... Spec>
+inline auto xdr_tuple_t<>::of(Spec&&... specs) const -> xdr_tuple_t<std::decay_t<Spec>...> {
+  if constexpr(std::conjunction_v<std::is_same<xdr_identity_t, std::decay_t<Spec>>...>) {
+    return *this;
+  } else {
+    return xdr_tuple_t<std::decay_t<Spec>...>{
+      .specs = std::make_tuple(std::forward<Spec>(specs)...)
+    };
+  }
+}
+
+
+template<typename T>
+template<typename Spec>
+inline auto constant_holder<T, xdr_identity_t>::as(Spec&& spec) const & -> constant_holder<T, std::decay_t<Spec>> {
+  return constant_holder<T, std::decay_t<Spec>>{
+    .value = value,
+    .spec = std::forward<Spec>(spec)
+  };
+}
+
+template<typename T>
+template<typename Spec>
+inline auto constant_holder<T, xdr_identity_t>::as(Spec&& spec) && -> constant_holder<T, std::decay_t<Spec>> {
+  return constant_holder<T, std::decay_t<Spec>>{
+    .value = std::move(value),
+    .spec = std::forward<Spec>(spec)
+  };
+}
+
+template<typename... X, typename T, typename Spec>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const constant_holder<T, Spec>& c) {
+  using xdr_reader::make_temporary;
+
+  return add_raw(
+      std::move(x),
+      make_temporary<temporary_with_spec<T, Spec>>(
+          [expected=c.value](const temporary_with_spec<T, Spec>& x) -> std::error_code {
+            if (x.value != expected)
+              return make_error_code(xdr_errc::decoding_error);
+            else
+              return std::error_code();
+          },
+          temporary_with_spec<T, Spec>(c.spec, c.value)));
+}
+
+template<typename... X, typename T, typename Spec>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_holder<T, Spec>& c) {
+  using xdr_writer::make_temporary;
+
+  return add_raw(
+      std::move(x),
+      make_temporary<temporary_with_spec<T, Spec>>(
+          [expected=c.value](temporary_with_spec<T, Spec>& x) -> std::error_code {
+            x.value = expected;
+            return std::error_code();
+          },
+          temporary_with_spec<T, Spec>(c.spec)));
+}
+
+
+template<typename Spec>
+template<typename T>
+inline auto xdr_constant_t<Spec>::operator()(T&& v) const -> constant_holder<std::decay_t<T>> {
+  return constant_holder<T>{
+    .value = std::forward<T>(v),
+    .spec = spec
+  };
+}
+
+template<typename T>
+inline auto xdr_constant_t<xdr_identity_t>::operator()(T&& v) const -> constant_holder<std::decay_t<T>> {
+  return constant_holder<T>{
+    .value = std::forward<T>(v),
+    .spec = spec
+  };
+}
+
+template<typename OtherSpec>
+inline auto xdr_constant_t<xdr_identity_t>::as(OtherSpec&& other_spec) const -> xdr_constant_t<std::decay_t<OtherSpec>> {
+  return xdr_constant_t<std::decay_t<OtherSpec>>{
+    .spec = std::forward<OtherSpec>(other_spec)
+  };
+}
+
+
+template<typename X, typename Fn>
+inline auto operator&(xdr<X>&& x, processor_holder<Fn> p) {
+  if constexpr(xdr<X>::is_reader) {
+    return add_raw(
+        std::move(x),
+        xdr_reader::make_post_processor(std::move(p.fn)));
+  } else {
+    return add_raw(
+        std::move(x),
+        xdr_writer::make_pre_processor(std::move(p.fn)));
+  }
+}
+
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires requires(std::decay_t<Fn> fn) {
+  { std::invoke(fn) } -> std::convertible_to<std::error_code>;
+}
+#endif
+inline auto xdr_processor_t::operator()(Fn&& fn) const -> processor_holder<std::decay_t<Fn>> {
+  return processor_holder<std::decay_t<Fn>>{
+    .fn = std::forward<Fn>(fn)
+  };
+}
+
+
+} /* namespace earnest::detail::xdr_types */
+
+namespace earnest {
+
+
+template<typename... X, typename T>
+#if __cpp_concepts >= 201907L
+requires detail::xdr_reader::readable<T>
+#endif
+inline auto operator&(xdr<detail::xdr_reader::reader<X...>>&& x, std::optional<T>& o) {
+  return std::move(x) & xdr_opt(o);
+}
+
+template<typename... X, typename T>
+#if __cpp_concepts >= 201907L
+requires detail::xdr_writer::writeable<T>
+#endif
+inline auto operator&(xdr<detail::xdr_writer::writer<X...>>&& x, const std::optional<T>& o) {
+  return std::move(x) & xdr_opt(o);
+}
+
+
+template<typename... X, typename T, typename U>
+#if __cpp_concepts >= 201907L
+requires detail::xdr_reader::readable<T> && detail::xdr_reader::readable<U>
+#endif
+inline auto operator&(xdr<detail::xdr_reader::reader<X...>>&& x, std::pair<T, U>& p) {
+  return std::move(x) & xdr_pair(p);
+}
+
+template<typename... X, typename T, typename U>
+#if __cpp_concepts >= 201907L
+requires detail::xdr_writer::writeable<T> && detail::xdr_writer::writeable<U>
+#endif
+inline auto operator&(xdr<detail::xdr_writer::writer<X...>>&& x, const std::pair<T, U>& p) {
+  return std::move(x) & xdr_pair(p);
+}
+
+
+template<typename... X, typename... T>
+#if __cpp_concepts >= 201907L
+requires (detail::xdr_reader::readable<T> &&...)
+#endif
+inline auto operator&(xdr<detail::xdr_reader::reader<X...>>&& x, std::tuple<T...>& p) {
+  return std::move(x) & xdr_tuple(p);
+}
+
+template<typename... X, typename... T>
+#if __cpp_concepts >= 201907L
+requires (detail::xdr_writer::writeable<T> &&...)
+#endif
+inline auto operator&(xdr<detail::xdr_writer::writer<X...>>&& x, const std::tuple<T...>& p) {
+  return std::move(x) & xdr_tuple(p);
+}
+
+
+} /* namespace earnest */

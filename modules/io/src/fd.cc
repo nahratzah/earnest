@@ -112,7 +112,8 @@ auto basic_fd::open_(const std::filesystem::path& filename, open_mode mode, std:
       break;
   }
 
-  native_handle_type handle = CreateFile(
+  basic_fd f;
+  f.handle_ = CreateFile(
       filename.c_str(),
       dwDesiredAccess,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -120,12 +121,19 @@ auto basic_fd::open_(const std::filesystem::path& filename, open_mode mode, std:
       OPEN_EXISTING,
       FILE_FLAG_OVERLAPPED,
       nullptr);
-  if (handle == INVALID_HANDLE_VALUE) {
+  if (!f) {
     ec = last_error_();
-    return;
+    return f;
   }
 
-  return basic_fd(handle);
+  FILE_BASIC_INFO basic_info;
+  GetFileInformationByHandle(f.native_handle(), FileBasicInfo, &basic_info, sizeof(basic_info));
+  if (basic_info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+    ec = std::make_error_code(std::errc::is_a_directory);
+    f.close();
+  }
+
+  return f;
 }
 
 auto basic_fd::create_(const std::filesystem::path& filename, std::error_code& ec) -> basic_fd {
@@ -273,24 +281,26 @@ auto basic_fd::open_(const std::filesystem::path& filename, open_mode mode, std:
       break;
   }
 
-  native_handle_type handle = ::open(filename.c_str(), fl);
-  if (handle == -1) {
+  basic_fd result_fd;
+  result_fd.handle_ = ::open(filename.c_str(), fl);
+  if (result_fd.handle_ == -1) {
     ec = last_error_();
     return {};
   }
-  auto result_fd = basic_fd(handle);
 
   struct stat sb;
-  auto fstat_rv = ::fstat(handle, &sb);
+  auto fstat_rv = ::fstat(result_fd.handle_, &sb);
   if (fstat_rv != 0) {
     ec = last_error_();
-    ::close(handle);
     return {};
   }
 
+  if (S_ISDIR(sb.st_mode)) {
+    ec = std::make_error_code(std::errc::is_a_directory);
+    return {};
+  }
   if (!S_ISREG(sb.st_mode)) {
     ec = std::error_code(EFTYPE, std::system_category());
-    ::close(handle);
     return {};
   }
 
@@ -305,13 +315,14 @@ auto basic_fd::create_(const std::filesystem::path& filename, std::error_code& e
   fl |= O_CLOEXEC;
 #endif
 
-  native_handle_type handle = ::open(filename.c_str(), fl);
-  if (handle == -1) {
+  basic_fd result_fd;
+  result_fd.handle_ = ::open(filename.c_str(), fl, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+  if (result_fd.handle_ == -1) {
     ec = last_error_();
     return {};
   }
 
-  return basic_fd(handle);
+  return result_fd;
 }
 
 auto basic_fd::tmpfile_(const std::filesystem::path& prefix, std::error_code& ec) -> basic_fd {
