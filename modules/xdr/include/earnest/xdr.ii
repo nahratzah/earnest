@@ -838,7 +838,7 @@ inline auto make_encoder(Fn&& fn) -> encoder<std::decay_t<Fn>> {
 
 
 template<typename Dfn, typename Nested, typename Alloc>
-inline decoder_callback<Dfn, Nested, Alloc>::decoder_callback(Dfn&& dfn, std::tuple<writer_type, completion_fn>&& rc, allocator_type alloc)
+inline encoder_callback<Dfn, Nested, Alloc>::encoder_callback(Dfn&& dfn, std::tuple<writer_type, completion_fn>&& rc, allocator_type alloc)
 : alloc(std::move(alloc)),
   dfn_(std::move(dfn)),
   r_(std::get<0>(std::move(rc))),
@@ -846,13 +846,13 @@ inline decoder_callback<Dfn, Nested, Alloc>::decoder_callback(Dfn&& dfn, std::tu
 {}
 
 template<typename Dfn, typename Nested, typename Alloc>
-inline auto decoder_callback<Dfn, Nested, Alloc>::get_allocator() const -> allocator_type {
+inline auto encoder_callback<Dfn, Nested, Alloc>::get_allocator() const -> allocator_type {
   return alloc;
 }
 
 template<typename Dfn, typename Nested, typename Alloc>
 template<typename Stream>
-inline void decoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std::error_code ec) {
+inline void encoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std::error_code ec) {
   if (ec) {
     std::invoke(cfn_, stream, ec);
   } else {
@@ -867,7 +867,7 @@ inline void decoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std
 
 template<typename Dfn, typename Nested, typename Alloc>
 template<typename Stream>
-inline void decoder_callback<Dfn, Nested, Alloc>::continue_(Stream& stream, std::error_code ec) {
+inline void encoder_callback<Dfn, Nested, Alloc>::continue_(Stream& stream, std::error_code ec) {
   if (!ec) ec = std::invoke(callbacks(r_));
   if (ec) {
     std::invoke(cfn_, stream, ec);

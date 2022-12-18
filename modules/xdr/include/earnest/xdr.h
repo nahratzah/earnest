@@ -727,7 +727,7 @@ auto make_encoder(Fn&& fn) -> encoder<std::decay_t<Fn>>;
 
 
 template<typename Dfn, typename Nested, typename Alloc = std::allocator<std::byte>>
-class decoder_callback {
+class encoder_callback {
   private:
   using writer_type = typename Nested::writer_type;
   using completion_fn = typename Nested::completion_fn;
@@ -735,7 +735,7 @@ class decoder_callback {
   public:
   using allocator_type = Alloc;
 
-  decoder_callback(Dfn&& dfn, std::tuple<writer_type, completion_fn>&& rc, allocator_type alloc = allocator_type());
+  encoder_callback(Dfn&& dfn, std::tuple<writer_type, completion_fn>&& rc, allocator_type alloc = allocator_type());
 
   auto get_allocator() const -> allocator_type;
   template<typename Stream> void operator()(Stream& stream, std::error_code ec);
@@ -828,7 +828,7 @@ struct resolve_n_<DoneCb, AccumulatedTupleSize, encoder<Fn>, Tail...> {
 
   using temporaries = typename nested_t::temporaries;
   using writer_type = writer<>;
-  using completion_fn = decoder_callback<Fn, nested_t>;
+  using completion_fn = encoder_callback<Fn, nested_t>;
 
   template<typename TTPointer>
   auto operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, encoder<Fn>&& d, Tail&&... tail) -> std::tuple<writer_type, completion_fn>;
