@@ -1,3 +1,6 @@
 [submodule "modules/asio"]
 	path = modules/asio
 	url = https://github.com/chriskohlhoff/asio.git
+[submodule "modules/cycle_ptr"]
+	path = modules/cycle_ptr
+	url = https://github.com/nahratzah/cycle_ptr.git

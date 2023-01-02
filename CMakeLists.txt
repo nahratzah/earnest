@@ -21,7 +21,6 @@ find_package (Boost COMPONENTS container filesystem system REQUIRED)
 find_package (instrumentation 1.0 REQUIRED)
 find_package (monsoon_cache 0.5 REQUIRED)
 find_package (objpipe 0.3 REQUIRED)
-find_package (cycle_ptr 0.4 REQUIRED)
 
 add_library (earnest
   src/detail/wal.cc

@@ -5,6 +5,7 @@ if (CMAKE_USE_PTHREADS_INIT)
   target_link_libraries(asio INTERFACE ${CMAKE_THREAD_LIBS_INIT})
 endif ()
 
+add_subdirectory(cycle_ptr)
 add_subdirectory(util)
 add_subdirectory(asio_util)
 add_subdirectory(asio_aio)
