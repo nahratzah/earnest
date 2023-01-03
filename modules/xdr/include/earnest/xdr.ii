@@ -447,6 +447,7 @@ inline void decoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std
     std::invoke(
         dfn_,
         stream,
+        temporaries,
         [self=std::move(*this), &stream, &temporaries](std::error_code ec) mutable {
           self.continue_(stream, temporaries, ec);
         });
@@ -538,7 +539,7 @@ inline auto resolve_n_<DoneCb, AccumulatedTupleSize, decoder<T, Fn, Temporary>, 
   }
 
   auto c = completion_fn(
-      decoder_resolve_helper_<decoder<T, Fn, Temporary>>(std::move(d), temporaries_tuple, std::integral_constant<std::size_t, AccumulatedTupleSize>()),
+      helper(std::move(d)),
       nested_t{}(std::move(done_cb), temporaries_tuple, std::forward<Tail>(tail)...));
   if constexpr(std::is_void_v<T>) {
     return temporary_resolve_n{}(std::move(c), temporaries_tuple, direct_completion{});
@@ -862,6 +863,7 @@ inline void encoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std
     std::invoke(
         dfn_,
         stream,
+        temporaries,
         [self=std::move(*this), &stream, &temporaries](std::error_code ec) mutable {
           self.continue_(stream, temporaries, ec);
         });
@@ -948,7 +950,7 @@ template<typename DoneCb, std::size_t AccumulatedTupleSize, typename Fn, typenam
 template<typename TTPointer>
 inline auto resolve_n_<DoneCb, AccumulatedTupleSize, encoder<Fn, Temporary>, Tail...>::operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, encoder<Fn, Temporary>&& d, Tail&&... tail) -> std::tuple<writer_type, completion_fn> {
   auto c = completion_fn(
-      encoder_resolve_helper_<encoder<Fn, Temporary>>(std::move(d), temporaries_tuple, std::integral_constant<std::size_t, AccumulatedTupleSize>()),
+      helper(std::move(d)),
       nested_t{}(std::move(done_cb), temporaries_tuple, std::forward<Tail>(tail)...));
   return temporary_resolve_n{}(std::move(c), temporaries_tuple, direct_completion{});
 }

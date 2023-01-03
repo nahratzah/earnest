@@ -482,85 +482,80 @@ struct resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...> {
   auto operator()(DoneCb&& done_cb, const std::shared_ptr<std::tuple<TT...>>& temporaries_tuple, temporary<T, Fn>&& tmp, Tail&&... tail) -> std::tuple<reader_type, completion_fn>;
 };
 
-template<typename Decoder> class decoder_resolve_helper_;
+template<std::size_t TupleOffset, typename Decoder> class decoder_resolve_helper_;
 
-template<typename T, typename Fn, typename Temporary>
-class decoder_resolve_helper_<decoder<T, Fn, Temporary>> {
+template<std::size_t TupleOffset, typename T, typename Fn, typename Temporary>
+class decoder_resolve_helper_<TupleOffset, decoder<T, Fn, Temporary>> {
   public:
   using reader_type = typename extract_reader<std::remove_cvref_t<decltype(std::declval<xdr<reader<>>>() & std::declval<T&>())>>::type;
 
-  template<typename TuplePtr, std::size_t TupleOffset>
-  decoder_resolve_helper_(decoder<T, Fn, Temporary>&& d, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
-  : fn(std::move(d.fn)),
-    t(std::get<tuple_offset()>(*tuple_ptr)),
-    temporary(std::get<tuple_offset() + 1u>(*tuple_ptr))
-  {}
-
-  template<typename Stream, typename Callback>
-  auto operator()(Stream& s, Callback&& callback) -> void {
-    std::invoke(fn, t, s, std::forward<Callback>(callback), temporary);
-  }
-
-  private:
-  Fn fn;
-  T& t;
-  Temporary& temporary;
-};
-
-template<typename Fn, typename Temporary>
-class decoder_resolve_helper_<decoder<void, Fn, Temporary>> {
-  public:
-  using reader_type = reader<>;
-
-  template<typename TuplePtr, std::size_t TupleOffset>
-  decoder_resolve_helper_(decoder<void, Fn, Temporary>&& d, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
-  : fn(std::move(d.fn)),
-    temporary(std::get<tuple_offset()>(*tuple_ptr))
-  {}
-
-  template<typename Stream, typename Callback>
-  auto operator()(Stream& s, Callback&& callback) -> void {
-    std::invoke(fn, s, std::forward<Callback>(callback), temporary);
-  }
-
-  private:
-  Fn fn;
-  Temporary& temporary;
-};
-
-template<typename T, typename Fn>
-class decoder_resolve_helper_<decoder<T, Fn, void>> {
-  public:
-  using reader_type = typename extract_reader<std::remove_cvref_t<decltype(std::declval<xdr<reader<>>>() & std::declval<T&>())>>::type;
-
-  template<typename TuplePtr, std::size_t TupleOffset>
-  decoder_resolve_helper_(decoder<T, Fn, void>&& d, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
-  : fn(std::move(d.fn)),
-    t(std::get<tuple_offset()>(*tuple_ptr))
-  {}
-
-  template<typename Stream, typename Callback>
-  auto operator()(Stream& s, Callback&& callback) -> void {
-    std::invoke(fn, t, s, std::forward<Callback>(callback));
-  }
-
-  private:
-  Fn fn;
-  T& t;
-};
-
-template<typename Fn>
-class decoder_resolve_helper_<decoder<void, Fn, void>> {
-  public:
-  using reader_type = reader<>;
-
-  template<typename TuplePtr, std::size_t TupleOffset>
-  decoder_resolve_helper_(decoder<void, Fn, void>&& d, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
+  explicit decoder_resolve_helper_(decoder<T, Fn, Temporary>&& d)
   : fn(std::move(d.fn))
   {}
 
-  template<typename Stream, typename Callback>
-  auto operator()(Stream& s, Callback&& callback) -> void {
+  template<typename Stream, typename... TT, typename Callback>
+  auto operator()(Stream& s, std::tuple<TT...>& temporaries, Callback&& callback) -> void {
+    static_assert(std::is_same_v<T, std::tuple_element_t<TupleOffset, std::tuple<TT...>>>);
+    static_assert(std::is_same_v<Temporary, std::tuple_element_t<TupleOffset + 1u, std::tuple<TT...>>>);
+
+    std::invoke(fn, std::get<TupleOffset>(temporaries), s, std::forward<Callback>(callback), std::get<TupleOffset + 1u>(temporaries));
+  }
+
+  private:
+  Fn fn;
+};
+
+template<std::size_t TupleOffset, typename Fn, typename Temporary>
+class decoder_resolve_helper_<TupleOffset, decoder<void, Fn, Temporary>> {
+  public:
+  using reader_type = reader<>;
+
+  explicit decoder_resolve_helper_(decoder<void, Fn, Temporary>&& d)
+  : fn(std::move(d.fn))
+  {}
+
+  template<typename Stream, typename... TT, typename Callback>
+  auto operator()(Stream& s, std::tuple<TT...>& temporaries, Callback&& callback) -> void {
+    static_assert(std::is_same_v<Temporary, std::tuple_element_t<TupleOffset, std::tuple<TT...>>>);
+
+    std::invoke(fn, s, std::forward<Callback>(callback), std::get<TupleOffset>(temporaries));
+  }
+
+  private:
+  Fn fn;
+};
+
+template<std::size_t TupleOffset, typename T, typename Fn>
+class decoder_resolve_helper_<TupleOffset, decoder<T, Fn, void>> {
+  public:
+  using reader_type = typename extract_reader<std::remove_cvref_t<decltype(std::declval<xdr<reader<>>>() & std::declval<T&>())>>::type;
+
+  explicit decoder_resolve_helper_(decoder<T, Fn, void>&& d)
+  : fn(std::move(d.fn))
+  {}
+
+  template<typename Stream, typename... TT, typename Callback>
+  auto operator()(Stream& s, std::tuple<TT...>& temporaries, Callback&& callback) -> void {
+    static_assert(std::is_same_v<T, std::tuple_element_t<TupleOffset, std::tuple<TT...>>>);
+
+    std::invoke(fn, std::get<TupleOffset>(temporaries), s, std::forward<Callback>(callback));
+  }
+
+  private:
+  Fn fn;
+};
+
+template<std::size_t TupleOffset, typename Fn>
+class decoder_resolve_helper_<TupleOffset, decoder<void, Fn, void>> {
+  public:
+  using reader_type = reader<>;
+
+  explicit decoder_resolve_helper_(decoder<void, Fn, void>&& d)
+  : fn(std::move(d.fn))
+  {}
+
+  template<typename Stream, typename... TT, typename Callback>
+  auto operator()(Stream& s, std::tuple<TT...>& temporaries, Callback&& callback) -> void {
     std::invoke(fn, s, std::forward<Callback>(callback));
   }
 
@@ -587,7 +582,7 @@ struct resolve_n_<DoneCb, AccumulatedTupleSize, direct_completion, Tail...> {
 template<typename DoneCb, std::size_t AccumulatedTupleSize, typename T, typename Fn, typename Temporary, typename... Tail>
 struct resolve_n_<DoneCb, AccumulatedTupleSize, decoder<T, Fn, Temporary>, Tail...> {
   static constexpr std::size_t tail_accumulated_tuple_size = AccumulatedTupleSize + (std::is_void_v<T> ? 0u : 1u) + (std::is_void_v<Temporary> ? 0u : 1u);
-  using helper = decoder_resolve_helper_<decoder<T, Fn, Temporary>>;
+  using helper = decoder_resolve_helper_<AccumulatedTupleSize, decoder<T, Fn, Temporary>>;
   using nested_t = resolve_n_<DoneCb, tail_accumulated_tuple_size, Tail...>;
   using completion_fn = decoder_callback<helper, nested_t>;
   using temporary_resolve_n = typename prepend_tuple_to_resolve_n_<completion_fn, tail_accumulated_tuple_size + std::tuple_size_v<typename nested_t::temporaries::type>, typename helper::reader_type::factories_tuple, direct_completion>::type;
@@ -934,41 +929,39 @@ struct resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...> {
   auto operator()(DoneCb&& done_cb, const std::shared_ptr<std::tuple<TT...>>& temporaries_tuple, temporary<T, Fn>&& tmp, Tail&&... tail) -> std::tuple<writer_type, completion_fn>;
 };
 
-template<typename Encoder> class encoder_resolve_helper_;
+template<std::size_t TupleOffset, typename Encoder> class encoder_resolve_helper_;
 
-template<typename Fn, typename Temporary>
-class encoder_resolve_helper_<encoder<Fn, Temporary>> {
+template<std::size_t TupleOffset, typename Fn, typename Temporary>
+class encoder_resolve_helper_<TupleOffset, encoder<Fn, Temporary>> {
   public:
   using writer_type = writer<>;
 
-  template<typename TuplePtr, std::size_t TupleOffset>
-  encoder_resolve_helper_(encoder<Fn, Temporary>&& e, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
-  : fn(std::move(e.fn)),
-    temporary(std::get<tuple_offset() + 1u>(*tuple_ptr))
+  explicit encoder_resolve_helper_(encoder<Fn, Temporary>&& e)
+  : fn(std::move(e.fn))
   {}
 
-  template<typename Stream, typename Callback>
-  auto operator()(Stream& s, Callback&& callback) -> void {
-    std::invoke(fn, s, std::forward<Callback>(callback), temporary);
+  template<typename Stream, typename... TT, typename Callback>
+  auto operator()(Stream& s, std::tuple<TT...>& temporaries, Callback&& callback) -> void {
+    static_assert(std::is_same_v<Temporary, std::tuple_element_t<TupleOffset, std::tuple<TT...>>>);
+
+    std::invoke(fn, s, std::forward<Callback>(callback), std::get<TupleOffset>(temporaries));
   }
 
   private:
   Fn fn;
-  Temporary& temporary;
 };
 
-template<typename Fn>
-class encoder_resolve_helper_<encoder<Fn, void>> {
+template<std::size_t TupleOffset, typename Fn>
+class encoder_resolve_helper_<TupleOffset, encoder<Fn, void>> {
   public:
   using writer_type = writer<>;
 
-  template<typename TuplePtr, std::size_t TupleOffset>
-  encoder_resolve_helper_(encoder<Fn, void>&& e, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
+  explicit encoder_resolve_helper_(encoder<Fn, void>&& e)
   : fn(std::move(e.fn))
   {}
 
-  template<typename Stream, typename Callback>
-  auto operator()(Stream& s, Callback&& callback) -> void {
+  template<typename Stream, typename... TT, typename Callback>
+  auto operator()(Stream& s, std::tuple<TT...>& temporaries, Callback&& callback) -> void {
     std::invoke(fn, s, std::forward<Callback>(callback));
   }
 
@@ -995,7 +988,7 @@ struct resolve_n_<DoneCb, AccumulatedTupleSize, direct_completion, Tail...> {
 template<typename DoneCb, std::size_t AccumulatedTupleSize, typename Fn, typename Temporary, typename... Tail>
 struct resolve_n_<DoneCb, AccumulatedTupleSize, encoder<Fn, Temporary>, Tail...> {
   static constexpr std::size_t tail_accumulated_tuple_size = AccumulatedTupleSize + (std::is_void_v<Temporary> ? 0u : 1u);
-  using helper = encoder_resolve_helper_<encoder<Fn, Temporary>>;
+  using helper = encoder_resolve_helper_<AccumulatedTupleSize, encoder<Fn, Temporary>>;
   using nested_t = resolve_n_<DoneCb, tail_accumulated_tuple_size, Tail...>;
   using completion_fn = encoder_callback<helper, nested_t>;
   using temporary_resolve_n = typename prepend_tuple_to_resolve_n_<completion_fn, tail_accumulated_tuple_size + std::tuple_size_v<typename nested_t::temporaries::type>, typename helper::writer_type::factories_tuple, direct_completion>::type;
