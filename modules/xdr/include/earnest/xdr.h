@@ -263,7 +263,18 @@ template<typename... Factories, std::size_t... Idx> auto callbacks_(const std::t
 template<typename... T>
 class temporaries_factory {
   public:
-  using type = std::tuple<T...>;
+  // We add this to the tuple, to make the tuple immovable.
+  // That way, the compiler informs us if we introduce a bug. :)
+  class prevent_copy_and_move {
+    public:
+    constexpr prevent_copy_and_move() noexcept = default;
+    prevent_copy_and_move(const prevent_copy_and_move&) = delete;
+    prevent_copy_and_move(prevent_copy_and_move&&) = delete;
+    prevent_copy_and_move& operator=(const prevent_copy_and_move&) = delete;
+    prevent_copy_and_move& operator=(prevent_copy_and_move&&) = delete;
+  };
+
+  using type = std::tuple<T..., prevent_copy_and_move>;
 
   constexpr temporaries_factory() = default;
 
