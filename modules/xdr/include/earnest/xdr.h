@@ -171,9 +171,6 @@ class constant_size_buffer_factory {
 
 
 template<typename Fn>
-#if __cpp_concepts >= 201907L
-requires callback<Fn>
-#endif
 class post_processor {
   public:
   static constexpr std::size_t bytes = 0;
@@ -192,6 +189,12 @@ class post_processor {
 template<typename Fn>
 auto make_post_processor(Fn&& fn) -> post_processor<std::decay_t<Fn>>;
 
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<std::decay_t<Fn>>
+#endif
+auto make_noarg_post_processor(Fn&& fn);
+
 template<typename IntType>
 #if __cpp_concepts >= 201907L
 requires std::integral<IntType>
@@ -199,8 +202,11 @@ requires std::integral<IntType>
 auto maybe_big_endian_to_native_post_processor_tpl(IntType& v);
 
 
-template<typename Fn, typename T>
-auto temporary_resolve_(Fn&& fn, T& v);
+template<std::size_t TupleIndex, typename ExpectedType, typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn, ExpectedType>
+#endif
+auto make_temporary_post_processor_(Fn&& fn);
 
 struct noop_callback {
   template<typename T>
@@ -214,14 +220,17 @@ requires readable<T> && callback<Fn, T>
 class temporary {
   public:
   using temporary_type = T;
-  using reader_type = std::remove_cvref_t<decltype(temporary_resolve_(std::declval<const Fn&>(), std::declval<T&>()))>;
 
+  private:
+  using reader_type = typename extract_reader<std::remove_cvref_t<decltype(std::declval<xdr<reader<>>>() & std::declval<temporary_type&>())>>::type;
+
+  public:
   explicit temporary(Fn&& fn, temporary_type initial) noexcept(std::is_nothrow_move_constructible_v<Fn>);
   explicit temporary(const Fn& fn, temporary_type initial) noexcept(std::is_nothrow_copy_constructible_v<Fn>);
 
-  auto resolve(temporary_type& v) const -> reader_type;
   auto initial() const & -> const temporary_type&;
   auto initial() && -> temporary_type&&;
+  auto fn() && -> Fn&& { return std::move(fn_); }
 
   static constexpr std::size_t bytes = reader_type::bytes.value_or(std::size_t(0));
   using known_size = typename reader_type::known_size_at_compile_time;
@@ -296,7 +305,7 @@ template<typename... X, typename... Y>
 constexpr auto operator+(const temporaries_factory<X...>& x, const temporaries_factory<Y...>& y) -> temporaries_factory<X..., Y...>;
 
 
-template<typename T, typename Fn>
+template<typename T, typename Fn, typename Temporary>
 #if __cpp_concepts >= 201907L
 // requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
 #endif
@@ -311,11 +320,11 @@ struct decoder {
   T initial;
 };
 
-template<typename Fn>
+template<typename Fn, typename Temporary>
 #if __cpp_concepts >= 201907L
 // requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
 #endif
-struct decoder<void, Fn> {
+struct decoder<void, Fn, Temporary> {
   static constexpr std::size_t bytes = 0;
   using known_size = std::false_type;
 
@@ -325,17 +334,17 @@ struct decoder<void, Fn> {
   Fn fn;
 };
 
-template<typename T, typename Fn>
+template<typename T, typename Temporary = void, typename Fn>
 #if __cpp_concepts >= 201907L
 // requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
 #endif
-auto make_decoder(Fn&& fn) -> decoder<T, std::decay_t<Fn>>;
+auto make_decoder(Fn&& fn) -> decoder<T, std::decay_t<Fn>, Temporary>;
 
-template<typename T, typename Fn>
+template<typename Temporary = void, typename T, typename Fn>
 #if __cpp_concepts >= 201907L
 // requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
 #endif
-auto make_decoder(Fn&& fn, T&& initial) -> decoder<std::decay_t<T>, std::decay_t<Fn>>;
+auto make_decoder(Fn&& fn, T&& initial) -> decoder<std::decay_t<T>, std::decay_t<Fn>, Temporary>;
 
 
 template<typename DoneCb, bool HasTemporaries>
@@ -347,7 +356,8 @@ class completion_fn_wrapper_ {
   explicit completion_fn_wrapper_(DoneCb&& done_cb, std::shared_ptr<void> temporaries);
   explicit completion_fn_wrapper_(const DoneCb& done_cb, std::shared_ptr<void> temporaries);
 
-  template<typename Stream> void operator()([[maybe_unused]] Stream& stream, std::error_code ec);
+  template<typename Stream, typename... T>
+  void operator()([[maybe_unused]] Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
 
   private:
   DoneCb done_cb_;
@@ -365,7 +375,8 @@ class completion_fn_wrapper_<DoneCb, false> {
   template<typename Temporaries>
   explicit completion_fn_wrapper_(const DoneCb& done_cb, const Temporaries& temporaries);
 
-  template<typename Stream> void operator()([[maybe_unused]] Stream& stream, std::error_code ec);
+  template<typename Stream>
+  void operator()([[maybe_unused]] Stream& stream, std::tuple<>& temporaries, std::error_code ec);
 
   private:
   DoneCb done_cb_;
@@ -384,11 +395,13 @@ class decoder_callback {
   decoder_callback(Dfn&& dfn, std::tuple<reader_type, completion_fn>&& rc, allocator_type alloc = allocator_type());
 
   auto get_allocator() const -> allocator_type;
-  template<typename Stream> void operator()(Stream& stream, std::error_code ec);
+
+  template<typename Stream, typename... T>
+  void operator()(Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
 
   private:
-  template<typename Stream>
-  void continue_(Stream& stream, std::error_code ec);
+  template<typename Stream, typename... T>
+  void continue_(Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
 
   allocator_type alloc;
   Dfn dfn_;
@@ -455,9 +468,10 @@ template<typename DoneCb, std::size_t AccumulatedTupleSize, typename T, typename
 struct resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...> {
   private:
   using temporary_type = typename temporary<T, Fn>::temporary_type;
-  using temporary_reader_type = typename temporary<T, Fn>::reader_type;
+  using post_processor_type = std::remove_cvref_t<decltype(make_temporary_post_processor_<AccumulatedTupleSize, temporary_type>(std::declval<Fn>()))>;
+  using temporary_reader_type = typename extract_reader<std::remove_cvref_t<decltype(std::declval<xdr<reader<>>>() & std::declval<temporary_type&>())>>::type;
   using temporary_factories_tuple = typename temporary_reader_type::factories_tuple;
-  using nested_t = typename prepend_tuple_to_resolve_n_<DoneCb, AccumulatedTupleSize + 1u, temporary_factories_tuple, Tail...>::type;
+  using nested_t = typename prepend_tuple_to_resolve_n_<DoneCb, AccumulatedTupleSize + 1u, temporary_factories_tuple, post_processor_type, Tail...>::type;
 
   public:
   using temporaries = std::remove_cvref_t<decltype(std::declval<temporaries_factory<temporary_type>>() + std::declval<typename nested_t::temporaries>())>;
@@ -468,50 +482,136 @@ struct resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...> {
   auto operator()(DoneCb&& done_cb, const std::shared_ptr<std::tuple<TT...>>& temporaries_tuple, temporary<T, Fn>&& tmp, Tail&&... tail) -> std::tuple<reader_type, completion_fn>;
 };
 
-template<typename DoneCb, std::size_t AccumulatedTupleSize, typename Fn, typename... Tail>
-struct resolve_n_<DoneCb, AccumulatedTupleSize, decoder<void, Fn>, Tail...> {
-  using nested_t = resolve_n_<DoneCb, AccumulatedTupleSize, Tail...>;
+template<typename Decoder> class decoder_resolve_helper_;
 
-  using temporaries = typename nested_t::temporaries;
+template<typename T, typename Fn, typename Temporary>
+class decoder_resolve_helper_<decoder<T, Fn, Temporary>> {
+  public:
+  using reader_type = typename extract_reader<std::remove_cvref_t<decltype(std::declval<xdr<reader<>>>() & std::declval<T&>())>>::type;
+
+  template<typename TuplePtr, std::size_t TupleOffset>
+  decoder_resolve_helper_(decoder<T, Fn, Temporary>&& d, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
+  : fn(std::move(d.fn)),
+    t(std::get<tuple_offset()>(*tuple_ptr)),
+    temporary(std::get<tuple_offset() + 1u>(*tuple_ptr))
+  {}
+
+  template<typename Stream, typename Callback>
+  auto operator()(Stream& s, Callback&& callback) -> void {
+    std::invoke(fn, t, s, std::forward<Callback>(callback), temporary);
+  }
+
+  private:
+  Fn fn;
+  T& t;
+  Temporary& temporary;
+};
+
+template<typename Fn, typename Temporary>
+class decoder_resolve_helper_<decoder<void, Fn, Temporary>> {
+  public:
   using reader_type = reader<>;
-  using completion_fn = decoder_callback<Fn, nested_t>;
 
-  template<typename TTPointer>
-  auto operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, decoder<void, Fn>&& d, Tail&&... tail) -> std::tuple<reader_type, completion_fn>;
+  template<typename TuplePtr, std::size_t TupleOffset>
+  decoder_resolve_helper_(decoder<void, Fn, Temporary>&& d, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
+  : fn(std::move(d.fn)),
+    temporary(std::get<tuple_offset()>(*tuple_ptr))
+  {}
+
+  template<typename Stream, typename Callback>
+  auto operator()(Stream& s, Callback&& callback) -> void {
+    std::invoke(fn, s, std::forward<Callback>(callback), temporary);
+  }
+
+  private:
+  Fn fn;
+  Temporary& temporary;
 };
 
 template<typename T, typename Fn>
-struct typed_decoder_rolve_n_helper_ {
-  static auto wrap(T& tmp, Fn fn) {
-    return make_decoder<void>(
-        [fn, &tmp](auto& stream, auto callback) mutable {
-          std::invoke(fn, tmp, stream, std::move(callback));
-        });
+class decoder_resolve_helper_<decoder<T, Fn, void>> {
+  public:
+  using reader_type = typename extract_reader<std::remove_cvref_t<decltype(std::declval<xdr<reader<>>>() & std::declval<T&>())>>::type;
+
+  template<typename TuplePtr, std::size_t TupleOffset>
+  decoder_resolve_helper_(decoder<T, Fn, void>&& d, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
+  : fn(std::move(d.fn)),
+    t(std::get<tuple_offset()>(*tuple_ptr))
+  {}
+
+  template<typename Stream, typename Callback>
+  auto operator()(Stream& s, Callback&& callback) -> void {
+    std::invoke(fn, t, s, std::forward<Callback>(callback));
   }
 
-  using wrapped_type = std::remove_cvref_t<decltype(wrap(std::declval<T&>(), std::declval<Fn>()))>;
+  private:
+  Fn fn;
+  T& t;
 };
 
-template<typename DoneCb, std::size_t AccumulatedTupleSize, typename T, typename Fn, typename... Tail>
-struct resolve_n_<DoneCb, AccumulatedTupleSize, decoder<T, Fn>, Tail...> {
-  private:
-  using helper_type = typed_decoder_rolve_n_helper_<T, Fn>;
-  using nested_t = resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, noop_callback>, typename helper_type::wrapped_type, Tail...>;
-
+template<typename Fn>
+class decoder_resolve_helper_<decoder<void, Fn, void>> {
   public:
-  using temporaries = typename nested_t::temporaries;
-  using reader_type = typename nested_t::reader_type;
-  using completion_fn = typename nested_t::completion_fn;
+  using reader_type = reader<>;
+
+  template<typename TuplePtr, std::size_t TupleOffset>
+  decoder_resolve_helper_(decoder<void, Fn, void>&& d, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
+  : fn(std::move(d.fn))
+  {}
+
+  template<typename Stream, typename Callback>
+  auto operator()(Stream& s, Callback&& callback) -> void {
+    std::invoke(fn, s, std::forward<Callback>(callback));
+  }
+
+  private:
+  Fn fn;
+};
+
+struct direct_completion {
+  using known_size = std::false_type;
+};
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename... Tail>
+struct resolve_n_<DoneCb, AccumulatedTupleSize, direct_completion, Tail...> {
+  static_assert(sizeof...(Tail) == 0u);
+
+  using temporaries = temporaries_factory<>;
+  using reader_type = reader<>;
+  using completion_fn = DoneCb; // Don't wrap this!
 
   template<typename TTPointer>
-  auto operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, decoder<T, Fn>&& d, Tail&&... tail) -> std::tuple<reader_type, completion_fn>;
+  auto operator()(DoneCb&& done_cb, [[maybe_unused]] const TTPointer& temporaries_tuple, direct_completion&& d, [[maybe_unused]] Tail&&... tail) -> std::tuple<reader_type, completion_fn>;
 };
 
-template<typename Alloc, typename DoneCb, typename... Factories, std::size_t... Idx>
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename T, typename Fn, typename Temporary, typename... Tail>
+struct resolve_n_<DoneCb, AccumulatedTupleSize, decoder<T, Fn, Temporary>, Tail...> {
+  static constexpr std::size_t tail_accumulated_tuple_size = AccumulatedTupleSize + (std::is_void_v<T> ? 0u : 1u) + (std::is_void_v<Temporary> ? 0u : 1u);
+  using helper = decoder_resolve_helper_<decoder<T, Fn, Temporary>>;
+  using nested_t = resolve_n_<DoneCb, tail_accumulated_tuple_size, Tail...>;
+  using completion_fn = decoder_callback<helper, nested_t>;
+  using temporary_resolve_n = typename prepend_tuple_to_resolve_n_<completion_fn, tail_accumulated_tuple_size + std::tuple_size_v<typename nested_t::temporaries::type>, typename helper::reader_type::factories_tuple, direct_completion>::type;
+
+  using temporaries = std::remove_cvref_t<decltype(
+      std::declval<std::conditional_t<std::is_void_v<T>, temporaries_factory<>, temporaries_factory<T>>>()
+      +
+      std::declval<std::conditional_t<std::is_void_v<Temporary>, temporaries_factory<>, temporaries_factory<Temporary>>>()
+      +
+      std::declval<typename nested_t::temporaries>()
+      +
+      std::declval<typename temporary_resolve_n::temporaries>())>;
+  using reader_type = typename temporary_resolve_n::reader_type;
+
+  template<typename TTPointer>
+  auto operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, decoder<T, Fn, Temporary>&& d, Tail&&... tail) -> std::tuple<reader_type, completion_fn>;
+};
+
+template<typename Alloc, typename DoneCb, typename... Factories, std::size_t... Idx, std::size_t StartIdx>
 auto resolve_(
     [[maybe_unused]] std::allocator_arg_t use_alloc, Alloc&& alloc, DoneCb&& done_cb,
     std::tuple<Factories...>&& factories,
-    [[maybe_unused]] std::index_sequence<Idx...> seq);
+    [[maybe_unused]] std::index_sequence<Idx...> seq,
+    std::integral_constant<std::size_t, StartIdx> start_idx);
 
 
 template<typename... Factories>
@@ -546,8 +646,8 @@ class reader {
   factories_tuple factories_;
 };
 
-template<typename Alloc, typename DoneCb, typename... Factories>
-auto resolve(std::allocator_arg_t aa, Alloc&& alloc, DoneCb&& done_cb, reader<Factories...>&& r);
+template<typename Alloc, typename DoneCb, typename... Factories, std::size_t StartIdx = 0>
+auto resolve(std::allocator_arg_t aa, Alloc&& alloc, DoneCb&& done_cb, reader<Factories...>&& r, std::integral_constant<std::size_t, StartIdx> start_idx = {});
 
 template<typename... Factories>
 auto buffers(const reader<Factories...>& r);
@@ -629,9 +729,6 @@ class constant_size_buffer_factory {
 
 
 template<typename Fn>
-#if __cpp_concepts >= 201907L
-requires callback<Fn>
-#endif
 class pre_processor {
   public:
   static constexpr std::size_t bytes = 0;
@@ -650,11 +747,18 @@ class pre_processor {
 template<typename Fn>
 auto make_pre_processor(Fn&& fn) -> pre_processor<std::decay_t<Fn>>;
 
+template<typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<std::decay_t<Fn>>
+#endif
+auto make_noarg_pre_processor(Fn&& fn);
 
-auto temporary_resolve_ec_pp_(std::error_code ec);
 
-template<typename T, typename Fn>
-auto temporary_resolve_(T& v, Fn&& fn);
+template<std::size_t TupleIndex, typename ExpectedType, typename Fn>
+#if __cpp_concepts >= 201907L
+requires callback<Fn, ExpectedType&>
+#endif
+auto make_temporary_pre_processor_(Fn&& fn);
 
 template<typename T, typename Fn>
 #if __cpp_concepts >= 201907L
@@ -663,14 +767,17 @@ requires writeable<T> && callback<Fn, T&>
 class temporary {
   public:
   using temporary_type = T;
-  using writer_type = std::remove_cvref_t<decltype(temporary_resolve_(std::declval<T&>(), std::declval<Fn>()))>;
 
+  private:
+  using writer_type = typename extract_writer<std::remove_cvref_t<decltype(std::declval<xdr<writer<>>>() & std::declval<const temporary_type&>())>>::type;
+
+  public:
   explicit temporary(Fn&& fn, temporary_type initial);
   explicit temporary(const Fn& fn, temporary_type initial);
 
-  auto resolve(temporary_type& v) const -> writer_type;
   auto initial() const & -> const temporary_type&;
   auto initial() && -> temporary_type&&;
+  auto fn() && -> Fn&& { return std::move(fn_); }
 
   static constexpr std::size_t bytes = writer_type::bytes.value_or(std::size_t(0));
   using known_size = typename writer_type::known_size_at_compile_time;
@@ -705,7 +812,7 @@ using xdr_reader::temporaries_factory;
 using xdr_reader::completion_fn_wrapper_;
 
 
-template<typename Fn>
+template<typename Fn, typename Temporary>
 #if __cpp_concepts >= 201907L
 // requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
 #endif
@@ -719,11 +826,11 @@ struct encoder {
   Fn fn;
 };
 
-template<typename Fn>
+template<typename Temporary = void, typename Fn>
 #if __cpp_concepts >= 201907L
 // requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
 #endif
-auto make_encoder(Fn&& fn) -> encoder<std::decay_t<Fn>>;
+auto make_encoder(Fn&& fn) -> encoder<std::decay_t<Fn>, Temporary>;
 
 
 template<typename Dfn, typename Nested, typename Alloc = std::allocator<std::byte>>
@@ -738,11 +845,13 @@ class encoder_callback {
   encoder_callback(Dfn&& dfn, std::tuple<writer_type, completion_fn>&& rc, allocator_type alloc = allocator_type());
 
   auto get_allocator() const -> allocator_type;
-  template<typename Stream> void operator()(Stream& stream, std::error_code ec);
+
+  template<typename Stream, typename... T>
+  void operator()(Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
 
   private:
-  template<typename Stream>
-  void continue_(Stream& stream, std::error_code ec);
+  template<typename Stream, typename... T>
+  void continue_(Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
 
   allocator_type alloc;
   Dfn dfn_;
@@ -809,9 +918,12 @@ template<typename DoneCb, std::size_t AccumulatedTupleSize, typename T, typename
 struct resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...> {
   private:
   using temporary_type = typename temporary<T, Fn>::temporary_type;
-  using temporary_writer_type = typename temporary<T, Fn>::writer_type;
+  using pre_processor_type = std::remove_cvref_t<decltype(make_temporary_pre_processor_<AccumulatedTupleSize, temporary_type>(std::declval<Fn>()))>;
+  using temporary_writer_type = typename extract_writer<std::remove_cvref_t<decltype(std::declval<xdr<writer<>>>() & std::declval<temporary_type&>())>>::type;
   using temporary_factories_tuple = typename temporary_writer_type::factories_tuple;
-  using nested_t = typename prepend_tuple_to_resolve_n_<DoneCb, AccumulatedTupleSize + 1u, temporary_factories_tuple, Tail...>::type;
+  using nested_t = typename prepend_tuple_to_resolve_n_<DoneCb, AccumulatedTupleSize + 1u,
+        std::remove_cvref_t<decltype(std::tuple_cat(std::declval<std::tuple<pre_processor_type>>(), std::declval<temporary_factories_tuple>()))>,
+        Tail...>::type;
 
   public:
   using temporaries = std::remove_cvref_t<decltype(std::declval<temporaries_factory<temporary_type>>() + std::declval<typename nested_t::temporaries>())>;
@@ -822,23 +934,90 @@ struct resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...> {
   auto operator()(DoneCb&& done_cb, const std::shared_ptr<std::tuple<TT...>>& temporaries_tuple, temporary<T, Fn>&& tmp, Tail&&... tail) -> std::tuple<writer_type, completion_fn>;
 };
 
-template<typename DoneCb, std::size_t AccumulatedTupleSize, typename Fn, typename... Tail>
-struct resolve_n_<DoneCb, AccumulatedTupleSize, encoder<Fn>, Tail...> {
-  using nested_t = resolve_n_<DoneCb, AccumulatedTupleSize, Tail...>;
+template<typename Encoder> class encoder_resolve_helper_;
 
-  using temporaries = typename nested_t::temporaries;
+template<typename Fn, typename Temporary>
+class encoder_resolve_helper_<encoder<Fn, Temporary>> {
+  public:
   using writer_type = writer<>;
-  using completion_fn = encoder_callback<Fn, nested_t>;
 
-  template<typename TTPointer>
-  auto operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, encoder<Fn>&& d, Tail&&... tail) -> std::tuple<writer_type, completion_fn>;
+  template<typename TuplePtr, std::size_t TupleOffset>
+  encoder_resolve_helper_(encoder<Fn, Temporary>&& e, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
+  : fn(std::move(e.fn)),
+    temporary(std::get<tuple_offset() + 1u>(*tuple_ptr))
+  {}
+
+  template<typename Stream, typename Callback>
+  auto operator()(Stream& s, Callback&& callback) -> void {
+    std::invoke(fn, s, std::forward<Callback>(callback), temporary);
+  }
+
+  private:
+  Fn fn;
+  Temporary& temporary;
 };
 
-template<typename Alloc, typename DoneCb, typename... Factories, std::size_t... Idx>
+template<typename Fn>
+class encoder_resolve_helper_<encoder<Fn, void>> {
+  public:
+  using writer_type = writer<>;
+
+  template<typename TuplePtr, std::size_t TupleOffset>
+  encoder_resolve_helper_(encoder<Fn, void>&& e, const TuplePtr& tuple_ptr, std::integral_constant<std::size_t, TupleOffset> tuple_offset)
+  : fn(std::move(e.fn))
+  {}
+
+  template<typename Stream, typename Callback>
+  auto operator()(Stream& s, Callback&& callback) -> void {
+    std::invoke(fn, s, std::forward<Callback>(callback));
+  }
+
+  private:
+  Fn fn;
+};
+
+struct direct_completion {
+  using known_size = std::false_type;
+};
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename... Tail>
+struct resolve_n_<DoneCb, AccumulatedTupleSize, direct_completion, Tail...> {
+  static_assert(sizeof...(Tail) == 0u);
+
+  using temporaries = temporaries_factory<>;
+  using writer_type = writer<>;
+  using completion_fn = DoneCb; // Don't wrap this!
+
+  template<typename TTPointer>
+  auto operator()(DoneCb&& done_cb, [[maybe_unused]] const TTPointer& temporaries_tuple, direct_completion&& d, [[maybe_unused]] Tail&&... tail) -> std::tuple<writer_type, completion_fn>;
+};
+
+template<typename DoneCb, std::size_t AccumulatedTupleSize, typename Fn, typename Temporary, typename... Tail>
+struct resolve_n_<DoneCb, AccumulatedTupleSize, encoder<Fn, Temporary>, Tail...> {
+  static constexpr std::size_t tail_accumulated_tuple_size = AccumulatedTupleSize + (std::is_void_v<Temporary> ? 0u : 1u);
+  using helper = encoder_resolve_helper_<encoder<Fn, Temporary>>;
+  using nested_t = resolve_n_<DoneCb, tail_accumulated_tuple_size, Tail...>;
+  using completion_fn = encoder_callback<helper, nested_t>;
+  using temporary_resolve_n = typename prepend_tuple_to_resolve_n_<completion_fn, tail_accumulated_tuple_size + std::tuple_size_v<typename nested_t::temporaries::type>, typename helper::writer_type::factories_tuple, direct_completion>::type;
+
+  using temporaries = std::remove_cvref_t<decltype(
+      std::declval<std::conditional_t<std::is_void_v<Temporary>, temporaries_factory<>, temporaries_factory<Temporary>>>()
+      +
+      std::declval<typename nested_t::temporaries>()
+      +
+      std::declval<typename temporary_resolve_n::temporaries>())>;
+  using writer_type = typename temporary_resolve_n::writer_type;
+
+  template<typename TTPointer>
+  auto operator()(DoneCb&& done_cb, const TTPointer& temporaries_tuple, encoder<Fn, Temporary>&& d, Tail&&... tail) -> std::tuple<writer_type, completion_fn>;
+};
+
+template<typename Alloc, typename DoneCb, typename... Factories, std::size_t... Idx, std::size_t StartIdx>
 auto resolve_(
     std::allocator_arg_t use_alloc, Alloc&& alloc, DoneCb&& done_cb,
     std::tuple<Factories...>&& factories,
-    std::index_sequence<Idx...> seq);
+    std::index_sequence<Idx...> seq,
+    std::integral_constant<std::size_t, StartIdx> start_idx);
 
 
 template<typename T>
@@ -883,8 +1062,8 @@ template<typename... X, typename... Y>
 auto operator+(writer<X...>&& x, writer<Y...>&& y) -> writer<X..., Y...>;
 
 
-template<typename Alloc, typename DoneCb, typename... Factories>
-inline auto resolve(std::allocator_arg_t aa, Alloc&& alloc, DoneCb&& done_cb, writer<Factories...>&& w);
+template<typename Alloc, typename DoneCb, typename... Factories, std::size_t StartIdx = 0>
+inline auto resolve(std::allocator_arg_t aa, Alloc&& alloc, DoneCb&& done_cb, writer<Factories...>&& w, std::integral_constant<std::size_t, StartIdx> start_idx = {});
 
 template<typename... Factories>
 auto buffers(const writer<Factories...>& w);
