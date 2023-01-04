@@ -2268,18 +2268,24 @@ auto operator&(xdr<xdr_reader::reader<X...>>&& x, opt_ref<T, Spec> s) {
 template<typename... X, typename T, typename Spec>
 auto operator&(xdr<xdr_writer::writer<X...>>&& x, opt_cref<T, Spec> s) {
   using xdr_writer::make_encoder;
+  using xdr_writer::constant_size_buffer_factory;
 
   return add_raw(
-      std::move(x) & xdr_getset<bool>([s]() -> bool { return s.ref.has_value(); }).as(xdr_bool),
-      make_encoder(
-          [s](auto& stream, auto callback) {
+      std::move(x),
+      make_encoder<std::uint32_t>(
+          [s](auto& stream, auto callback, std::uint32_t& temporary) {
+            temporary = boost::endian::native_to_big(s.ref.has_value() ? std::uint32_t(1u) : std::uint32_t(0u));
+            auto bool_writer = add_raw(xdr<xdr_writer::writer<>>(), constant_size_buffer_factory<4>(asio::buffer(&temporary, sizeof(temporary))));
             if (s.ref.has_value()) {
               async_write(
                   stream,
-                  xdr<xdr_writer::writer<>>() & s.spec(*s.ref),
+                  std::move(bool_writer) & s.spec(*s.ref),
                   std::move(callback));
             } else {
-              std::invoke(callback, std::error_code());
+              async_write(
+                  stream,
+                  std::move(bool_writer),
+                  std::move(callback));
             }
           }));
 }
