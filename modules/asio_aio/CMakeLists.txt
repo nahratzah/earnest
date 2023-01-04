@@ -33,8 +33,8 @@ if (IO_BACKEND STREQUAL "aio_kqueue")
   message(SEND_ERROR "aio-kqueue is not yet implemented")
 endif ()
 
-if (IO_BACKEND STREQUAL "aio")
-  message(SEND_ERROR "aio is not fully implemented")
+if (IO_BACKEND STREQUAL "aio" AND WIN32)
+  message(SEND_ERROR "aio is not implemented for windows")
 endif ()
 
 if (IO_BACKEND STREQUAL "synchronous" AND WIN32)

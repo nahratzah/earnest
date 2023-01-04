@@ -16,6 +16,7 @@
 #include <asio/associated_allocator.hpp>
 #include <asio/associated_executor.hpp>
 #include <asio/buffer.hpp>
+#include <asio/error.hpp>
 #include <asio/execution_context.hpp>
 
 namespace earnest::detail::aio {
@@ -84,7 +85,7 @@ class synchronous_reactor
   template<typename ImplFn, typename Buffers, typename CompletionHandler, typename Executor>
   static void do_op_(ImplFn&& impl_fn, Buffers&& buffers, CompletionHandler&& handler, Executor&& executor) {
     if (asio::buffer_size(buffers) == 0) [[unlikely]] {
-      process_result(0, std::forward<CompletionHandler>(handler), std::forward<Executor>(executor));
+      do_empty_buffers(std::forward<CompletionHandler>(handler), std::forward<Executor>(executor));
     } else {
       auto iov = buffers_to_iovec(std::forward<Buffers>(buffers));
       auto op_result = std::invoke(impl_fn, iov.data(), iov.size()); // side-effect: sets errno
@@ -125,8 +126,10 @@ class synchronous_reactor
 
     std::error_code ec;
     if (op_result == -1) [[unlikely]] {
-      ec.assign(errno, std::system_category());
+      ec.assign(errno, std::generic_category());
       op_result = 0;
+    } else if (op_result == 0) {
+      ec = asio::error::eof;
     }
 
     ex.post(
@@ -135,6 +138,19 @@ class synchronous_reactor
           n=static_cast<std::size_t>(op_result)
         ]() mutable {
           std::invoke(handler, ec, n);
+        },
+        std::move(alloc));
+  }
+
+  template<typename CompletionHandler, typename Executor>
+  static void do_empty_buffers(CompletionHandler&& handler, Executor&& executor) {
+    auto ex = asio::get_associated_executor(handler, std::forward<Executor>(executor));
+    auto alloc = asio::get_associated_allocator(handler);
+
+    ex.post(
+        [ handler=std::forward<CompletionHandler>(handler)
+        ]() mutable {
+          std::invoke(handler, std::error_code(), std::size_t(0));
         },
         std::move(alloc));
   }

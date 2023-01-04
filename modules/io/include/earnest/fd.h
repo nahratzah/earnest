@@ -128,12 +128,12 @@ class fd {
 
 #if _POSIX_SYNCHRONIZED_IO >= 200112L
     if (data_only) {
-      if (::fdatasync(handle_)) ec.assign(errno, std::system_category());
+      if (::fdatasync(handle_)) ec.assign(errno, std::generic_category());
     } else {
-      if (::fsync(handle_)) ec.assign(errno, std::system_category());
+      if (::fsync(handle_)) ec.assign(errno, std::generic_category());
     }
 #else
-    if (::fsync(handle_)) ec.assign(errno, std::system_category());
+    if (::fsync(handle_)) ec.assign(errno, std::generic_category());
 #endif
   }
 
@@ -148,7 +148,7 @@ class fd {
 
   auto size(std::error_code& ec) const -> size_type {
     struct ::stat sb;
-    if (::fstat(handle_, &sb)) ec.assign(errno, std::system_category());
+    if (::fstat(handle_, &sb)) ec.assign(errno, std::generic_category());
     return sb.st_size;
   }
 
@@ -161,7 +161,7 @@ class fd {
   void truncate(size_type sz, std::error_code& ec) {
     ec.clear();
 
-    if (::ftruncate(handle_, sz)) ec.assign(errno, std::system_category());
+    if (::ftruncate(handle_, sz)) ec.assign(errno, std::generic_category());
   }
 
   void cancel() {
@@ -185,9 +185,16 @@ class fd {
   }
 
   void close(std::error_code& ec) {
-    cancel(ec);
-    if (!ec && ::close(handle_))
-      ec.assign(errno, std::system_category());
+    if (handle_ == invalid_native_handle) {
+      ec.clear();
+    } else {
+      cancel(ec);
+      if (ec) return;
+      if (::close(handle_))
+        ec.assign(errno, std::generic_category());
+      else
+        handle_ = invalid_native_handle;
+    }
   }
 
   void open(const std::filesystem::path& filename, open_mode mode) {
@@ -218,7 +225,7 @@ class fd {
     auto new_fd = fd(get_executor());
     new_fd.handle_ = ::open(filename.c_str(), fl);
     if (new_fd.handle_ == invalid_native_handle) {
-      ec.assign(errno, std::system_category());
+      ec.assign(errno, std::generic_category());
       return;
     }
 
@@ -262,7 +269,7 @@ class fd {
     auto new_fd = fd(get_executor());
     new_fd.handle_ = ::openat(parent.native_handle(), filename.c_str(), fl);
     if (new_fd.handle_ == invalid_native_handle) {
-      ec.assign(errno, std::system_category());
+      ec.assign(errno, std::generic_category());
       return;
     }
 
@@ -290,7 +297,7 @@ class fd {
     auto new_fd = fd(get_executor());
     new_fd.handle_ = ::open(filename.c_str(), fl, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
     if (new_fd.handle_ == invalid_native_handle) {
-      ec.assign(errno, std::system_category());
+      ec.assign(errno, std::generic_category());
       return;
     }
 
@@ -323,7 +330,7 @@ class fd {
     auto new_fd = fd(get_executor());
     new_fd.handle_ = ::openat(parent.native_handle(), filename.c_str(), fl, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
     if (new_fd.handle_ == invalid_native_handle) {
-      ec.assign(errno, std::system_category());
+      ec.assign(errno, std::generic_category());
       return;
     }
 
@@ -357,7 +364,7 @@ restart:
 #ifdef HAS_MKSTEMP
     new_fd.handle_ = ::mkstemp(template_name.data());
     if (new_fd.handle_ == invalid_native_handle) {
-      ec.assign(errno, std::system_category());
+      ec.assign(errno, std::generic_category());
       return;
     }
 #else
@@ -368,7 +375,7 @@ restart:
     new_fd.handle_ = ::open(::mktemp(template_name.data()), fl, 0666);
     if (new_fd.handle_ == invalid_native_handle) {
       if (errno == EEXIST) goto restart;
-      ec.assign(errno, std::system_category());
+      ec.assign(errno, std::generic_category());
       return;
     }
 #endif

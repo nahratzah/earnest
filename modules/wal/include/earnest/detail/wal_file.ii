@@ -63,8 +63,7 @@ inline auto wal_file_entry<Executor>::async_open(const dir& d, const std::filesy
   using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
 
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
-      [](auto completion_handler, const dir& d, const std::filesystem::path& name, std::unique_ptr<pos_stream> s, wal_file_entry& wf) {
-        auto& stream = *s;
+      [](auto completion_handler, const dir& d, const std::filesystem::path& name, wal_file_entry& wf) {
         if (wf.file.is_open()) throw std::logic_error("wal is already open");
         if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
 
@@ -84,6 +83,9 @@ inline auto wal_file_entry<Executor>::async_open(const dir& d, const std::filesy
           wf.name = name;
         }
 
+        std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf.file);
+        auto& stream = *s;
+
         async_read(
             stream, wf.header_reader_(),
             completion_wrapper<void(std::error_code)>(
@@ -93,7 +95,7 @@ inline auto wal_file_entry<Executor>::async_open(const dir& d, const std::filesy
                   std::invoke(h, ec);
                 }));
       },
-      token, d, name, std::make_unique<pos_stream>(file), *this);
+      token, d, name, *this);
 }
 
 

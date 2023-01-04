@@ -14,7 +14,7 @@ TEST(read_empty_wal_file_entry) {
   auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type>(ioctx.get_executor());
   f.async_open(source_files, "empty",
       [](std::error_code ec) {
-        CHECK_EQUAL(make_error_code(std::errc::bad_file_descriptor), ec); // XXX
+        CHECK_EQUAL(make_error_code(asio::error::eof), ec); // XXX
       });
   ioctx.run();
 }

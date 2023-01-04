@@ -8,3 +8,8 @@ target_sources(asio_aio INTERFACE
     FILES include/earnest/detail/aio/aio_reactor.h)
 
 target_link_libraries(asio_aio_aiothread INTERFACE asio)
+
+find_library(LIBRT rt DOC "on freebsd, we require the librt library")
+if (LIBRT)
+  target_link_libraries(asio_aio_aiothread INTERFACE ${LIBRT})
+endif ()
