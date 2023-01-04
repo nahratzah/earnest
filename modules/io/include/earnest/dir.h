@@ -14,20 +14,33 @@
 # include <dirent.h>
 #endif
 
-#include <earnest/fd.h>
+#include <earnest/open_mode.h>
 
 namespace earnest {
 
 
 class dir {
   public:
-  using open_mode = detail::basic_fd::open_mode;
-  using native_handle_type = detail::basic_fd::native_handle_type;
-  static inline constexpr native_handle_type invalid_native_handle = detail::basic_fd::invalid_native_handle;
+  using open_mode = ::earnest::open_mode;
+  using native_handle_type =
+#ifdef WIN32
+      HANDLE
+#else
+      int
+#endif
+      ;
 
-  static inline constexpr open_mode READ_ONLY = detail::basic_fd::READ_ONLY;
-  static inline constexpr open_mode WRITE_ONLY = detail::basic_fd::WRITE_ONLY;
-  static inline constexpr open_mode READ_WRITE = detail::basic_fd::READ_WRITE;
+  static inline constexpr native_handle_type invalid_native_handle =
+#ifdef WIN32
+      INVALID_HANDLE_VALUE
+#else
+      -1
+#endif
+      ;
+
+  static inline constexpr open_mode READ_ONLY = open_mode::READ_ONLY;
+  static inline constexpr open_mode WRITE_ONLY = open_mode::WRITE_ONLY;
+  static inline constexpr open_mode READ_WRITE = open_mode::READ_WRITE;
 
   class entry;
   class iterator;

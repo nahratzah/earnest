@@ -4,6 +4,8 @@
 #include <cassert>
 #include <type_traits>
 #include <memory>
+#include <list>
+#include <map>
 #include <filesystem>
 
 #include <asio/async_result.hpp>

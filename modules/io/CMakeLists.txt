@@ -17,7 +17,7 @@ target_sources(io
     FILES include/earnest/fd.h include/earnest/dir.h)
 target_sources(io
     PRIVATE
-    src/fd.cc src/dir.cc)
+    src/dir.cc)
 
 find_package(Boost REQUIRED)
 target_include_directories(io PUBLIC ${Boost_INCLUDE_DIR})

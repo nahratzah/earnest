@@ -6,6 +6,7 @@
 # include <Wdm.h>
 # include <string_view>
 #else
+# include <cassert>
 # include <cerrno>
 # include <fcntl.h>
 # include <sys/stat.h>
@@ -315,100 +316,6 @@ auto dir::erase_(const std::filesystem::path& name) -> std::error_code {
 }
 
 
-namespace detail {
-
-
-auto basic_fd::open_(const dir& parent, const std::filesystem::path& filename, open_mode mode, std::error_code& ec) -> basic_fd {
-  basic_fd f;
-
-  if (!parent) {
-    ec = std::make_error_code(std::errc::bad_file_descriptor);
-    return f;
-  }
-
-  DWORD dwDesiredAccess = 0;
-  switch (mode) {
-    case READ_ONLY:
-      dwDesiredAccess |= GENERIC_READ;
-      break;
-    case WRITE_ONLY:
-      dwDesiredAccess |= GENERIC_WRITE;
-      break;
-    case READ_WRITE:
-      dwDesiredAccess |= GENERIC_READ | GENERIC_WRITE;
-      break;
-  }
-
-  // Build up the unicode string for the dirname.
-  UNICODE_STRING filename_ustring;
-  filename_ustring.Buffer = filename.c_str();
-  filename_ustring.MaximumLength = dirname_ustring.Length = std::wstring_view(filename_ustring.Buffer).length();
-  // Set up create-file attributes.
-  // We mark case-insensitive matching, to match the usual windows behaviour.
-  OBJECT_ATTRIBUTES obj_attributes;
-  InitializeObjectAttributes(&obj_attributes, &filename_ustring, OBJ_CASE_INSENSITIVE, parent.handle_, nullptr);
-  // Output parameter.
-  // We don't actually care about its values.
-  IO_STATUS_BLOCK io_status_block;
-
-  ec = rtl_nt_status_to_error_code_(
-      nt_create_file_(
-          &f.handle_,
-          dwDesiredAccess,
-          &obj_attributes,
-          &io_status_block,
-          /* AllocationSize */ 0,
-          FILE_FLAG_OVERLAPPED,
-          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-          FILE_CREATE,
-          FILE_NON_DIRECTORY_FILE,
-          /* EaBuffer */ nullptr,
-          /* EaLength */ 0
-          ));
-  return f;
-}
-
-auto basic_fd::create_(const dir& parent, const std::filesystem::path& filename, std::error_code& ec) -> basic_fd {
-  basic_fd f;
-
-  if (!parent) {
-    ec = std::make_error_code(std::errc::bad_file_descriptor);
-    return f;
-  }
-
-  // Build up the unicode string for the dirname.
-  UNICODE_STRING filename_ustring;
-  filename_ustring.Buffer = filename.c_str();
-  filename_ustring.MaximumLength = dirname_ustring.Length = std::wstring_view(filename_ustring.Buffer).length();
-  // Set up create-file attributes.
-  // We mark case-insensitive matching, to match the usual windows behaviour.
-  OBJECT_ATTRIBUTES obj_attributes;
-  InitializeObjectAttributes(&obj_attributes, &filename_ustring, OBJ_CASE_INSENSITIVE, parent.handle_, nullptr);
-  // Output parameter.
-  // We don't actually care about its values.
-  IO_STATUS_BLOCK io_status_block;
-
-  ec = rtl_nt_status_to_error_code_(
-      nt_create_file_(
-          &f.handle_,
-          GENERIC_READ | GENERIC_WRITE,
-          &obj_attributes,
-          &io_status_block,
-          /* AllocationSize */ 0,
-          FILE_FLAG_OVERLAPPED,
-          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-          FILE_OPEN,
-          FILE_NON_DIRECTORY_FILE,
-          /* EaBuffer */ nullptr,
-          /* EaLength */ 0
-          ));
-  return f;
-}
-
-
-} /* namespace earnest::detail */
-
-
 dir::iterator::iterator(const dir& d)
 : iterator()
 {
@@ -669,84 +576,6 @@ auto dir::erase_(const std::filesystem::path& name) -> std::error_code {
     return last_error_();
   return {};
 }
-
-
-namespace detail {
-
-
-auto basic_fd::open_(const dir& parent, const std::filesystem::path& filename, open_mode mode, std::error_code& ec) -> basic_fd {
-  basic_fd f;
-
-  if (!parent) {
-    ec = std::make_error_code(std::errc::bad_file_descriptor);
-    return f;
-  }
-
-  ec.clear();
-
-  int fl = 0;
-#ifdef O_CLOEXEC
-  fl |= O_CLOEXEC;
-#endif
-  switch (mode) {
-    case READ_ONLY:
-      fl |= O_RDONLY;
-      break;
-    case WRITE_ONLY:
-      fl |= O_WRONLY;
-      break;
-    case READ_WRITE:
-      fl |= O_RDWR;
-      break;
-  }
-
-  f.handle_ = ::openat(parent.native_handle(), filename.c_str(), fl);
-  if (f.handle_ == -1) {
-    ec = last_error_();
-    return f;
-  }
-
-  struct stat sb;
-  auto fstat_rv = ::fstat(f.handle_, &sb);
-  if (fstat_rv != 0) {
-    ec = last_error_();
-    return {};
-  }
-
-  if (S_ISDIR(sb.st_mode)) {
-    ec = std::make_error_code(std::errc::is_a_directory);
-    return {};
-  }
-  if (!S_ISREG(sb.st_mode)) {
-    ec = std::error_code(EFTYPE, std::system_category());
-    return {};
-  }
-
-  return f;
-}
-
-auto basic_fd::create_(const dir& parent, const std::filesystem::path& filename, std::error_code& ec) -> basic_fd {
-  basic_fd f;
-
-  if (!parent) {
-    ec = std::make_error_code(std::errc::bad_file_descriptor);
-    return f;
-  }
-
-  ec.clear();
-
-  int fl = O_CREAT | O_EXCL | O_RDWR;
-#ifdef O_CLOEXEC
-  fl |= O_CLOEXEC;
-#endif
-
-  f.handle_ = ::openat(parent.native_handle(), filename.c_str(), fl, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
-  if (f.handle_ == -1) ec = last_error_();
-  return f;
-}
-
-
-} /* namespace earnest::detail */
 
 
 dir::iterator::iterator(const dir& d)
