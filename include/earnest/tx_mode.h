@@ -71,7 +71,7 @@ constexpr auto operator|(tx_mode x, tx_mode y) noexcept -> tx_mode {
 constexpr auto operator~(tx_mode x) noexcept -> tx_mode {
   std::underlying_type_t<tx_mode> x_val = static_cast<std::underlying_type_t<tx_mode>>(x);
   std::underlying_type_t<tx_mode> mask = 3;
-  return static_cast<tx_mode>(3 & ~x_val);
+  return static_cast<tx_mode>(mask & ~x_val);
 }
 
 
