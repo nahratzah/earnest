@@ -1,7 +1,5 @@
 #pragma once
 
-#include <stdio.h> // DEBUG
-
 #include <aio.h>
 
 #include <cstddef>
@@ -196,7 +194,6 @@ class aio_reactor
 
       const int op_result = std::invoke(impl_fn, &operation_ptr->get_aiocb()); // side effect: sets errno
       if (op_result == -1) [[unlikely]] {
-        ::perror("aio_readv or aio_writev"); // DEBUG
         operation_ptr->fail_handler(std::error_code(errno, std::generic_category()));
         return;
       }
