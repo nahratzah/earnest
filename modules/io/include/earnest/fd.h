@@ -18,6 +18,7 @@
 #include <asio/buffer.hpp>
 #include <asio/execution_context.hpp>
 #include <asio/executor.hpp>
+#include <asio/read_at.hpp>
 
 #include <earnest/open_mode.h>
 #include <earnest/dir.h>
@@ -142,7 +143,7 @@ class fd {
   auto size() const -> size_type {
     std::error_code ec;
     size_type sz = size(ec);
-    if (ec) throw std::system_error(ec, "earnest::fd::flush");
+    if (ec) throw std::system_error(ec, "earnest::fd::size");
     return sz;
   }
 
@@ -155,7 +156,7 @@ class fd {
   void truncate(size_type sz) {
     std::error_code ec;
     truncate(sz, ec);
-    if (ec) throw std::system_error(ec, "earnest::fd::flush");
+    if (ec) throw std::system_error(ec, "earnest::fd::truncate");
   }
 
   void truncate(size_type sz, std::error_code& ec) {
@@ -388,7 +389,7 @@ restart:
   }
 
   template<typename Buffers, typename CompletionToken>
-  auto async_read_some_at(offset_type offset, Buffers&& mb, CompletionToken&& token) {
+  auto async_read_some_at(offset_type offset, Buffers&& mb, CompletionToken&& token) const {
     return asio::async_initiate<CompletionToken, void(std::error_code, std::size_t)>(
         [this](auto completion_handler, offset_type offset, Buffers&& mb) {
           aio_.async_read_some_at(handle_, offset, std::forward<Buffers>(mb), std::move(completion_handler), get_executor());
@@ -403,6 +404,29 @@ restart:
           aio_.async_write_some_at(handle_, offset, std::forward<Buffers>(mb), std::move(completion_handler), get_executor());
         },
         token, offset, std::forward<Buffers>(mb));
+  }
+
+  template<typename Buffers>
+  auto read_some_at(offset_type offset, Buffers&& mb, std::error_code& ec) const -> std::size_t {
+    return aio_.read_some_at(handle_, offset, std::forward<Buffers>(mb), ec);
+  }
+
+  template<typename Buffers>
+  auto write_some_at(offset_type offset, Buffers&& mb, std::error_code& ec) {
+    return aio_.write_some_at(handle_, offset, std::forward<Buffers>(mb), ec);
+  }
+
+  template<typename Collection>
+#if __cpp_concepts >= 201907L
+  requires (sizeof(typename Collection::value_type) == 1) && requires(Collection c, std::size_t size) {
+    { c.resize(size) };
+    { asio::buffer(c) } -> std::convertible_to<asio::mutable_buffer>;
+  }
+#endif
+  auto contents(Collection c = Collection()) const -> Collection {
+    c.resize(size());
+    asio::read_at(*this, 0, asio::buffer(c));
+    return c;
   }
 
   private:

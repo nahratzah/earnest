@@ -28,9 +28,11 @@ target_link_libraries(wal PUBLIC asio asio_util xdr io)
 
 find_package(UnitTest++)
 if (UnitTest++_FOUND)
+  file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wal_tests")
+
   add_executable(wal_test)
   target_include_directories(wal_test PRIVATE ${UTPP_INCLUDE_DIRS})
   target_link_libraries(wal_test PUBLIC wal UnitTest++)
   target_sources(wal_test PRIVATE tests/wal.cc)
-  add_test(NAME wal COMMAND wal_test wal_source WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  add_test(NAME wal COMMAND wal_test "${CMAKE_CURRENT_SOURCE_DIR}/tests/wal_source" "${CMAKE_CURRENT_BINARY_DIR}/wal_tests")
 endif ()

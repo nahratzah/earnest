@@ -76,6 +76,111 @@ inline auto operator+(xdr<detail::xdr_writer::writer<X...>>&& x, xdr<detail::xdr
 
 } /* namespace earnest */
 
+namespace earnest::detail::xdr_shared {
+
+
+template<typename T>
+inline auto noop_callback::operator()([[maybe_unused]] const T& v) const -> std::error_code {
+  return {};
+}
+
+
+template<typename... T>
+template<typename Alloc>
+inline auto temporaries_factory<T...>::operator()(Alloc&& alloc) const -> std::shared_ptr<type> {
+  return std::allocate_shared<type>(alloc, std::allocator_arg, alloc);
+}
+
+template<typename... T>
+inline auto temporaries_factory<T...>::operator()() const -> std::shared_ptr<type> {
+  return std::make_shared<type>();
+}
+
+
+template<typename Alloc>
+inline auto temporaries_factory<>::operator()(Alloc&& alloc) const -> pretend_pointer {
+  return {};
+}
+
+inline auto temporaries_factory<>::operator()() const -> pretend_pointer {
+  return {};
+}
+
+
+inline auto temporaries_factory<>::pretend_pointer::operator*() const noexcept -> std::tuple<>& {
+  return t_;
+}
+
+inline auto temporaries_factory<>::pretend_pointer::operator->() const noexcept -> std::tuple<>* {
+  return &t_;
+}
+
+
+template<typename... X, typename... Y>
+constexpr auto operator+(const temporaries_factory<X...>& x, const temporaries_factory<Y...>& y) -> temporaries_factory<X..., Y...> {
+  return {};
+}
+
+
+template<typename DoneCb, bool HasTemporaries>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+inline completion_fn_wrapper_<DoneCb, HasTemporaries>::completion_fn_wrapper_(DoneCb&& done_cb, std::shared_ptr<void> temporaries)
+: done_cb_(std::move(done_cb)),
+  temporaries_(std::move(temporaries))
+{}
+
+template<typename DoneCb, bool HasTemporaries>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+inline completion_fn_wrapper_<DoneCb, HasTemporaries>::completion_fn_wrapper_(const DoneCb& done_cb, std::shared_ptr<void> temporaries)
+: done_cb_(done_cb),
+  temporaries_(std::move(temporaries))
+{}
+
+template<typename DoneCb, bool HasTemporaries>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+template<typename Stream, typename... T>
+inline void completion_fn_wrapper_<DoneCb, HasTemporaries>::operator()([[maybe_unused]] Stream& stream, [[maybe_unused]] std::tuple<T...>& temporaries, std::error_code ec) {
+  assert(temporaries_.get() == &temporaries);
+  temporaries_.reset(); // Free memory.
+  std::invoke(done_cb_, ec);
+}
+
+template<typename DoneCb>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+template<typename Temporaries>
+inline completion_fn_wrapper_<DoneCb, false>::completion_fn_wrapper_(DoneCb&& done_cb, [[maybe_unused]] const Temporaries& temporaries)
+: done_cb_(std::move(done_cb))
+{}
+
+template<typename DoneCb>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+template<typename Temporaries>
+inline completion_fn_wrapper_<DoneCb, false>::completion_fn_wrapper_(const DoneCb& done_cb, [[maybe_unused]] const Temporaries& temporaries)
+: done_cb_(done_cb)
+{}
+
+template<typename DoneCb>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+template<typename Stream>
+inline void completion_fn_wrapper_<DoneCb, false>::operator()([[maybe_unused]] Stream& stream, [[maybe_unused]] std::tuple<>& temporaries, std::error_code ec) {
+  std::invoke(done_cb_, ec);
+}
+
+
+} /* namespace earnest::detail::xdr_shared */
+
 namespace earnest::detail::xdr_reader {
 
 
@@ -179,11 +284,6 @@ inline auto make_temporary_post_processor_(Fn&& fn) {
       });
 }
 
-template<typename T>
-inline auto noop_callback::operator()([[maybe_unused]] const T& v) const -> std::error_code {
-  return {};
-}
-
 template<typename T, typename Fn>
 #if __cpp_concepts >= 201907L
 requires readable<T> && callback<Fn, T>
@@ -280,43 +380,6 @@ inline auto callbacks_(const std::tuple<Factories...>& factories, [[maybe_unused
 }
 
 
-template<typename... T>
-template<typename Alloc>
-inline auto temporaries_factory<T...>::operator()(Alloc&& alloc) const -> std::shared_ptr<type> {
-  return std::allocate_shared<type>(alloc, std::allocator_arg, alloc);
-}
-
-template<typename... T>
-inline auto temporaries_factory<T...>::operator()() const -> std::shared_ptr<type> {
-  return std::make_shared<type>();
-}
-
-
-template<typename Alloc>
-inline auto temporaries_factory<>::operator()(Alloc&& alloc) const -> pretend_pointer {
-  return {};
-}
-
-inline auto temporaries_factory<>::operator()() const -> pretend_pointer {
-  return {};
-}
-
-
-inline auto temporaries_factory<>::pretend_pointer::operator*() const noexcept -> std::tuple<>& {
-  return t_;
-}
-
-inline auto temporaries_factory<>::pretend_pointer::operator->() const noexcept -> std::tuple<>* {
-  return &t_;
-}
-
-
-template<typename... X, typename... Y>
-constexpr auto operator+(const temporaries_factory<X...>& x, const temporaries_factory<Y...>& y) -> temporaries_factory<X..., Y...> {
-  return {};
-}
-
-
 template<typename T, typename Fn, typename Temporary>
 #if __cpp_concepts >= 201907L
 // requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
@@ -365,63 +428,6 @@ template<typename T, typename Temporary, typename Fn>
 #endif
 inline auto make_decoder(Fn&& fn, T&& initial) -> decoder<std::decay_t<T>, std::decay_t<Fn>, Temporary> {
   return decoder<std::decay_t<T>, std::decay_t<Fn>, Temporary>(std::forward<Fn>(fn), std::forward<T>(initial));
-}
-
-
-template<typename DoneCb, bool HasTemporaries>
-#if __cpp_concepts >= 201907L
-requires std::invocable<DoneCb, std::error_code>
-#endif
-inline completion_fn_wrapper_<DoneCb, HasTemporaries>::completion_fn_wrapper_(DoneCb&& done_cb, std::shared_ptr<void> temporaries)
-: done_cb_(std::move(done_cb)),
-  temporaries_(std::move(temporaries))
-{}
-
-template<typename DoneCb, bool HasTemporaries>
-#if __cpp_concepts >= 201907L
-requires std::invocable<DoneCb, std::error_code>
-#endif
-inline completion_fn_wrapper_<DoneCb, HasTemporaries>::completion_fn_wrapper_(const DoneCb& done_cb, std::shared_ptr<void> temporaries)
-: done_cb_(done_cb),
-  temporaries_(std::move(temporaries))
-{}
-
-template<typename DoneCb, bool HasTemporaries>
-#if __cpp_concepts >= 201907L
-requires std::invocable<DoneCb, std::error_code>
-#endif
-template<typename Stream, typename... T>
-inline void completion_fn_wrapper_<DoneCb, HasTemporaries>::operator()([[maybe_unused]] Stream& stream, [[maybe_unused]] std::tuple<T...>& temporaries, std::error_code ec) {
-  assert(temporaries_.get() == &temporaries);
-  temporaries_.reset(); // Free memory.
-  std::invoke(done_cb_, ec);
-}
-
-template<typename DoneCb>
-#if __cpp_concepts >= 201907L
-requires std::invocable<DoneCb, std::error_code>
-#endif
-template<typename Temporaries>
-inline completion_fn_wrapper_<DoneCb, false>::completion_fn_wrapper_(DoneCb&& done_cb, [[maybe_unused]] const Temporaries& temporaries)
-: done_cb_(std::move(done_cb))
-{}
-
-template<typename DoneCb>
-#if __cpp_concepts >= 201907L
-requires std::invocable<DoneCb, std::error_code>
-#endif
-template<typename Temporaries>
-inline completion_fn_wrapper_<DoneCb, false>::completion_fn_wrapper_(const DoneCb& done_cb, [[maybe_unused]] const Temporaries& temporaries)
-: done_cb_(done_cb)
-{}
-
-template<typename DoneCb>
-#if __cpp_concepts >= 201907L
-requires std::invocable<DoneCb, std::error_code>
-#endif
-template<typename Stream>
-inline void completion_fn_wrapper_<DoneCb, false>::operator()([[maybe_unused]] Stream& stream, [[maybe_unused]] std::tuple<>& temporaries, std::error_code ec) {
-  std::invoke(done_cb_, ec);
 }
 
 
@@ -3492,15 +3498,13 @@ inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const constant_holder<T
 template<typename... X, typename T, typename Spec>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_holder<T, Spec>& c) {
   using xdr_writer::make_temporary;
+  using xdr_writer::noop_callback;
 
   return add_raw(
       std::move(x),
       make_temporary<temporary_with_spec<T, Spec>>(
-          [expected=c.value](temporary_with_spec<T, Spec>& x) -> std::error_code {
-            x.value = expected;
-            return std::error_code();
-          },
-          temporary_with_spec<T, Spec>(c.spec)));
+          noop_callback(),
+          temporary_with_spec<T, Spec>(c.spec, c.value)));
 }
 
 

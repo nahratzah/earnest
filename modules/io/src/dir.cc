@@ -115,22 +115,10 @@ static auto nt_set_information_file_(
 } /* namespace earnest::<unnamed> */
 
 
-auto dir::open_(const std::filesystem::path& dirname, open_mode mode, std::error_code& ec) -> dir {
+auto dir::open_(const std::filesystem::path& dirname, std::error_code& ec) -> dir {
   ec.clear();
 
-  DWORD dwDesiredAccess = 0;
-  switch (mode) {
-    case READ_ONLY:
-      dwDesiredAccess |= GENERIC_READ;
-      break;
-    case WRITE_ONLY:
-      dwDesiredAccess |= GENERIC_WRITE;
-      break;
-    case READ_WRITE:
-      dwDesiredAccess |= GENERIC_READ | GENERIC_WRITE;
-      break;
-  }
-
+  DWORD dwDesiredAccess = GENERIC_READ | GENERIC_WRITE;
   dir d;
   d.handle_ = ::CreateFile(
       filename.c_str(),
@@ -154,7 +142,7 @@ auto dir::open_(const std::filesystem::path& dirname, open_mode mode, std::error
   return d;
 }
 
-auto dir::open_(const dir& parent, const std::filesystem::path& dirname, open_mode mode, std::error_code& ec) -> dir {
+auto dir::open_(const dir& parent, const std::filesystem::path& dirname, std::error_code& ec) -> dir {
   dir d;
 
   if (!parent) {
@@ -459,31 +447,20 @@ namespace {
 
 
 static auto last_error_() -> std::error_code {
-  return std::error_code(errno, std::system_category());
+  return std::error_code(errno, std::generic_category());
 }
 
 
 } /* namespace earnest::<unnamed> */
 
 
-auto dir::open_(const std::filesystem::path& dirname, open_mode mode, std::error_code& ec) -> dir {
+auto dir::open_(const std::filesystem::path& dirname, std::error_code& ec) -> dir {
   ec.clear();
 
-  int fl = O_DIRECTORY;
+  int fl = O_DIRECTORY | O_RDONLY;
 #ifdef O_CLOEXEC
   fl |= O_CLOEXEC;
 #endif
-  switch (mode) {
-    case READ_ONLY:
-      fl |= O_RDONLY;
-      break;
-    case WRITE_ONLY:
-      fl |= O_WRONLY;
-      break;
-    case READ_WRITE:
-      fl |= O_RDWR;
-      break;
-  }
 
   dir d;
   d.handle_ = ::open(dirname.c_str(), fl);
@@ -491,7 +468,7 @@ auto dir::open_(const std::filesystem::path& dirname, open_mode mode, std::error
   return d;
 }
 
-auto dir::open_(const dir& parent, const std::filesystem::path& dirname, open_mode mode, std::error_code& ec) -> dir {
+auto dir::open_(const dir& parent, const std::filesystem::path& dirname, std::error_code& ec) -> dir {
   dir d;
 
   if (!parent) {
@@ -501,21 +478,10 @@ auto dir::open_(const dir& parent, const std::filesystem::path& dirname, open_mo
 
   ec.clear();
 
-  int fl = O_DIRECTORY;
+  int fl = O_DIRECTORY | O_RDONLY;
 #ifdef O_CLOEXEC
   fl |= O_CLOEXEC;
 #endif
-  switch (mode) {
-    case READ_ONLY:
-      fl |= O_RDONLY;
-      break;
-    case WRITE_ONLY:
-      fl |= O_WRONLY;
-      break;
-    case READ_WRITE:
-      fl |= O_RDWR;
-      break;
-  }
 
   d.handle_ = ::openat(parent.handle_, dirname.c_str(), fl);
   if (d.handle_ == -1) ec = last_error_();
@@ -587,7 +553,7 @@ dir::iterator::iterator(const dir& d)
   // We want iterators to be independent, so we require an independent copy
   // of the descriptor. We achieve that by opening the same directory.
   dir fd_copy;
-  fd_copy.open(d, ".", READ_ONLY);
+  fd_copy.open(d, ".");
 
   // Now move the handle to the iterator.
   handle_ = ::fdopendir(fd_copy.handle_);

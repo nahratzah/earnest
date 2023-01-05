@@ -40,9 +40,45 @@ class synchronous_reactor
 
   void shutdown() override {}
 
+  template<typename Buffers>
+  auto read_some(int fd, Buffers&& buffers, std::error_code& ec) -> std::size_t {
+    return do_op_(
+        [fd](struct ::iovec* iov, std::size_t iovcnt) {
+          return ::readv(fd, iov, iovcnt);
+        },
+        std::forward<Buffers>(buffers), ec);
+  }
+
+  template<typename Buffers>
+  auto write_some(int fd, Buffers&& buffers, std::error_code& ec) -> std::size_t {
+    return do_op_(
+        [fd](struct ::iovec* iov, std::size_t iovcnt) {
+          return ::writev(fd, iov, iovcnt);
+        },
+        std::forward<Buffers>(buffers), ec);
+  }
+
+  template<typename Buffers>
+  auto read_some_at(int fd, std::uint64_t offset, Buffers&& buffers, std::error_code& ec) -> std::size_t {
+    return do_op_(
+        [fd, offset](struct ::iovec* iov, std::size_t iovcnt) {
+          return ::preadv(fd, iov, iovcnt, offset);
+        },
+        std::forward<Buffers>(buffers), ec);
+  }
+
+  template<typename Buffers>
+  auto write_some_at(int fd, std::uint64_t offset, Buffers&& buffers, std::error_code& ec) -> std::size_t {
+    return do_op_(
+        [fd, offset](struct ::iovec* iov, std::size_t iovcnt) {
+          return ::pwritev(fd, iov, iovcnt, offset);
+        },
+        std::forward<Buffers>(buffers), ec);
+  }
+
   template<typename Buffers, typename CompletionHandler, typename Executor>
   void async_read_some(int fd, Buffers&& buffers, CompletionHandler&& handler, Executor&& executor) {
-    do_op_(
+    do_async_op_(
         [fd](struct ::iovec* iov, std::size_t iovcnt) {
           return ::readv(fd, iov, iovcnt);
         },
@@ -51,7 +87,7 @@ class synchronous_reactor
 
   template<typename Buffers, typename CompletionHandler, typename Executor>
   void async_write_some(int fd, Buffers&& buffers, CompletionHandler&& handler, Executor&& executor) {
-    do_op_(
+    do_async_op_(
         [fd](struct ::iovec* iov, std::size_t iovcnt) {
           return ::writev(fd, iov, iovcnt);
         },
@@ -60,7 +96,7 @@ class synchronous_reactor
 
   template<typename Buffers, typename CompletionHandler, typename Executor>
   void async_read_some_at(int fd, std::uint64_t offset, Buffers&& buffers, CompletionHandler&& handler, Executor&& executor) {
-    do_op_(
+    do_async_op_(
         [fd, offset](struct ::iovec* iov, std::size_t iovcnt) {
           return ::preadv(fd, iov, iovcnt, offset);
         },
@@ -69,7 +105,7 @@ class synchronous_reactor
 
   template<typename Buffers, typename CompletionHandler, typename Executor>
   void async_write_some_at(int fd, std::uint64_t offset, Buffers&& buffers, CompletionHandler&& handler, Executor&& executor) {
-    do_op_(
+    do_async_op_(
         [fd, offset](struct ::iovec* iov, std::size_t iovcnt) {
           return ::pwritev(fd, iov, iovcnt, offset);
         },
@@ -82,8 +118,28 @@ class synchronous_reactor
   }
 
   private:
+  template<typename ImplFn, typename Buffers>
+  static auto do_op_(ImplFn&& impl_fn, Buffers&& buffers, std::error_code& ec) -> std::size_t {
+    ec.clear();
+    if (asio::buffer_size(buffers) == 0) [[unlikely]] {
+      return 0;
+    }
+
+    auto iov = buffers_to_iovec(std::forward<Buffers>(buffers));
+    auto op_result = std::invoke(impl_fn, iov.data(), iov.size()); // side-effect: sets errno
+
+    if (op_result == -1) [[unlikely]] {
+      ec.assign(errno, std::generic_category());
+      op_result = 0;
+    } else if (op_result == 0) [[unlikely]] {
+      ec = asio::error::eof;
+    }
+
+    return op_result;
+  }
+
   template<typename ImplFn, typename Buffers, typename CompletionHandler, typename Executor>
-  static void do_op_(ImplFn&& impl_fn, Buffers&& buffers, CompletionHandler&& handler, Executor&& executor) {
+  static void do_async_op_(ImplFn&& impl_fn, Buffers&& buffers, CompletionHandler&& handler, Executor&& executor) {
     if (asio::buffer_size(buffers) == 0) [[unlikely]] {
       do_empty_buffers(std::forward<CompletionHandler>(handler), std::forward<Executor>(executor));
     } else {
@@ -128,7 +184,7 @@ class synchronous_reactor
     if (op_result == -1) [[unlikely]] {
       ec.assign(errno, std::generic_category());
       op_result = 0;
-    } else if (op_result == 0) {
+    } else if (op_result == 0) [[unlikely]] {
       ec = asio::error::eof;
     }
 

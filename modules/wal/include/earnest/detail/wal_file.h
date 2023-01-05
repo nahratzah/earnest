@@ -28,10 +28,21 @@ class wal_file_entry {
   using executor_type = Executor;
 
   wal_file_entry(const executor_type& ex);
+
+  wal_file_entry(const wal_file_entry&) = delete;
+  wal_file_entry(wal_file_entry&&) = delete;
+  wal_file_entry& operator=(const wal_file_entry&) = delete;
+  wal_file_entry& operator=(wal_file_entry&&) = delete;
+
   auto get_executor() const -> executor_type { return file.get_executor(); }
 
   template<typename CompletionToken>
   auto async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token);
+  template<typename CompletionToken>
+  auto async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token);
+
+  auto write_offset() const noexcept -> typename fd<executor_type>::offset_type;
+  auto link_offset() const noexcept -> typename fd<executor_type>::offset_type;
 
   private:
   auto header_reader_();
@@ -42,6 +53,10 @@ class wal_file_entry {
   fd<executor_type> file;
   std::uint_fast32_t version;
   std::uint_fast64_t sequence;
+
+  private:
+  typename fd<executor_type>::offset_type write_offset_;
+  typename fd<executor_type>::offset_type link_offset_;
 };
 
 

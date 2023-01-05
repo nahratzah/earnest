@@ -14,14 +14,11 @@
 # include <dirent.h>
 #endif
 
-#include <earnest/open_mode.h>
-
 namespace earnest {
 
 
 class dir {
   public:
-  using open_mode = ::earnest::open_mode;
   using native_handle_type =
 #ifdef WIN32
       HANDLE
@@ -37,10 +34,6 @@ class dir {
       -1
 #endif
       ;
-
-  static inline constexpr open_mode READ_ONLY = open_mode::READ_ONLY;
-  static inline constexpr open_mode WRITE_ONLY = open_mode::WRITE_ONLY;
-  static inline constexpr open_mode READ_WRITE = open_mode::READ_WRITE;
 
   class entry;
   class iterator;
@@ -60,10 +53,10 @@ class dir {
   : handle_(std::exchange(other.handle_, invalid_native_handle))
   {}
 
-  dir(const std::filesystem::path& dirname, open_mode mode)
+  dir(const std::filesystem::path& dirname)
   : dir()
   {
-    open(dirname, mode);
+    open(dirname);
   }
 
   auto operator=(dir&& other) noexcept -> dir& {
@@ -84,25 +77,25 @@ class dir {
   explicit operator bool() const noexcept { return is_open(); }
   auto operator!() const noexcept -> bool { return !is_open(); }
 
-  void open(const std::filesystem::path& dirname, open_mode mode) {
+  void open(const std::filesystem::path& dirname) {
     std::error_code ec;
-    open(dirname, mode, ec);
+    open(dirname, ec);
     if (ec) throw std::system_error(ec, "earnest::dir::open");
   }
 
-  void open(const std::filesystem::path& dirname, open_mode mode, std::error_code& ec) {
-    dir newdir = open_(dirname, mode, ec);
+  void open(const std::filesystem::path& dirname, std::error_code& ec) {
+    dir newdir = open_(dirname, ec);
     if (!ec) *this = std::move(newdir);
   }
 
-  void open(const dir& parent, const std::filesystem::path& dirname, open_mode mode) {
+  void open(const dir& parent, const std::filesystem::path& dirname) {
     std::error_code ec;
-    open(parent, dirname, mode, ec);
+    open(parent, dirname, ec);
     if (ec) throw std::system_error(ec, "earnest::dir::open");
   }
 
-  void open(const dir& parent, const std::filesystem::path& dirname, open_mode mode, std::error_code& ec) {
-    dir newdir = open_(parent, dirname, mode, ec);
+  void open(const dir& parent, const std::filesystem::path& dirname, std::error_code& ec) {
+    dir newdir = open_(parent, dirname, ec);
     if (!ec) *this = std::move(newdir);
   }
 
@@ -164,8 +157,8 @@ class dir {
   auto end() const -> iterator;
 
   private:
-  static auto open_(const std::filesystem::path& dirname, open_mode mode, std::error_code& ec) -> dir;
-  static auto open_(const dir& parent, const std::filesystem::path& dirname, open_mode mode, std::error_code& ec) -> dir;
+  static auto open_(const std::filesystem::path& dirname, std::error_code& ec) -> dir;
+  static auto open_(const dir& parent, const std::filesystem::path& dirname, std::error_code& ec) -> dir;
   static auto create_(const std::filesystem::path& dirname, std::error_code& ec) -> dir;
   static auto create_(const dir& parent, const std::filesystem::path& dirname, std::error_code& ec) -> dir;
   auto close_() -> std::error_code;

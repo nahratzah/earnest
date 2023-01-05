@@ -84,8 +84,9 @@ class xdr {
   template<typename T> friend struct ::earnest::detail::xdr_writer::extract_writer;
 
   public:
-  static constexpr bool is_reader = Impl::is_reader;
-  static constexpr bool is_writer = Impl::is_writer;
+  static inline constexpr bool is_reader = Impl::is_reader;
+  static inline constexpr bool is_writer = Impl::is_writer;
+  static inline constexpr std::optional<std::size_t> bytes = Impl::bytes();
 
   xdr();
   explicit xdr(Impl&& impl) noexcept(std::is_nothrow_move_constructible_v<Impl>);
@@ -105,8 +106,114 @@ auto operator+(xdr<detail::xdr_writer::writer<X...>>&& x, xdr<detail::xdr_writer
 } /* namespace earnest */
 
 
+namespace earnest::detail::xdr_shared {
+
+
+struct noop_callback {
+  template<typename T>
+  auto operator()(const T& v) const -> std::error_code;
+};
+
+
+template<typename... T>
+class temporaries_factory {
+  public:
+  // We add this to the tuple, to make the tuple immovable.
+  // That way, the compiler informs us if we introduce a bug. :)
+  class prevent_copy_and_move {
+    public:
+    constexpr prevent_copy_and_move() noexcept = default;
+    prevent_copy_and_move(const prevent_copy_and_move&) = delete;
+    prevent_copy_and_move(prevent_copy_and_move&&) = delete;
+    prevent_copy_and_move& operator=(const prevent_copy_and_move&) = delete;
+    prevent_copy_and_move& operator=(prevent_copy_and_move&&) = delete;
+  };
+
+  using type = std::tuple<T..., prevent_copy_and_move>;
+
+  constexpr temporaries_factory() = default;
+
+  template<typename Alloc> auto operator()(Alloc&& alloc) const -> std::shared_ptr<type>;
+  auto operator()() const -> std::shared_ptr<type>;
+};
+
+// When there are no temporaries requires, we want to elide the allocation
+// of the temporaries tuple.
+// So we use this instead.
+// It's easier to keep the algorithm in terms of a (constrained) shared-ptr,
+// than to write two implementations, where one doesn't allocate a pointer.
+template<>
+class temporaries_factory<> {
+  public:
+  using type = std::tuple<>;
+
+  constexpr temporaries_factory() = default;
+
+  // This is not really a pointer, but fulfills enough of the temporaries
+  // logic that it'll be acceptable as a stand-in for
+  // std::shared_ptr<std::tuple<>>.
+  class pretend_pointer {
+    static_assert(std::is_empty_v<std::tuple<>>);
+
+    public:
+    auto operator*() const noexcept -> std::tuple<>&;
+    auto operator->() const noexcept -> std::tuple<>*;
+
+    private:
+    mutable std::tuple<> t_;
+  };
+
+  template<typename Alloc> auto operator()(Alloc&& alloc) const -> pretend_pointer;
+  auto operator()() const -> pretend_pointer;
+};
+
+template<typename... X, typename... Y>
+constexpr auto operator+(const temporaries_factory<X...>& x, const temporaries_factory<Y...>& y) -> temporaries_factory<X..., Y...>;
+
+
+template<typename DoneCb, bool HasTemporaries>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+class completion_fn_wrapper_ {
+  public:
+  explicit completion_fn_wrapper_(DoneCb&& done_cb, std::shared_ptr<void> temporaries);
+  explicit completion_fn_wrapper_(const DoneCb& done_cb, std::shared_ptr<void> temporaries);
+
+  template<typename Stream, typename... T>
+  void operator()([[maybe_unused]] Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
+
+  private:
+  DoneCb done_cb_;
+  [[maybe_unused]] std::shared_ptr<void> temporaries_;
+};
+
+template<typename DoneCb>
+#if __cpp_concepts >= 201907L
+requires std::invocable<DoneCb, std::error_code>
+#endif
+class completion_fn_wrapper_<DoneCb, false> {
+  public:
+  template<typename Temporaries>
+  explicit completion_fn_wrapper_(DoneCb&& done_cb, const Temporaries& temporaries);
+  template<typename Temporaries>
+  explicit completion_fn_wrapper_(const DoneCb& done_cb, const Temporaries& temporaries);
+
+  template<typename Stream>
+  void operator()([[maybe_unused]] Stream& stream, std::tuple<>& temporaries, std::error_code ec);
+
+  private:
+  DoneCb done_cb_;
+};
+
+
+} /* namespace earnest::detail::xdr_shared */
+
+
 namespace earnest::detail::xdr_reader {
 
+
+using namespace ::earnest::detail::xdr_shared;
 
 template<typename... Factories> class reader;
 
@@ -208,11 +315,6 @@ requires callback<Fn, ExpectedType>
 #endif
 auto make_temporary_post_processor_(Fn&& fn);
 
-struct noop_callback {
-  template<typename T>
-  auto operator()(const T& v) const -> std::error_code;
-};
-
 template<typename T, typename Fn>
 #if __cpp_concepts >= 201907L
 requires readable<T> && callback<Fn, T>
@@ -232,7 +334,7 @@ class temporary {
   auto initial() && -> temporary_type&&;
   auto fn() && -> Fn&& { return std::move(fn_); }
 
-  static constexpr std::size_t bytes = reader_type::bytes.value_or(std::size_t(0));
+  static constexpr std::size_t bytes = reader_type::bytes().value_or(std::size_t(0));
   using known_size = typename reader_type::known_size_at_compile_time;
 
   private:
@@ -258,62 +360,6 @@ template<typename... Tail> auto callbacks_n_([[maybe_unused]] const buffer_facto
 template<std::size_t Bytes, typename... Tail> auto callbacks_n_([[maybe_unused]] const constant_size_buffer_factory<Bytes>& bf, Tail&&... tail);
 template<typename Fn, typename... Tail> auto callbacks_n_(const post_processor<Fn>& pp, Tail&&... tail);
 template<typename... Factories, std::size_t... Idx> auto callbacks_(const std::tuple<Factories...>& factories, [[maybe_unused]] std::index_sequence<Idx...> seq);
-
-
-template<typename... T>
-class temporaries_factory {
-  public:
-  // We add this to the tuple, to make the tuple immovable.
-  // That way, the compiler informs us if we introduce a bug. :)
-  class prevent_copy_and_move {
-    public:
-    constexpr prevent_copy_and_move() noexcept = default;
-    prevent_copy_and_move(const prevent_copy_and_move&) = delete;
-    prevent_copy_and_move(prevent_copy_and_move&&) = delete;
-    prevent_copy_and_move& operator=(const prevent_copy_and_move&) = delete;
-    prevent_copy_and_move& operator=(prevent_copy_and_move&&) = delete;
-  };
-
-  using type = std::tuple<T..., prevent_copy_and_move>;
-
-  constexpr temporaries_factory() = default;
-
-  template<typename Alloc> auto operator()(Alloc&& alloc) const -> std::shared_ptr<type>;
-  auto operator()() const -> std::shared_ptr<type>;
-};
-
-// When there are no temporaries requires, we want to elide the allocation
-// of the temporaries tuple.
-// So we use this instead.
-// It's easier to keep the algorithm in terms of a (constrained) shared-ptr,
-// than to write two implementations, where one doesn't allocate a pointer.
-template<>
-class temporaries_factory<> {
-  public:
-  using type = std::tuple<>;
-
-  constexpr temporaries_factory() = default;
-
-  // This is not really a pointer, but fulfills enough of the temporaries
-  // logic that it'll be acceptable as a stand-in for
-  // std::shared_ptr<std::tuple<>>.
-  class pretend_pointer {
-    static_assert(std::is_empty_v<std::tuple<>>);
-
-    public:
-    auto operator*() const noexcept -> std::tuple<>&;
-    auto operator->() const noexcept -> std::tuple<>*;
-
-    private:
-    mutable std::tuple<> t_;
-  };
-
-  template<typename Alloc> auto operator()(Alloc&& alloc) const -> pretend_pointer;
-  auto operator()() const -> pretend_pointer;
-};
-
-template<typename... X, typename... Y>
-constexpr auto operator+(const temporaries_factory<X...>& x, const temporaries_factory<Y...>& y) -> temporaries_factory<X..., Y...>;
 
 
 template<typename T, typename Fn, typename Temporary>
@@ -356,42 +402,6 @@ template<typename T, typename Temporary = void, typename Fn>
 // requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
 #endif
 auto make_decoder(Fn&& fn, T&& initial) -> decoder<std::decay_t<T>, std::decay_t<Fn>, Temporary>;
-
-
-template<typename DoneCb, bool HasTemporaries>
-#if __cpp_concepts >= 201907L
-requires std::invocable<DoneCb, std::error_code>
-#endif
-class completion_fn_wrapper_ {
-  public:
-  explicit completion_fn_wrapper_(DoneCb&& done_cb, std::shared_ptr<void> temporaries);
-  explicit completion_fn_wrapper_(const DoneCb& done_cb, std::shared_ptr<void> temporaries);
-
-  template<typename Stream, typename... T>
-  void operator()([[maybe_unused]] Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
-
-  private:
-  DoneCb done_cb_;
-  [[maybe_unused]] std::shared_ptr<void> temporaries_;
-};
-
-template<typename DoneCb>
-#if __cpp_concepts >= 201907L
-requires std::invocable<DoneCb, std::error_code>
-#endif
-class completion_fn_wrapper_<DoneCb, false> {
-  public:
-  template<typename Temporaries>
-  explicit completion_fn_wrapper_(DoneCb&& done_cb, const Temporaries& temporaries);
-  template<typename Temporaries>
-  explicit completion_fn_wrapper_(const DoneCb& done_cb, const Temporaries& temporaries);
-
-  template<typename Stream>
-  void operator()([[maybe_unused]] Stream& stream, std::tuple<>& temporaries, std::error_code ec);
-
-  private:
-  DoneCb done_cb_;
-};
 
 
 template<typename Dfn, typename Nested, typename Alloc = std::allocator<std::byte>>
@@ -668,6 +678,8 @@ auto callbacks(const reader<Factories...>& r);
 namespace earnest::detail::xdr_writer {
 
 
+using namespace ::earnest::detail::xdr_shared;
+
 template<typename... Factories> class writer;
 
 
@@ -785,7 +797,7 @@ class temporary {
   auto initial() && -> temporary_type&&;
   auto fn() && -> Fn&& { return std::move(fn_); }
 
-  static constexpr std::size_t bytes = writer_type::bytes.value_or(std::size_t(0));
+  static constexpr std::size_t bytes = writer_type::bytes().value_or(std::size_t(0));
   using known_size = typename writer_type::known_size_at_compile_time;
 
   private:
@@ -811,11 +823,6 @@ template<typename... Tail> auto callbacks_n_(const buffer_factory& bf, Tail&&...
 template<std::size_t Bytes, typename... Tail> auto callbacks_n_(const constant_size_buffer_factory<Bytes>& bf, Tail&&... tail);
 template<typename Fn, typename... Tail> auto callbacks_n_(const pre_processor<Fn>& pp, Tail&&... tail);
 template<typename... Factories, std::size_t... Idx> auto callbacks_(const std::tuple<Factories...>& factories, std::index_sequence<Idx...> seq);
-
-
-using xdr_reader::noop_callback;
-using xdr_reader::temporaries_factory;
-using xdr_reader::completion_fn_wrapper_;
 
 
 template<typename Fn, typename Temporary>
