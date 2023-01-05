@@ -189,8 +189,8 @@ template<typename T, typename Fn>
 requires readable<T> && callback<Fn, T>
 #endif
 inline temporary<T, Fn>::temporary(Fn&& fn, T v) noexcept(std::is_nothrow_move_constructible_v<Fn>)
-: fn_(std::move(fn)),
-  initial_(std::move(v))
+: initial_(std::move(v)),
+  fn_(std::move(fn))
 {}
 
 template<typename T, typename Fn>
@@ -198,8 +198,8 @@ template<typename T, typename Fn>
 requires readable<T> && callback<Fn, T>
 #endif
 inline temporary<T, Fn>::temporary(const Fn& fn, T v) noexcept(std::is_nothrow_copy_constructible_v<Fn>)
-: fn_(fn),
-  initial_(std::move(v))
+: initial_(std::move(v)),
+  fn_(fn)
 {}
 
 template<typename T, typename Fn>
@@ -725,8 +725,8 @@ template<typename T, typename Fn>
 requires writeable<T> && callback<Fn, T&>
 #endif
 inline temporary<T, Fn>::temporary(Fn&& fn, temporary_type initial)
-: fn_(std::move(fn)),
-  initial_(std::move(initial))
+: initial_(std::move(initial)),
+  fn_(std::move(fn))
 {}
 
 template<typename T, typename Fn>
@@ -734,8 +734,8 @@ template<typename T, typename Fn>
 requires writeable<T> && callback<Fn, T&>
 #endif
 inline temporary<T, Fn>::temporary(const Fn& fn, temporary_type initial)
-: fn_(fn),
-  initial_(std::move(initial))
+: initial_(std::move(initial)),
+  fn_(fn)
 {}
 
 template<typename T, typename Fn>
