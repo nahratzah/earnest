@@ -351,7 +351,7 @@ template<typename T, typename Temporary = void, typename Fn>
 #endif
 auto make_decoder(Fn&& fn) -> decoder<T, std::decay_t<Fn>, Temporary>;
 
-template<typename Temporary = void, typename T, typename Fn>
+template<typename T, typename Temporary = void, typename Fn>
 #if __cpp_concepts >= 201907L
 // requires std::invocable<UnspecifiedStream, UnspecifiedCallback>
 #endif
@@ -2348,7 +2348,7 @@ inline constexpr xdr_constant_t<> xdr_constant;
 
 
 // ------------------------------------------------------------------------
-// Inline processors.
+// Inline processors
 // ------------------------------------------------------------------------
 
 template<typename Fn>
@@ -2371,6 +2371,106 @@ struct xdr_processor_t {
 
 
 inline constexpr xdr_processor_t xdr_processor;
+
+
+// ------------------------------------------------------------------------
+// Variants
+// ------------------------------------------------------------------------
+
+template<typename Variant, typename... Specs> struct variant_holder;
+
+template<typename... T, typename... Specs>
+struct variant_holder<std::variant<T...>, Specs...> {
+  std::variant<T...>& value;
+  std::tuple<Specs...> specs;
+};
+
+template<typename... T, typename... Specs>
+struct variant_holder<const std::variant<T...>, Specs...> {
+  const std::variant<T...>& value;
+  std::tuple<Specs...> specs;
+};
+
+template<typename... T>
+struct variant_holder<std::variant<T...>> {
+  template<typename... Specs>
+#if __cpp_concepts >= 201907L
+  requires (sizeof...(Specs) == sizeof...(T))
+#endif
+  auto of(Specs&&... specs) const -> variant_holder<std::variant<T...>, std::decay_t<Specs>...>;
+
+  std::variant<T...>& value;
+};
+
+template<typename... T>
+struct variant_holder<const std::variant<T...>> {
+  template<typename... Specs>
+#if __cpp_concepts >= 201907L
+  requires (sizeof...(Specs) == sizeof...(T))
+#endif
+  auto of(Specs&&... specs) const -> variant_holder<const std::variant<T...>, std::decay_t<Specs>...>;
+
+  const std::variant<T...>& value;
+};
+
+
+template<typename Fn, typename BadFn, std::size_t Idx0, std::size_t... Idx>
+inline constexpr auto apply_index_sequence_(std::size_t idx, Fn&& fn, BadFn&& bad_fn, std::index_sequence<Idx0, Idx...> seq);
+
+template<typename Fn, typename BadFn>
+inline constexpr auto apply_index_sequence_(std::size_t idx, Fn&& fn, BadFn&& bad_fn, std::index_sequence<> seq);
+
+
+template<typename... X, typename... T>
+auto operator&(xdr<xdr_reader::reader<X...>>&& x, const variant_holder<std::variant<T...>>& v);
+
+template<typename... X, typename... T>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<const std::variant<T...>>& v);
+
+template<typename... X, typename... T>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<std::variant<T...>>& v);
+
+template<typename... X, typename... T, typename... Specs>
+auto operator&(xdr<xdr_reader::reader<X...>>&& x, const variant_holder<std::variant<T...>, Specs...>& v);
+
+template<typename... X, typename... T, typename... Specs>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<const std::variant<T...>, Specs...>& v);
+
+template<typename... X, typename... T, typename... Specs>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<std::variant<T...>, Specs...>& v);
+
+
+template<typename... Specs>
+struct xdr_variant_t {
+  template<typename... T>
+#if __cpp_concepts >= 201907L
+  requires (sizeof...(Specs) == sizeof...(T))
+#endif
+  auto operator()(std::variant<T...>& v) const -> variant_holder<std::variant<T...>, Specs...>;
+
+  template<typename... T>
+#if __cpp_concepts >= 201907L
+  requires (sizeof...(Specs) == sizeof...(T))
+#endif
+  auto operator()(const std::variant<T...>& v) const -> variant_holder<const std::variant<T...>, Specs...>;
+
+  std::tuple<Specs...> specs;
+};
+
+template<>
+struct xdr_variant_t<> {
+  template<typename... T>
+  auto operator()(std::variant<T...>& v) const -> variant_holder<std::variant<T...>>;
+
+  template<typename... T>
+  auto operator()(const std::variant<T...>& v) const -> variant_holder<const std::variant<T...>>;
+
+  template<typename... Specs>
+  auto of(Specs&&... specs) const -> xdr_variant_t<std::decay_t<Specs>...>;
+};
+
+
+inline constexpr xdr_variant_t<> xdr_variant;
 
 
 } /* namespace earnest::detail::xdr_types */
@@ -2417,6 +2517,8 @@ using detail::xdr_types::xdr_tuple;
 using detail::xdr_types::xdr_constant;
 
 using detail::xdr_types::xdr_processor;
+
+using detail::xdr_types::xdr_variant;
 
 
 template<typename... X, typename T>
