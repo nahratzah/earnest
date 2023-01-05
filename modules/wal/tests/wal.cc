@@ -52,6 +52,8 @@ TEST(read_wal_file_entry) {
 
   CHECK_EQUAL(0, f.version);
   CHECK_EQUAL(17, f.sequence);
+  CHECK_EQUAL(32, f.write_offset());
+  CHECK_EQUAL(28, f.link_offset());
 }
 
 TEST(write_wal_file_entry) {

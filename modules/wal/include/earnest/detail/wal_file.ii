@@ -87,10 +87,18 @@ inline auto wal_file_entry<Executor>::async_open(const dir& d, const std::filesy
         auto& stream = *s;
 
         async_read(
-            stream, wf.header_reader_(),
+            stream,
+            wf.header_reader_()
+            & xdr_manual(
+                [&wf](auto& stream, auto callback) {
+                  wf.link_offset_ = stream.position();
+                  std::invoke(callback, std::error_code());
+                })
+            & xdr_constant(false).as(xdr_bool), // XXX this bool should have a meaning!
             completion_wrapper<void(std::error_code)>(
                 std::move(completion_handler),
-                [stream_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
+                [&wf, stream_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
+                  wf.write_offset_ = stream_ptr->position();
                   stream_ptr.reset();
                   std::invoke(h, ec);
                 }));

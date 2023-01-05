@@ -2480,6 +2480,30 @@ struct xdr_variant_t<> {
 inline constexpr xdr_variant_t<> xdr_variant;
 
 
+// ------------------------------------------------------------------------
+// Manual decoding
+// ------------------------------------------------------------------------
+
+template<typename Fn>
+struct manual_holder {
+  Fn fn;
+};
+
+template<typename... X, typename Fn>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, manual_holder<Fn> h);
+
+template<typename... X, typename Fn>
+auto operator&(xdr<xdr_reader::reader<X...>>&& x, manual_holder<Fn> h);
+
+struct xdr_manual_t {
+  template<typename Fn>
+  auto operator()(Fn&& fn) const -> manual_holder<std::decay_t<Fn>>;
+};
+
+
+inline constexpr xdr_manual_t xdr_manual;
+
+
 } /* namespace earnest::detail::xdr_types */
 
 
@@ -2526,6 +2550,8 @@ using detail::xdr_types::xdr_constant;
 using detail::xdr_types::xdr_processor;
 
 using detail::xdr_types::xdr_variant;
+
+using detail::xdr_types::xdr_manual;
 
 
 template<typename... X, typename T>

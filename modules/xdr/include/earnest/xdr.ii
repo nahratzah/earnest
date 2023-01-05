@@ -3761,6 +3761,28 @@ inline auto xdr_variant_t<>::of(Specs&&... specs) const -> xdr_variant_t<std::de
 }
 
 
+template<typename... X, typename Fn>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, manual_holder<Fn> h) {
+  using xdr_writer::make_encoder;
+
+  return add_raw(std::move(x), make_encoder(std::move(h.fn)));
+}
+
+template<typename... X, typename Fn>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, manual_holder<Fn> h) {
+  using xdr_reader::make_decoder;
+
+  return add_raw(std::move(x), make_decoder<void>(std::move(h.fn)));
+}
+
+template<typename Fn>
+inline auto xdr_manual_t::operator()(Fn&& fn) const -> manual_holder<std::decay_t<Fn>> {
+  return manual_holder<std::decay_t<Fn>>{
+    .fn = std::forward<Fn>(fn)
+  };
+}
+
+
 } /* namespace earnest::detail::xdr_types */
 
 namespace earnest {
