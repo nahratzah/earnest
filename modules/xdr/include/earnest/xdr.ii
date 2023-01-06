@@ -74,6 +74,12 @@ inline auto operator+(xdr<detail::xdr_writer::writer<X...>>&& x, xdr<detail::xdr
 }
 
 
+template<typename X>
+inline auto operator&(xdr<X>&& x, const std::monostate& ms) noexcept -> xdr<X>&& {
+  return std::move(x);
+}
+
+
 } /* namespace earnest */
 
 namespace earnest::detail::xdr_shared {
@@ -3598,120 +3604,113 @@ inline constexpr auto apply_index_sequence_(std::size_t idx, [[maybe_unused]] Fn
   return std::invoke(std::forward<BadFn>(bad_fn));
 }
 
-template<typename... X, typename... T>
-inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const variant_holder<std::variant<T...>>& v) {
-  using xdr_reader::make_decoder;
-
-  return add_raw(std::move(x),
-      make_decoder(
-          [v](const auto& temporary, auto& stream, auto callback) {
-            apply_index_sequence_(
-                temporary.value,
-                [&](auto integral_constant) -> void {
-                  v.value.template emplace<integral_constant()>(); // Default constructor.
-                  async_read(
-                      stream,
-                      xdr<xdr_reader::reader<>>() & std::get<integral_constant()>(v.value),
-                      std::move(callback));
-                },
-                [&]() -> void {
-                  std::invoke(callback, make_error_code(xdr_errc::decoding_error));
-                },
-                std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
-          },
-          temporary_with_spec<std::uint32_t, xdr_uint32_t>(xdr_uint32)));
-}
-
-template<typename... X, typename... T>
-inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<const std::variant<T...>>& v) {
-  using xdr_writer::make_encoder;
-
-  return add_raw(std::move(x) & xdr_getset<std::size_t>([v]() { return v.value.index(); }).as(xdr_uint32),
-      make_encoder(
-          [v](auto& stream, auto callback) {
-            if (v.value.valueless_by_exception()) [[unlikely]] {
-              std::invoke(callback, make_error_code(xdr_errc::encoding_error));
-              return;
-            }
-
-            std::visit(
-                [&](const auto& value) -> void {
-                  async_write(
-                      stream,
-                      xdr<xdr_writer::writer<>>() & value,
-                      std::move(callback));
-                },
-                v.value);
-          }));
-}
-
-template<typename... X, typename... T>
-inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<std::variant<T...>>& v) {
-  return std::move(x) & variant_holder<const std::variant<T...>>{
-    .value = v.value
-  };
-}
-
 template<typename... X, typename... T, typename... Specs>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const variant_holder<std::variant<T...>, Specs...>& v) {
   using xdr_reader::make_decoder;
 
-  return add_raw(std::move(x),
-      make_decoder(
-          [v](const auto& temporary, auto& stream, auto callback) {
-            apply_index_sequence_(
-                temporary.value,
-                [&](auto integral_constant) -> void {
-                  v.value.template emplace<integral_constant()>(); // Default constructor.
-                  auto& spec = std::get<integral_constant()>(v.specs);
-                  async_read(
-                      stream,
-                      xdr<xdr_reader::reader<>>() & spec(std::get<integral_constant()>(v.value)),
-                      std::move(callback));
-                },
-                [&]() -> void {
-                  std::invoke(callback, make_error_code(xdr_errc::decoding_error));
-                },
-                std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
-          },
-          temporary_with_spec<std::uint32_t, xdr_uint32_t>(xdr_uint32)));
+  if constexpr(sizeof...(Specs) == 0) {
+    return add_raw(std::move(x),
+        make_decoder(
+            [v](const auto& temporary, auto& stream, auto callback) {
+              apply_index_sequence_(
+                  temporary.value,
+                  [&](auto integral_constant) -> void {
+                    v.value.template emplace<integral_constant()>(); // Default constructor.
+                    async_read(
+                        stream,
+                        xdr<xdr_reader::reader<>>() & std::get<integral_constant()>(v.value),
+                        std::move(callback));
+                  },
+                  [&]() -> void {
+                    std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+                  },
+                  std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
+            },
+            temporary_with_spec<std::uint32_t, xdr_uint32_t>(xdr_uint32)));
+  } else {
+    return add_raw(std::move(x),
+        make_decoder(
+            [v](const auto& temporary, auto& stream, auto callback) {
+              apply_index_sequence_(
+                  temporary.value,
+                  [&](auto integral_constant) -> void {
+                    v.value.template emplace<integral_constant()>(); // Default constructor.
+                    auto& spec = std::get<integral_constant()>(v.specs);
+                    async_read(
+                        stream,
+                        xdr<xdr_reader::reader<>>() & spec(std::get<integral_constant()>(v.value)),
+                        std::move(callback));
+                  },
+                  [&]() -> void {
+                    std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+                  },
+                  std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
+            },
+            temporary_with_spec<std::uint32_t, xdr_uint32_t>(xdr_uint32)));
+  }
 }
 
 template<typename... X, typename... T, typename... Specs>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<const std::variant<T...>, Specs...>& v) {
   using xdr_writer::make_encoder;
 
-  return add_raw(std::move(x) & xdr_getset<std::size_t>([v]() { return v.value.index(); }).as(xdr_uint32),
-      make_encoder(
-          [v](auto& stream, auto callback) {
-            if (v.value.valueless_by_exception()) [[unlikely]] {
-              std::invoke(callback, make_error_code(xdr_errc::encoding_error));
-              return;
-            }
+  if constexpr(sizeof...(Specs) == 0) {
+    return add_raw(std::move(x) & xdr_getset<std::size_t>([v]() { return v.value.index(); }).as(xdr_uint32),
+        make_encoder(
+            [v](auto& stream, auto callback) {
+              if (v.value.valueless_by_exception()) [[unlikely]] {
+                std::invoke(callback, make_error_code(xdr_errc::encoding_error));
+                return;
+              }
 
-            apply_index_sequence_(
-                v.value.index(),
-                [&](auto integral_constant) -> void {
-                  auto& spec = std::get<integral_constant()>(v.specs);
-                  async_write(
-                      stream,
-                      xdr<xdr_writer::writer<>>() & spec(std::get<integral_constant()>(v.value)),
-                      std::move(callback));
-                },
-                [&]() -> void {
-                  std::invoke(callback, make_error_code(xdr_errc::encoding_error));
-                },
-                std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
-          }));
+              std::visit(
+                  [&](const auto& value) -> void {
+                    async_write(
+                        stream,
+                        xdr<xdr_writer::writer<>>() & value,
+                        std::move(callback));
+                  },
+                  v.value);
+            }));
+  } else {
+    return add_raw(std::move(x) & xdr_getset<std::size_t>([v]() { return v.value.index(); }).as(xdr_uint32),
+        make_encoder(
+            [v](auto& stream, auto callback) {
+              if (v.value.valueless_by_exception()) [[unlikely]] {
+                std::invoke(callback, make_error_code(xdr_errc::encoding_error));
+                return;
+              }
+
+              apply_index_sequence_(
+                  v.value.index(),
+                  [&](auto integral_constant) -> void {
+                    auto& spec = std::get<integral_constant()>(v.specs);
+                    async_write(
+                        stream,
+                        xdr<xdr_writer::writer<>>() & spec(std::get<integral_constant()>(v.value)),
+                        std::move(callback));
+                  },
+                  [&]() -> void {
+                    std::invoke(callback, make_error_code(xdr_errc::encoding_error));
+                  },
+                  std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
+            }));
+  }
 }
 
 
 template<typename... X, typename... T, typename... Specs>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<std::variant<T...>, Specs...>& v) {
-  return std::move(x) & variant_holder<const std::variant<T...>, Specs...>{
-    .value = v.value,
-    .specs = v.specs
-  };
+  if constexpr(sizeof...(Specs) == 0) {
+    return std::move(x) & variant_holder<const std::variant<T...>>{
+      .value = v.value
+    };
+  } else {
+    return std::move(x) & variant_holder<const std::variant<T...>, Specs...>{
+      .value = v.value,
+      .specs = v.specs
+    };
+  }
 }
 
 

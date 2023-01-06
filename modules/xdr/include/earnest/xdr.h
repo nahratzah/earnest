@@ -14,6 +14,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #if __cpp_concepts >= 201907L
@@ -101,6 +102,10 @@ auto operator+(xdr<detail::xdr_reader::reader<X...>>&& x, xdr<detail::xdr_reader
 
 template<typename... X, typename... Y>
 auto operator+(xdr<detail::xdr_writer::writer<X...>>&& x, xdr<detail::xdr_writer::writer<Y...>>&& y) -> xdr<detail::xdr_writer::writer<X..., Y...>>;
+
+
+template<typename X>
+auto operator&(xdr<X>&& x, const std::monostate& ms) noexcept -> xdr<X>&&;
 
 
 } /* namespace earnest */
@@ -2427,15 +2432,6 @@ inline constexpr auto apply_index_sequence_(std::size_t idx, Fn&& fn, BadFn&& ba
 template<typename Fn, typename BadFn>
 inline constexpr auto apply_index_sequence_(std::size_t idx, Fn&& fn, BadFn&& bad_fn, std::index_sequence<> seq);
 
-
-template<typename... X, typename... T>
-auto operator&(xdr<xdr_reader::reader<X...>>&& x, const variant_holder<std::variant<T...>>& v);
-
-template<typename... X, typename... T>
-auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<const std::variant<T...>>& v);
-
-template<typename... X, typename... T>
-auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<std::variant<T...>>& v);
 
 template<typename... X, typename... T, typename... Specs>
 auto operator&(xdr<xdr_reader::reader<X...>>&& x, const variant_holder<std::variant<T...>, Specs...>& v);

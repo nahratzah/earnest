@@ -20,13 +20,14 @@
 namespace earnest::detail {
 
 
-template<typename Executor>
-inline wal_file_entry<Executor>::wal_file_entry(const executor_type& ex)
-: file(ex)
+template<typename Executor, typename Allocator>
+inline wal_file_entry<Executor, Allocator>::wal_file_entry(const executor_type& ex, allocator_type alloc)
+: file(ex),
+  alloc_(std::move(alloc))
 {}
 
-template<typename Executor>
-inline auto wal_file_entry<Executor>::header_reader_() {
+template<typename Executor, typename Allocator>
+inline auto wal_file_entry<Executor, Allocator>::header_reader_() {
   using namespace std::string_literals;
 
   return ::earnest::xdr_reader<>()
@@ -41,8 +42,8 @@ inline auto wal_file_entry<Executor>::header_reader_() {
       & xdr_uint64(sequence);
 }
 
-template<typename Executor>
-inline auto wal_file_entry<Executor>::header_writer_() const {
+template<typename Executor, typename Allocator>
+inline auto wal_file_entry<Executor, Allocator>::header_writer_() const {
   using namespace std::string_literals;
 
   return ::earnest::xdr_writer<>()
@@ -57,9 +58,44 @@ inline auto wal_file_entry<Executor>::header_writer_() const {
       & xdr_uint64(sequence);
 }
 
-template<typename Executor>
+template<typename Executor, typename Allocator>
+template<typename Stream, typename Callback>
+auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback callback) -> void {
+  link_offset_ = stream.position();
+  async_read(
+      stream,
+      ::earnest::xdr_reader<>() & xdr_getset<variant_type>(
+          [this](variant_type v) -> std::error_code {
+            try {
+              records_.push_back(std::move(v));
+            } catch (const std::bad_alloc&) {
+              return make_error_code(wal_errc::memory_exhausted);
+            }
+            return std::error_code();
+          }).as(xdr_variant),
+      completion_wrapper<void(std::error_code)>(
+          std::move(callback),
+          [this, &stream](auto& h, std::error_code ec) mutable {
+            write_offset_ = stream.position();
+
+            if (ec) {
+              std::invoke(h, ec);
+              return;
+            }
+
+            assert(!records_.empty());
+            if (records_.back().index() == 0) {
+              std::invoke(h, ec);
+              return;
+            }
+
+            read_records_(stream, std::move(h));
+          }));
+}
+
+template<typename Executor, typename Allocator>
 template<typename CompletionToken>
-inline auto wal_file_entry<Executor>::async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token) {
+inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token) {
   using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
 
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
@@ -88,13 +124,10 @@ inline auto wal_file_entry<Executor>::async_open(const dir& d, const std::filesy
 
         async_read(
             stream,
-            wf.header_reader_()
-            & xdr_manual(
+            wf.header_reader_() & xdr_manual(
                 [&wf](auto& stream, auto callback) {
-                  wf.link_offset_ = stream.position();
-                  std::invoke(callback, std::error_code());
-                })
-            & xdr_constant(false).as(xdr_bool), // XXX this bool should have a meaning!
+                  wf.read_records_(stream, std::move(callback));
+                }),
             completion_wrapper<void(std::error_code)>(
                 std::move(completion_handler),
                 [&wf, stream_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
@@ -106,9 +139,9 @@ inline auto wal_file_entry<Executor>::async_open(const dir& d, const std::filesy
       token, d, name, *this);
 }
 
-template<typename Executor>
+template<typename Executor, typename Allocator>
 template<typename CompletionToken>
-inline auto wal_file_entry<Executor>::async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token) {
+inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token) {
   using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
 
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
@@ -137,15 +170,20 @@ inline auto wal_file_entry<Executor>::async_create(const dir& d, const std::file
 
         wf.version = max_version;
         wf.sequence = sequence;
-        auto w = wf.header_writer_() & xdr_constant(false).as(xdr_bool);
-        wf.write_offset_ = decltype(w)::bytes.value();
         wf.link_offset_ = std::remove_cvref_t<decltype(wf.header_writer_())>::bytes.value();
 
         async_write(
-            stream, std::move(w),
+            stream,
+            wf.header_writer_() & xdr_constant(variant_type()).as(xdr_variant),
             completion_wrapper<void(std::error_code)>(
                 std::move(completion_handler),
-                [stream_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
+                [stream_ptr=std::move(s), &wf](auto& h, std::error_code ec) mutable {
+                  wf.write_offset_ = stream_ptr->position();
+
+                  // Create a single record.
+                  wf.records_.clear();
+                  wf.records_.emplace_back(std::in_place_index<0>);
+
                   stream_ptr.reset();
                   std::invoke(h, ec);
                 }));
@@ -153,13 +191,13 @@ inline auto wal_file_entry<Executor>::async_create(const dir& d, const std::file
       token, d, name, sequence, *this);
 }
 
-template<typename Executor>
-inline auto wal_file_entry<Executor>::write_offset() const noexcept -> typename fd<executor_type>::offset_type {
+template<typename Executor, typename Allocator>
+inline auto wal_file_entry<Executor, Allocator>::write_offset() const noexcept -> typename fd<executor_type>::offset_type {
   return write_offset_;
 }
 
-template<typename Executor>
-inline auto wal_file_entry<Executor>::link_offset() const noexcept -> typename fd<executor_type>::offset_type {
+template<typename Executor, typename Allocator>
+inline auto wal_file_entry<Executor, Allocator>::link_offset() const noexcept -> typename fd<executor_type>::offset_type {
   return link_offset_;
 }
 

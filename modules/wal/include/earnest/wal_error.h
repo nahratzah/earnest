@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <system_error>
 
 
@@ -8,6 +9,7 @@ namespace earnest {
 
 enum class wal_errc {
   bad_version,
+  memory_exhausted
 };
 
 auto earnest_category() -> const std::error_category& {
@@ -22,11 +24,15 @@ auto earnest_category() -> const std::error_category& {
     }
 
     auto message(int condition) const -> std::string override {
+      using namespace std::string_literals;
+
       switch (static_cast<wal_errc>(condition)) {
         default:
-          return "unrecognized condition";
+          return "unrecognized condition"s;
         case wal_errc::bad_version:
-          return "bad WAL version";
+          return "bad WAL version"s;
+        case wal_errc::memory_exhausted:
+          return "WAL memory exhausted"s;
       }
     }
   };

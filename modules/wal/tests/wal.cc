@@ -33,7 +33,7 @@ auto hex_string(std::string_view sv) -> std::string {
 
 TEST(read_empty_wal_file_entry) {
   asio::io_context ioctx;
-  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type>(ioctx.get_executor());
+  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
   f.async_open(source_files, "empty",
       [](std::error_code ec) {
         CHECK(ec);
@@ -43,7 +43,7 @@ TEST(read_empty_wal_file_entry) {
 
 TEST(read_wal_file_entry) {
   asio::io_context ioctx;
-  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type>(ioctx.get_executor());
+  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
   f.async_open(source_files, "version_0",
       [](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
@@ -54,6 +54,9 @@ TEST(read_wal_file_entry) {
   CHECK_EQUAL(17, f.sequence);
   CHECK_EQUAL(32, f.write_offset());
   CHECK_EQUAL(28, f.link_offset());
+
+  REQUIRE CHECK(!f.records().empty());
+  CHECK_EQUAL(0, f.records().back().index());
 }
 
 TEST(write_wal_file_entry) {
@@ -63,7 +66,7 @@ TEST(write_wal_file_entry) {
   write_dir.erase("wal_19");
 
   asio::io_context ioctx;
-  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type>(ioctx.get_executor());
+  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
   f.async_create(write_dir, "wal_19", 19,
       [](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
@@ -71,7 +74,9 @@ TEST(write_wal_file_entry) {
   ioctx.run();
 
   CHECK(f.file.is_open());
-  CHECK_EQUAL(earnest::detail::wal_file_entry<asio::io_context::executor_type>::max_version, f.version);
+  CHECK_EQUAL(
+      (earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::max_version),
+      f.version);
   CHECK_EQUAL(19, f.sequence);
   CHECK_EQUAL(32, f.write_offset());
   CHECK_EQUAL(28, f.link_offset());
@@ -79,6 +84,9 @@ TEST(write_wal_file_entry) {
   CHECK_EQUAL(
       hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\023\000\000\000\000"s),
       hex_string(f.file.contents<std::string>()));
+
+  REQUIRE CHECK(!f.records().empty());
+  CHECK_EQUAL(0, f.records().back().index());
 }
 
 int main(int argc, char** argv) {

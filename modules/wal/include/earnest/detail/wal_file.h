@@ -2,11 +2,13 @@
 #define EARNEST_DETAIL_WAL_FILE_H
 
 #include <cassert>
-#include <type_traits>
-#include <memory>
+#include <filesystem>
 #include <list>
 #include <map>
-#include <filesystem>
+#include <memory>
+#include <scoped_allocator>
+#include <type_traits>
+#include <variant>
 
 #include <asio/async_result.hpp>
 #include <asio/executor.hpp>
@@ -20,14 +22,21 @@
 namespace earnest::detail {
 
 
-template<typename Executor>
+// XXX this will probably become a template
+using wal_record_variant = std::variant<std::monostate>;
+
+
+template<typename Executor, typename Allocator>
 class wal_file_entry {
   public:
   static inline constexpr std::uint_fast32_t max_version = 0;
   static inline constexpr std::size_t read_buffer_size = 2u * 1024u * 1024u;
   using executor_type = Executor;
+  using allocator_type = Allocator;
+  using variant_type = wal_record_variant;
+  using records_vector = std::vector<variant_type, typename std::allocator_traits<allocator_type>::template rebind_alloc<variant_type>>;
 
-  wal_file_entry(const executor_type& ex);
+  wal_file_entry(const executor_type& ex, allocator_type alloc);
 
   wal_file_entry(const wal_file_entry&) = delete;
   wal_file_entry(wal_file_entry&&) = delete;
@@ -35,7 +44,16 @@ class wal_file_entry {
   wal_file_entry& operator=(wal_file_entry&&) = delete;
 
   auto get_executor() const -> executor_type { return file.get_executor(); }
+  auto get_allocator() const -> allocator_type { return alloc_; }
 
+  private:
+  auto header_reader_();
+  auto header_writer_() const;
+
+  template<typename Stream, typename Callback>
+  auto read_records_(Stream& stream, Callback callback) -> void;
+
+  public:
   template<typename CompletionToken>
   auto async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token);
   template<typename CompletionToken>
@@ -43,20 +61,18 @@ class wal_file_entry {
 
   auto write_offset() const noexcept -> typename fd<executor_type>::offset_type;
   auto link_offset() const noexcept -> typename fd<executor_type>::offset_type;
+  auto records() const noexcept -> const records_vector& { return records_; }
 
-  private:
-  auto header_reader_();
-  auto header_writer_() const;
-
-  public:
   std::filesystem::path name;
   fd<executor_type> file;
   std::uint_fast32_t version;
   std::uint_fast64_t sequence;
 
   private:
+  allocator_type alloc_;
   typename fd<executor_type>::offset_type write_offset_;
   typename fd<executor_type>::offset_type link_offset_;
+  records_vector records_;
 };
 
 
@@ -72,8 +88,8 @@ class wal_file
   template<typename T>
   using rebind_alloc = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
 
-  using file_entry = wal_file_entry<executor_type>;
-  using files_list = std::list<file_entry, rebind_alloc<file_entry>>;
+  using file_entry = wal_file_entry<executor_type, allocator_type>;
+  using files_list = std::list<file_entry, std::scoped_allocator_adaptor<rebind_alloc<file_entry>>>;
 
   public:
   class tx;
