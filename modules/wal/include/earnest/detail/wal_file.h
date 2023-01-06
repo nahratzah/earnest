@@ -62,6 +62,7 @@ class wal_file_entry {
   auto write_offset() const noexcept -> typename fd<executor_type>::offset_type;
   auto link_offset() const noexcept -> typename fd<executor_type>::offset_type;
   auto records() const noexcept -> const records_vector& { return records_; }
+  auto has_unlinked_data() const -> bool;
 
   std::filesystem::path name;
   fd<executor_type> file;

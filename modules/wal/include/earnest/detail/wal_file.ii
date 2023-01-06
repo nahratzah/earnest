@@ -201,6 +201,11 @@ inline auto wal_file_entry<Executor, Allocator>::link_offset() const noexcept ->
   return link_offset_;
 }
 
+template<typename Executor, typename Allocator>
+inline auto wal_file_entry<Executor, Allocator>::has_unlinked_data() const -> bool {
+  return write_offset_ != file.size();
+}
+
 
 template<typename Executor, typename Alloc>
 wal_file<Executor, Alloc>::wal_file(const executor_type& ex, allocator_type alloc)
