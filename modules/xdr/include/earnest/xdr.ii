@@ -3778,24 +3778,151 @@ inline auto xdr_variant_t<>::of(Specs&&... specs) const -> xdr_variant_t<std::de
 }
 
 
-template<typename... X, typename Fn>
-inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, manual_holder<Fn> h) {
+template<typename Fn, typename Lead, typename LeadSpec, typename Temporary>
+template<typename NewTemporary, bool Enabled>
+inline auto manual_holder<Fn, Lead, LeadSpec, Temporary>::with_temporary() && -> std::enable_if_t<Enabled, manual_holder<Fn, Lead, LeadSpec, NewTemporary>> {
+  return manual_holder<Fn, Lead, LeadSpec, NewTemporary>{
+    .fn = std::move(fn),
+    .spec = std::move(spec)
+  };
+}
+
+template<typename Fn, typename Lead, typename LeadSpec, typename Temporary>
+template<typename NewTemporary, bool Enabled>
+inline auto manual_holder<Fn, Lead, LeadSpec, Temporary>::with_temporary() const & -> std::enable_if_t<Enabled, manual_holder<Fn, Lead, LeadSpec, NewTemporary>> {
+  return manual_holder<Fn, Lead, LeadSpec, NewTemporary>{
+    .fn = fn,
+    .spec = spec
+  };
+}
+
+template<typename Fn, typename LeadSpec, typename Temporary>
+template<typename NewLead, typename NewLeadSpec>
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec(NewLeadSpec lead_spec) && -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary> {
+  return manual_holder<Fn, NewLead, NewLeadSpec, Temporary>{
+    .fn = std::move(fn),
+    .spec = std::move(lead_spec)
+  };
+}
+
+template<typename Fn, typename LeadSpec, typename Temporary>
+template<typename NewLead, typename NewLeadSpec>
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec(NewLeadSpec lead_spec) const & -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary> {
+  return manual_holder<Fn, NewLead, NewLeadSpec, Temporary>{
+    .fn = fn,
+    .spec = lead_spec
+  };
+}
+
+template<typename Fn, typename LeadSpec, typename Temporary>
+template<typename NewLead>
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec() && -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary> {
+  return manual_holder<Fn, NewLead, xdr_identity_t, Temporary>{
+    .fn = std::move(fn),
+    .spec = xdr_identity
+  };
+}
+
+template<typename Fn, typename LeadSpec, typename Temporary>
+template<typename NewLead>
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec() const & -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary> {
+  return manual_holder<Fn, NewLead, xdr_identity_t, Temporary>{
+    .fn = fn,
+    .spec = xdr_identity
+  };
+}
+
+template<typename Fn, typename LeadSpec, typename Temporary>
+template<typename NewTemporary, bool Enabled>
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_temporary() && -> std::enable_if_t<Enabled, manual_holder<Fn, void, LeadSpec, NewTemporary>> {
+  return manual_holder<Fn, void, LeadSpec, NewTemporary>{
+    .fn = std::move(fn),
+    .spec = std::move(spec)
+  };
+}
+
+template<typename Fn, typename LeadSpec, typename Temporary>
+template<typename NewTemporary, bool Enabled>
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_temporary() const & -> std::enable_if_t<Enabled, manual_holder<Fn, void, LeadSpec, NewTemporary>> {
+  return manual_holder<Fn, void, LeadSpec, NewTemporary>{
+    .fn = fn,
+    .spec = spec
+  };
+}
+
+
+template<typename... X, typename Fn, typename Lead, typename LeadSpec, typename Temporary>
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, manual_holder<Fn, Lead, LeadSpec, Temporary> h) {
   using xdr_writer::make_encoder;
 
-  return add_raw(std::move(x), make_encoder(std::move(h.fn)));
+  static_assert(std::is_void_v<Lead>, "encoders cannot have a lead type");
+  return add_raw(std::move(x), make_encoder<Temporary>(std::move(h.fn)));
 }
 
-template<typename... X, typename Fn>
-inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, manual_holder<Fn> h) {
+template<typename... X, typename Fn, typename Lead, typename LeadSpec, typename Temporary>
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, manual_holder<Fn, Lead, LeadSpec, Temporary> h) {
   using xdr_reader::make_decoder;
 
-  return add_raw(std::move(x), make_decoder<void>(std::move(h.fn)));
+  if constexpr(std::is_void_v<Lead>) {
+    return add_raw(std::move(x), make_decoder<void, Temporary>(std::move(h.fn)));
+  } else {
+    return add_raw(std::move(x), make_decoder<temporary_with_spec<Lead, LeadSpec>>(
+            [fn=std::move(h.fn)]<typename... Args>(temporary_with_spec<Lead, LeadSpec>& tmp, Args&&... args) mutable {
+              std::invoke(tmp.value, std::forward<Args>(args)...);
+            },
+            temporary_with_spec<Lead, LeadSpec>(std::move(h.lead_spec))));
+  }
 }
 
+
+template<typename Lead, typename LeadSpec, typename Temporary>
 template<typename Fn>
-inline auto xdr_manual_t::operator()(Fn&& fn) const -> manual_holder<std::decay_t<Fn>> {
-  return manual_holder<std::decay_t<Fn>>{
-    .fn = std::forward<Fn>(fn)
+inline auto xdr_manual_t<Lead, LeadSpec, Temporary>::operator()(Fn&& fn) const -> manual_holder<std::decay_t<Fn>, Lead, LeadSpec, Temporary> {
+  return manual_holder<std::decay_t<Fn>, Lead, LeadSpec, Temporary>{
+    .fn = std::forward<Fn>(fn),
+    .spec = lead_spec
+  };
+}
+
+template<typename Lead, typename LeadSpec, typename Temporary>
+template<typename NewTemporary, bool Enabled>
+inline auto xdr_manual_t<Lead, LeadSpec, Temporary>::with_temporary() const -> std::enable_if_t<Enabled, xdr_manual_t<Lead, LeadSpec, NewTemporary>> {
+  return xdr_manual_t<Lead, LeadSpec, NewTemporary>{
+    .lead_spec = lead_spec
+  };
+}
+
+
+template<typename LeadSpec, typename Temporary>
+template<typename Fn>
+inline auto xdr_manual_t<void, LeadSpec, Temporary>::operator()(Fn&& fn) const -> manual_holder<std::decay_t<Fn>, void, LeadSpec, Temporary> {
+  return manual_holder<std::decay_t<Fn>, void, LeadSpec, Temporary>{
+    .fn = std::forward<Fn>(fn),
+    .spec = lead_spec
+  };
+}
+
+template<typename LeadSpec, typename Temporary>
+template<typename NewLead, typename NewLeadSpec>
+inline auto xdr_manual_t<void, LeadSpec, Temporary>::with_lead(NewLeadSpec spec) const -> xdr_manual_t<NewLead, std::decay_t<NewLeadSpec>, Temporary> {
+  return xdr_manual_t<NewLead, NewLeadSpec, Temporary>{
+    .lead_spec = std::move(spec)
+  };
+}
+
+template<typename LeadSpec, typename Temporary>
+template<typename NewLead>
+inline auto xdr_manual_t<void, LeadSpec, Temporary>::with_lead() const -> xdr_manual_t<NewLead, xdr_identity_t, Temporary> {
+  return xdr_manual_t<NewLead, xdr_identity_t, Temporary>{
+    .lead_spec = xdr_identity
+  };
+}
+
+template<typename LeadSpec, typename Temporary>
+template<typename NewTemporary, bool Enabled>
+inline auto xdr_manual_t<void, LeadSpec, Temporary>::with_temporary() const -> std::enable_if_t<Enabled, xdr_manual_t<void, LeadSpec, NewTemporary>> {
+  return xdr_manual_t<void, LeadSpec, NewTemporary>{
+    .lead_spec = lead_spec
   };
 }
 

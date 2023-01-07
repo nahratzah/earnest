@@ -2492,24 +2492,72 @@ inline constexpr xdr_variant_t<> xdr_variant;
 // Manual decoding
 // ------------------------------------------------------------------------
 
-template<typename Fn>
+template<typename Fn, typename Lead, typename LeadSpec, typename Temporary>
 struct manual_holder {
   Fn fn;
+  LeadSpec spec;
+
+  template<typename NewTemporary, bool Enabled = std::is_void_v<Temporary>>
+  auto with_temporary() && -> std::enable_if_t<Enabled, manual_holder<Fn, Lead, LeadSpec, NewTemporary>>;
+  template<typename NewTemporary, bool Enabled = std::is_void_v<Temporary>>
+  auto with_temporary() const & -> std::enable_if_t<Enabled, manual_holder<Fn, Lead, LeadSpec, NewTemporary>>;
 };
 
-template<typename... X, typename Fn>
-auto operator&(xdr<xdr_writer::writer<X...>>&& x, manual_holder<Fn> h);
+template<typename Fn, typename LeadSpec, typename Temporary>
+struct manual_holder<Fn, void, LeadSpec, Temporary> {
+  Fn fn;
+  LeadSpec spec;
 
-template<typename... X, typename Fn>
-auto operator&(xdr<xdr_reader::reader<X...>>&& x, manual_holder<Fn> h);
+  template<typename NewLead, typename NewLeadSpec>
+  auto with_spec(NewLeadSpec lead_spec) && -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary>;
+  template<typename NewLead, typename NewLeadSpec>
+  auto with_spec(NewLeadSpec lead_spec) const & -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary>;
+  template<typename NewLead>
+  auto with_spec() && -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary>;
+  template<typename NewLead>
+  auto with_spec() const & -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary>;
 
+  template<typename NewTemporary, bool Enabled = std::is_void_v<Temporary>>
+  auto with_temporary() && -> std::enable_if_t<Enabled, manual_holder<Fn, void, LeadSpec, NewTemporary>>;
+  template<typename NewTemporary, bool Enabled = std::is_void_v<Temporary>>
+  auto with_temporary() const & -> std::enable_if_t<Enabled, manual_holder<Fn, void, LeadSpec, NewTemporary>>;
+};
+
+template<typename... X, typename Fn, typename Lead, typename LeadSpec, typename Temporary>
+auto operator&(xdr<xdr_writer::writer<X...>>&& x, manual_holder<Fn, Lead, LeadSpec, Temporary> h);
+
+template<typename... X, typename Fn, typename Lead, typename LeadSpec, typename Temporary>
+auto operator&(xdr<xdr_reader::reader<X...>>&& x, manual_holder<Fn, Lead, LeadSpec, Temporary> h);
+
+template<typename Lead, typename LeadSpec, typename Temporary>
 struct xdr_manual_t {
   template<typename Fn>
-  auto operator()(Fn&& fn) const -> manual_holder<std::decay_t<Fn>>;
+  auto operator()(Fn&& fn) const -> manual_holder<std::decay_t<Fn>, Lead, LeadSpec, Temporary>;
+
+  template<typename NewTemporary, bool Enabled = std::is_void_v<Temporary>>
+  auto with_temporary() const -> std::enable_if_t<Enabled, xdr_manual_t<Lead, LeadSpec, NewTemporary>>;
+
+  LeadSpec lead_spec;
+};
+
+template<typename LeadSpec, typename Temporary>
+struct xdr_manual_t<void, LeadSpec, Temporary> {
+  template<typename Fn>
+  auto operator()(Fn&& fn) const -> manual_holder<std::decay_t<Fn>, void, LeadSpec, Temporary>;
+
+  template<typename NewLead, typename NewLeadSpec>
+  auto with_lead(NewLeadSpec spec) const -> xdr_manual_t<NewLead, std::decay_t<NewLeadSpec>, Temporary>;
+  template<typename NewLead>
+  auto with_lead() const -> xdr_manual_t<NewLead, xdr_identity_t, Temporary>;
+
+  template<typename NewTemporary, bool Enabled = std::is_void_v<Temporary>>
+  auto with_temporary() const -> std::enable_if_t<Enabled, xdr_manual_t<void, LeadSpec, NewTemporary>>;
+
+  LeadSpec lead_spec;
 };
 
 
-inline constexpr xdr_manual_t xdr_manual;
+inline constexpr xdr_manual_t<void, xdr_identity_t, void> xdr_manual{ .lead_spec = xdr_identity };
 
 
 } /* namespace earnest::detail::xdr_types */

@@ -31,80 +31,76 @@ inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_noop& noop) 
 
 template<typename... X>
 inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip32& skip) {
-  return std::move(x) & xdr_uint32(skip.bytes) & xdr_manual([&skip](auto& stream, auto callback) {
+  return std::move(x) & xdr_uint32(skip.bytes) & xdr_manual(
+      [&skip](auto& stream, auto callback, [[maybe_unused]] std::string& s) {
         if constexpr(requires { stream.skip(skip.bytes); }) {
           stream.skip(skip.bytes);
           std::invoke(callback, std::error_code());
         } else {
-          std::string s(skip.bytes, '\0');
-          auto buf = asio::buffer(s);
+          s.resize(skip.bytes, '\0');
           asio::async_read(
               stream,
-              buf,
-              [s=std::move(s), callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-                assert(ec || s.size() == nbytes);
+              asio::buffer(s),
+              [callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
                 std::invoke(callback, ec);
               });
         }
-      });
+      }).template with_temporary<std::string>();
 }
 
 template<typename... X>
 inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip32& skip) {
-  return std::move(x) & xdr_uint32(skip.bytes) & xdr_manual([&skip](auto& stream, auto callback) {
+  return std::move(x) & xdr_uint32(skip.bytes) & xdr_manual(
+      [&skip](auto& stream, auto callback, [[maybe_unused]] std::string& s) {
         if constexpr(requires { stream.skip(skip.bytes); }) {
           stream.skip(skip.bytes);
         } else {
-          std::string s(skip.bytes, '\0');
-          auto buf = asio::buffer(s);
+          s.resize(skip.bytes, '\0');
           asio::async_write(
               stream,
-              buf,
-              [s=std::move(s), callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-                assert(ec || s.size() == nbytes);
+              asio::buffer(s),
+              [callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
                 std::invoke(callback, ec);
               });
         }
-      });
+      }).template with_temporary<std::string>();
 }
 
 template<typename... X>
 inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip64& skip) {
-  return std::move(x) & xdr_uint64(skip.bytes) & xdr_manual([&skip](auto& stream, auto callback) {
+  return std::move(x) & xdr_uint64(skip.bytes) & xdr_manual(
+      [&skip](auto& stream, auto callback, [[maybe_unused]] std::string& s) {
         if constexpr(requires { stream.skip(skip.bytes); }) {
           stream.skip(skip.bytes);
           std::invoke(callback, std::error_code());
         } else {
-          std::string s(skip.bytes, '\0');
-          auto buf = asio::buffer(s);
+          s.resize(skip.bytes, '\0');
           asio::async_read(
               stream,
-              buf,
-              [s=std::move(s), callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-                assert(ec || s.size() == nbytes);
+              asio::buffer(s),
+              [callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
                 std::invoke(callback, ec);
               });
         }
-      });
+      }).template with_temporary<std::string>();
 }
 
 template<typename... X>
 inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip64& skip) {
-  return std::move(x) & xdr_uint64(skip.bytes) & xdr_manual([&skip](auto& stream, auto callback) {
+  return std::move(x) & xdr_uint64(skip.bytes) & xdr_manual(
+      [&skip](auto& stream, auto callback, [[maybe_unused]] std::string& s) {
         if constexpr(requires { stream.skip(skip.bytes); }) {
           stream.skip(skip.bytes);
         } else {
-          std::string s(skip.bytes, '\0');
-          auto buf = asio::buffer(s);
+          s.resize(skip.bytes, '\0');
           asio::async_write(
               stream,
-              buf,
-              [s=std::move(s), callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-                assert(ec || s.size() == nbytes);
+              asio::buffer(s),
+              [callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
                 std::invoke(callback, ec);
               });
         }
-      });
+      }).template with_temporary<std::string>();
 }
 
 
