@@ -1,30 +1,146 @@
 #ifndef EARNEST_DETAIL_WAL_FILE_INL_H
 #define EARNEST_DETAIL_WAL_FILE_INL_H
 
+#include <algorithm>
 #include <functional>
 #include <unordered_map>
 
 #include <earnest/detail/completion_barrier.h>
+#include <earnest/detail/fanout.h>
 #include <earnest/detail/positional_stream_adapter.h>
 #include <earnest/detail/completion_wrapper.h>
+#include <earnest/detail/byte_stream.h>
 #include <earnest/wal_error.h>
-#include <earnest/xdr.h>
 
 #include <asio/associated_allocator.hpp>
 #include <asio/associated_executor.hpp>
 #include <asio/bind_allocator.hpp>
 #include <asio/bind_executor.hpp>
-#include <asio/executor_work_guard.hpp>
 #include <asio/buffered_read_stream.hpp>
+#include <asio/executor_work_guard.hpp>
+#include <asio/write_at.hpp>
 
 namespace earnest::detail {
+
+
+template<typename X>
+inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_noop& noop) noexcept -> xdr<X>&& {
+  return std::move(x);
+}
+
+
+template<typename... X>
+inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip32& skip) {
+  return std::move(x) & xdr_uint32(skip.bytes) & xdr_manual([&skip](auto& stream, auto callback) {
+        if constexpr(requires { stream.skip(skip.bytes); }) {
+          stream.skip(skip.bytes);
+          std::invoke(callback, std::error_code());
+        } else {
+          std::string s(skip.bytes, '\0');
+          auto buf = asio::buffer(s);
+          asio::async_read(
+              stream,
+              buf,
+              [s=std::move(s), callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                assert(ec || s.size() == nbytes);
+                std::invoke(callback, ec);
+              });
+        }
+      });
+}
+
+template<typename... X>
+inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip32& skip) {
+  return std::move(x) & xdr_uint32(skip.bytes) & xdr_manual([&skip](auto& stream, auto callback) {
+        if constexpr(requires { stream.skip(skip.bytes); }) {
+          stream.skip(skip.bytes);
+        } else {
+          std::string s(skip.bytes, '\0');
+          auto buf = asio::buffer(s);
+          asio::async_write(
+              stream,
+              buf,
+              [s=std::move(s), callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                assert(ec || s.size() == nbytes);
+                std::invoke(callback, ec);
+              });
+        }
+      });
+}
+
+template<typename... X>
+inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip64& skip) {
+  return std::move(x) & xdr_uint64(skip.bytes) & xdr_manual([&skip](auto& stream, auto callback) {
+        if constexpr(requires { stream.skip(skip.bytes); }) {
+          stream.skip(skip.bytes);
+          std::invoke(callback, std::error_code());
+        } else {
+          std::string s(skip.bytes, '\0');
+          auto buf = asio::buffer(s);
+          asio::async_read(
+              stream,
+              buf,
+              [s=std::move(s), callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                assert(ec || s.size() == nbytes);
+                std::invoke(callback, ec);
+              });
+        }
+      });
+}
+
+template<typename... X>
+inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip64& skip) {
+  return std::move(x) & xdr_uint64(skip.bytes) & xdr_manual([&skip](auto& stream, auto callback) {
+        if constexpr(requires { stream.skip(skip.bytes); }) {
+          stream.skip(skip.bytes);
+        } else {
+          std::string s(skip.bytes, '\0');
+          auto buf = asio::buffer(s);
+          asio::async_write(
+              stream,
+              buf,
+              [s=std::move(s), callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                assert(ec || s.size() == nbytes);
+                std::invoke(callback, ec);
+              });
+        }
+      });
+}
+
+
+inline auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::ostream& {
+  using namespace std::literals;
+
+  switch (state) {
+    default:
+      out << "wal_file_entry_state{"sv << static_cast<std::underlying_type_t<wal_file_entry_state>>(state) << "}"sv;
+      break;
+    case wal_file_entry_state::uninitialized:
+      out << "wal_file_entry_state{uninitialized}"sv;
+      break;
+    case wal_file_entry_state::opening:
+      out << "wal_file_entry_state{opening}"sv;
+      break;
+    case wal_file_entry_state::ready:
+      out << "wal_file_entry_state{ready}"sv;
+      break;
+    case wal_file_entry_state::failed:
+      out << "wal_file_entry_state{failed}"sv;
+      break;
+  }
+  return out;
+}
 
 
 template<typename Executor, typename Allocator>
 inline wal_file_entry<Executor, Allocator>::wal_file_entry(const executor_type& ex, allocator_type alloc)
 : file(ex),
-  alloc_(std::move(alloc))
-{}
+  records_(std::move(alloc)),
+  strand_(ex),
+  link_done_event_(ex, alloc)
+{
+  link_done_event_(std::error_code()); // Start out in the up-to-date state.
+}
 
 template<typename Executor, typename Allocator>
 inline auto wal_file_entry<Executor, Allocator>::header_reader_() {
@@ -95,46 +211,114 @@ auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback
 
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
+inline auto wal_file_entry<Executor, Allocator>::write_records_to_buffer_(write_records_vector&& records, CompletionToken&& token) const {
+  using byte_vector = std::vector<std::byte, rebind_alloc<std::byte>>;
+  using byte_stream = byte_stream<executor_type, rebind_alloc<std::byte>>;
+
+  return asio::async_initiate<CompletionToken, void(std::error_code, byte_vector)>(
+      [this](auto completion_handler, write_records_vector&& records) {
+        auto ex = asio::make_work_guard(asio::get_associated_executor(completion_handler, get_executor()));
+
+        auto state_ptr = std::make_unique<std::tuple<byte_stream, const write_records_vector, decltype(completion_handler), decltype(ex)>>(
+            byte_stream(get_executor(), get_allocator()),
+            std::move(records),
+            std::move(completion_handler),
+            std::move(ex));
+        auto& state_ref = *state_ptr;
+
+        write_records_to_buffer_iter_(std::move(state_ptr),
+            std::get<1>(state_ref).begin(), std::get<1>(state_ref).end(), std::error_code());
+      },
+      token, std::move(records));
+}
+
+template<typename Executor, typename Allocator>
+template<typename State>
+inline auto wal_file_entry<Executor, Allocator>::write_records_to_buffer_iter_(std::unique_ptr<State> state_ptr, typename write_records_vector::const_iterator b, typename write_records_vector::const_iterator e, std::error_code ec) -> void {
+  if (b == e || ec) { // Invoke completion handler.
+    auto ex = std::get<3>(*state_ptr).get_executor();
+    auto alloc = asio::get_associated_allocator(std::get<2>(*state_ptr));
+    ex.post(
+        [state_ptr=std::move(state_ptr), ec]() mutable {
+          std::invoke(std::get<2>(*state_ptr), ec, std::get<0>(std::move(*state_ptr)).data());
+        },
+        alloc);
+    return;
+  }
+
+  auto& stream = std::get<0>(*state_ptr);
+  async_write(
+      stream,
+      ::earnest::xdr_writer<>() & xdr_variant(*b),
+      [state_ptr=std::move(state_ptr), b=std::next(b), e](std::error_code ec) mutable {
+        write_records_to_buffer_iter_(std::move(state_ptr), b, e, ec);
+      });
+}
+
+template<typename Executor, typename Allocator>
+template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token) {
   using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
 
+  if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, const dir& d, const std::filesystem::path& name, wal_file_entry& wf) {
-        if (wf.file.is_open()) throw std::logic_error("wal is already open");
-        if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
+        asio::dispatch(
+            wf.strand_,
+            [completion_handler=std::move(completion_handler), d, name, &wf]() {
+              {
+                std::error_code ec;
+                if (wf.state_ == wal_file_entry_state::uninitialized) [[likely]] {
+                  if (wf.file.is_open()) throw std::logic_error("wal is already open");
+                  wf.state_ = wal_file_entry_state::opening;
+                } else {
+                  ec = make_error_code(wal_errc::bad_state);
+                }
 
-        {
-          std::error_code ec;
-          wf.file.open(d, name, fd<executor_type>::READ_WRITE, ec);
-          if (ec) {
-            auto ex = asio::get_associated_executor(completion_handler, wf.get_executor());
-            auto alloc = asio::get_associated_allocator(completion_handler);
-            ex.post(
-                completion_wrapper<void()>(
-                    std::move(completion_handler),
-                    [ec](auto h) { std::invoke(h, ec); }),
-                alloc);
-            return;
-          }
-          wf.name = name;
-        }
+                if (!ec) {
+                  wf.file.open(d, name, fd<executor_type>::READ_WRITE, ec);
+                  if (ec) wf.state_ = wal_file_entry_state::uninitialized;
+                }
 
-        std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf.file);
-        auto& stream = *s;
+                if (ec) {
+                  auto ex = asio::get_associated_executor(completion_handler, wf.get_executor());
+                  auto alloc = asio::get_associated_allocator(completion_handler);
+                  ex.post(
+                      completion_wrapper<void()>(
+                          std::move(completion_handler),
+                          [ec](auto h) { std::invoke(h, ec); }),
+                      alloc);
+                  return;
+                }
+                wf.name = name;
+              }
 
-        async_read(
-            stream,
-            wf.header_reader_() & xdr_manual(
-                [&wf](auto& stream, auto callback) {
-                  wf.read_records_(stream, std::move(callback));
-                }),
-            completion_wrapper<void(std::error_code)>(
-                std::move(completion_handler),
-                [&wf, stream_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
-                  wf.write_offset_ = stream_ptr->position();
-                  stream_ptr.reset();
-                  std::invoke(h, ec);
-                }));
+              std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf.file);
+              auto& stream = *s;
+
+              async_read(
+                  stream,
+                  wf.header_reader_() & xdr_manual(
+                      [&wf](auto& stream, auto callback) {
+                        wf.read_records_(stream, std::move(callback));
+                      }),
+                  completion_wrapper<void(std::error_code)>(
+                      std::move(completion_handler),
+                      [&wf, stream_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
+                        assert(wf.state_ == wal_file_entry_state::opening);
+
+                        wf.write_offset_ = stream_ptr->position();
+                        stream_ptr.reset();
+                        if (ec) {
+                          wf.state_ = wal_file_entry_state::uninitialized;
+                          wf.file.close();
+                        } else {
+                          wf.state_ = wal_file_entry_state::ready;
+                        }
+
+                        std::invoke(h, ec);
+                      }));
+            });
       },
       token, d, name, *this);
 }
@@ -144,51 +328,96 @@ template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token) {
   using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
 
+  if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, wal_file_entry& wf) {
-        if (wf.file.is_open()) throw std::logic_error("wal is already open");
-        if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
+        asio::dispatch(
+            wf.strand_,
+            [completion_handler=std::move(completion_handler), d, name, sequence, &wf]() {
+              {
+                std::error_code ec;
+                if (wf.state_ == wal_file_entry_state::uninitialized) [[likely]] {
+                  if (wf.file.is_open()) throw std::logic_error("wal is already open");
+                  wf.state_ = wal_file_entry_state::opening;
+                } else {
+                  ec = make_error_code(wal_errc::bad_state);
+                }
 
-        {
-          std::error_code ec;
-          wf.file.create(d, name, ec);
-          if (ec) {
-            auto ex = asio::get_associated_executor(completion_handler, wf.get_executor());
-            auto alloc = asio::get_associated_allocator(completion_handler);
-            ex.post(
-                completion_wrapper<void()>(
-                    std::move(completion_handler),
-                    [ec](auto h) { std::invoke(h, ec); }),
-                alloc);
-            return;
-          }
-          wf.name = name;
-        }
+                if (!ec) {
+                  wf.file.create(d, name, ec);
+                  if (ec) wf.state_ = wal_file_entry_state::uninitialized;
+                }
 
-        std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf.file);
-        auto& stream = *s;
+                if (ec) {
+                  auto ex = asio::get_associated_executor(completion_handler, wf.get_executor());
+                  auto alloc = asio::get_associated_allocator(completion_handler);
+                  ex.post(
+                      completion_wrapper<void()>(
+                          std::move(completion_handler),
+                          [ec](auto h) { std::invoke(h, ec); }),
+                      alloc);
+                  return;
+                }
+                wf.name = name;
+              }
 
-        wf.version = max_version;
-        wf.sequence = sequence;
-        wf.link_offset_ = std::remove_cvref_t<decltype(wf.header_writer_())>::bytes.value();
+              std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf.file);
+              auto& stream = *s;
 
-        async_write(
-            stream,
-            wf.header_writer_() & xdr_constant(variant_type()).as(xdr_variant),
-            completion_wrapper<void(std::error_code)>(
-                std::move(completion_handler),
-                [stream_ptr=std::move(s), &wf](auto& h, std::error_code ec) mutable {
-                  wf.write_offset_ = stream_ptr->position();
+              wf.version = max_version;
+              wf.sequence = sequence;
+              wf.link_offset_ = std::remove_cvref_t<decltype(wf.header_writer_())>::bytes.value();
 
-                  // Create a single record.
-                  wf.records_.clear();
-                  wf.records_.emplace_back(std::in_place_index<0>);
+              async_write(
+                  stream,
+                  wf.header_writer_() & xdr_constant(variant_type()).as(xdr_variant),
+                  completion_wrapper<void(std::error_code)>(
+                      std::move(completion_handler),
+                      [stream_ptr=std::move(s), &wf](auto& h, std::error_code ec) mutable {
+                        assert(wf.state_ == wal_file_entry_state::opening);
 
-                  stream_ptr.reset();
-                  std::invoke(h, ec);
-                }));
+                        // Create a single record.
+                        wf.records_.clear();
+                        wf.records_.emplace_back(std::in_place_index<0>);
+
+                        wf.write_offset_ = stream_ptr->position();
+                        stream_ptr.reset();
+                        if (ec) {
+                          wf.state_ = wal_file_entry_state::uninitialized;
+                          wf.file.close();
+                        } else {
+                          wf.state_ = wal_file_entry_state::ready;
+                        }
+
+                        std::invoke(h, ec);
+                      }));
+            });
       },
       token, d, name, sequence, *this);
+}
+
+template<typename Executor, typename Allocator>
+template<typename Range, typename CompletionToken>
+#if __cpp_concepts >= 201907L
+requires std::ranges::input_range<std::remove_reference_t<Range>>
+#endif
+inline auto wal_file_entry<Executor, Allocator>::async_append(Range&& records, CompletionToken&& token) {
+  return asio::async_initiate<CompletionToken, void(std::error_code)>(
+      [](auto completion_handler, write_records_vector&& records, wal_file_entry& wf) {
+        wf.write_records_to_buffer_(std::move(records),
+            asio::bind_executor(
+                wf.strand_,
+                asio::bind_allocator(
+                    wf.get_allocator(),
+                    [ &wf,
+                      completion_handler=std::move(completion_handler)
+                    ](std::error_code ec, auto byte_vector) mutable {
+                      wf.append_bytes_(std::move(byte_vector), std::move(completion_handler), ec);
+                    })));
+      },
+      token,
+      write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()),
+      *this);
 }
 
 template<typename Executor, typename Allocator>
@@ -204,6 +433,167 @@ inline auto wal_file_entry<Executor, Allocator>::link_offset() const noexcept ->
 template<typename Executor, typename Allocator>
 inline auto wal_file_entry<Executor, Allocator>::has_unlinked_data() const -> bool {
   return write_offset_ != file.size();
+}
+
+template<typename Executor, typename Allocator>
+template<typename CompletionToken>
+inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, std::error_code ec) {
+  return asio::async_initiate<CompletionToken, void(std::error_code)>(
+      [this](auto completion_handler, std::vector<std::byte, rebind_alloc<std::byte>> bytes, std::error_code ec) {
+        // Validate we have the right state to do writes.
+        if (!ec) [[likely]] {
+          if (state_ != wal_file_entry_state::ready) [[unlikely]]
+            ec = make_error_code(wal_errc::bad_state);
+        }
+        // Grow the file with new space.
+        if (!ec && !bytes.empty()) [[likely]] {
+          assert(bytes.size() >= 4u);
+          file.truncate(write_offset_ + bytes.size(), ec);
+        }
+
+        // If there were any failures, short-circuit before making changes.
+        // Also short-circuit if we are not going to write anything.
+        if (ec || bytes.empty()) [[unlikely]] {
+          auto ex = asio::get_associated_executor(completion_handler, get_executor());
+          auto alloc = asio::get_associated_allocator(completion_handler);
+          ex.post(
+              completion_wrapper<void()>(
+                  std::move(completion_handler),
+                  [ec](auto h) { std::invoke(h, ec); }),
+              alloc);
+          return;
+        }
+
+        assert(bytes.size() >= 4u);
+
+        // Create the next link fanout event.
+        // We create a barrier that'll receive completion.
+        auto f = fanout<executor_type, void(std::error_code), allocator_type>(get_executor(), get_allocator());
+        auto barrier = completion_barrier<decltype(f), executor_type>(f, get_executor());
+        link_done_event_.async_on_ready(++barrier);
+
+        const auto bytes_size = bytes.size();
+        append_bytes_at_(link_offset_, write_offset_, std::move(bytes), std::move(completion_handler), std::move(barrier), f);
+
+        // Update offsets.
+        link_done_event_ = std::move(f); // Never throws.
+        write_offset_ += bytes_size; // Never throws.
+        link_offset_ += bytes_size; // Never throws.
+      },
+      token, std::move(bytes), ec);
+}
+
+template<typename Executor, typename Allocator>
+template<typename CompletionToken, typename Barrier, typename Fanout>
+inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
+    typename fd<executor_type>::offset_type link_offset,
+    typename fd<executor_type>::offset_type write_offset,
+    std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, Barrier&& barrier, Fanout&& f) {
+  return asio::async_initiate<CompletionToken, void(std::error_code)>(
+      [this](auto completion_handler, auto link_offset, auto write_offset, std::vector<std::byte, rebind_alloc<std::byte>> bytes, Barrier&& barrier, Fanout&& f) {
+        auto bytes_buf = asio::buffer(bytes);
+        asio::async_write_at(
+            file,
+            write_offset,
+            bytes_buf + 4u,
+            [ this, link_offset, write_offset,
+              completion_handler=std::move(completion_handler),
+              bytes=std::move(bytes),
+              barrier=std::forward<Barrier>(barrier),
+              f=std::forward<Fanout>(f)
+            ](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+              if (ec) {
+                write_skip_record_(link_offset, write_offset, bytes.size() - 4u,
+                    std::move(barrier));
+
+                // Complete the callback, since we know the error-code of its failure.
+                auto ex = asio::get_associated_executor(completion_handler, get_executor());
+                auto alloc = asio::get_associated_allocator(completion_handler);
+                ex.dispatch(
+                    [h=std::move(completion_handler), ec]() mutable {
+                      std::invoke(h, ec);
+                    },
+                    std::move(alloc));
+              } else {
+                f.async_on_ready(std::move(completion_handler));
+                write_link_(link_offset,
+                    std::array<std::byte, 4>{ bytes[0], bytes[1], bytes[2], bytes[3] },
+                    std::move(barrier));
+              }
+            });
+      },
+      token, link_offset, write_offset, std::move(bytes), std::forward<Barrier>(barrier), std::forward<Fanout>(f));
+}
+
+template<typename Executor, typename Allocator>
+template<typename CompletionToken>
+inline auto wal_file_entry<Executor, Allocator>::write_skip_record_(
+    typename fd<executor_type>::offset_type link_offset,
+    typename fd<executor_type>::offset_type write_offset,
+    std::size_t bytes, CompletionToken&& token) {
+  if (bytes == 0) {
+    auto skip_record = std::array<std::byte, 4>{ std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01} };
+    return write_link_(link_offset, std::move(skip_record), std::forward<CompletionToken>(token));
+  }
+
+  assert(bytes >= 4u);
+  return asio::async_initiate<CompletionToken, void(std::error_code)>(
+      [this](auto completion_handler, auto link_offset, auto write_offset, std::size_t bytes) {
+        using pos_stream = positional_stream_adapter<fd<executor_type>&>;
+
+        std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(file, write_offset);
+        auto& stream = *s;
+
+        if (bytes - 4u <= 0xffff'ffffu) {
+          return async_write(
+              stream,
+              ::earnest::xdr_writer<>() & xdr_constant(bytes - 4u).as(xdr_uint32),
+              [ this, link_offset,
+                completion_handler=std::move(completion_handler),
+                stream_ptr=std::move(s)
+              ](std::error_code) mutable {
+                auto skip_bytes32_record = std::array<std::byte, 4>{ std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x02} };
+                write_link_(link_offset, std::move(skip_bytes32_record), std::move(completion_handler));
+              });
+        } else {
+          return async_write(
+              stream,
+              ::earnest::xdr_writer<>() & xdr_constant(bytes - 8u).as(xdr_uint64),
+              [ this, link_offset,
+                completion_handler=std::move(completion_handler),
+                stream_ptr=std::move(s)
+              ](std::error_code) mutable {
+                auto skip_bytes64_record = std::array<std::byte, 4>{ std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x03} };
+                write_link_(link_offset, std::move(skip_bytes64_record), std::move(completion_handler));
+              });
+        }
+      },
+      token, link_offset, write_offset, bytes);
+}
+
+template<typename Executor, typename Allocator>
+template<typename CompletionToken>
+inline auto wal_file_entry<Executor, Allocator>::write_link_(
+    typename fd<executor_type>::offset_type link_offset,
+    std::array<std::byte, 4> bytes, CompletionToken&& token) {
+  return asio::async_initiate<CompletionToken, void(std::error_code)>(
+      [this, link_offset, bytes](auto completion_handler) {
+        using pos_stream = positional_stream_adapter<fd<executor_type>&>;
+
+        std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(file, link_offset);
+        auto& stream = *s;
+
+        // XXX wait for a flush to complete!
+        async_write(
+            stream,
+            ::earnest::xdr_writer<>() & xdr_constant(bytes).as(xdr_raw_bytes<4>),
+            [ stream_ptr=std::move(s),
+              completion_handler=std::move(completion_handler)
+            ](std::error_code ec) mutable {
+              std::invoke(completion_handler, ec); // XXX don't invoke the handler until another flush completes!
+            });
+      },
+      token);
 }
 
 

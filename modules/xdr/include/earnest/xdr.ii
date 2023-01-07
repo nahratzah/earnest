@@ -1952,6 +1952,24 @@ inline auto xdr_raw_bytes_t<Bytes>::operator()(const std::basic_string<T, CharT,
 }
 
 template<std::size_t Bytes>
+template<typename T, std::size_t N>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_raw_bytes_t<Bytes>::operator()(std::array<T, N>& buf) const -> constant_size_mutable_buffer<Bytes> {
+  return (*this)(asio::buffer(buf));
+}
+
+template<std::size_t Bytes>
+template<typename T, std::size_t N>
+#if __cpp_concepts >= 201907L
+requires (std::is_pod_v<T>)
+#endif
+inline auto xdr_raw_bytes_t<Bytes>::operator()(const std::array<T, N>& buf) const -> constant_size_const_buffer<Bytes> {
+  return (*this)(asio::buffer(buf));
+}
+
+template<std::size_t Bytes>
 inline auto xdr_raw_bytes_t<Bytes>::operator()(asio::mutable_buffer buf) const -> constant_size_mutable_buffer<Bytes> {
   return constant_size_mutable_buffer<Bytes>(buf);
 }
@@ -3517,7 +3535,7 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_holder<T
 template<typename Spec>
 template<typename T>
 inline auto xdr_constant_t<Spec>::operator()(T&& v) const -> constant_holder<std::decay_t<T>> {
-  return constant_holder<T>{
+  return constant_holder<std::decay_t<T>>{
     .value = std::forward<T>(v),
     .spec = spec
   };
@@ -3525,7 +3543,7 @@ inline auto xdr_constant_t<Spec>::operator()(T&& v) const -> constant_holder<std
 
 template<typename T>
 inline auto xdr_constant_t<xdr_identity_t>::operator()(T&& v) const -> constant_holder<std::decay_t<T>> {
-  return constant_holder<T>{
+  return constant_holder<std::decay_t<T>>{
     .value = std::forward<T>(v),
     .spec = spec
   };

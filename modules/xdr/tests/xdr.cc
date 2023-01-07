@@ -1,5 +1,4 @@
 #include <earnest/xdr.h>
-#include "byte_stream.h"
 
 #include "UnitTest++/UnitTest++.h"
 
@@ -12,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include <asio/io_context.hpp>
+#include <earnest/detail/byte_stream.h>
 
 
 struct test_value {

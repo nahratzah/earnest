@@ -81,12 +81,12 @@ class completion_barrier {
     state_(allocate_state_(std::move(handler), ex_))
   {}
 
-  auto operator()(std::error_code ec) {
+  void operator()(std::error_code ec) {
     assert(state_ != nullptr);
     state_->update(ec);
   }
 
-  auto get_executor() -> executor_type {
+  auto get_executor() const -> executor_type {
     return ex_;
   }
 

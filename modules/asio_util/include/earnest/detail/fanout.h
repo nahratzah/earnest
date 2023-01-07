@@ -76,34 +76,30 @@ class fanout<Executor, void(Args...), Alloc> {
 
     template<typename CompletionToken>
     auto async_on_ready(CompletionToken&& token) -> typename asio::async_result<std::decay_t<CompletionToken>, void(Args...)>::return_type {
-      using init_type = asio::async_completion<CompletionToken, void(Args...)>;
-      using associated_executor_type = asio::associated_executor<typename init_type::completion_handler_type>;
-      using associated_allocator_type = asio::associated_allocator<typename init_type::completion_handler_type>;
-
-      init_type init(token);
-      auto ex = associated_executor_type::get(init.completion_handler, get_executor());
-
-      std::lock_guard<std::mutex> lck(mtx_);
-      if (args_) {
-        auto alloc = associated_allocator_type::get(init.completion_handler);
-        ex.post(
-            [h=std::move(init.completion_handler), args=args_]() mutable {
-              std::apply(h, *args);
-            },
-            alloc);
-      } else {
-        queued_.emplace_back(
-            [h=std::move(init.completion_handler), ex=asio::make_work_guard(ex)](std::shared_ptr<const std::tuple<Args...>> args) mutable {
-              auto alloc = associated_allocator_type::get(h);
-              ex.get_executor().dispatch(
-                  [h=std::move(h), args=std::move(args)]() mutable {
+      return asio::async_initiate<CompletionToken, void(Args...)>(
+          [this](auto completion_handler) {
+            std::lock_guard<std::mutex> lck(mtx_);
+            auto ex = asio::get_associated_executor(completion_handler, get_executor());
+            if (args_) {
+              auto alloc = asio::get_associated_allocator(completion_handler);
+              ex.post(
+                  [h=std::move(completion_handler), args=args_]() mutable {
                     std::apply(h, *args);
                   },
                   alloc);
-            });
-      }
-
-      return init.result.get();
+            } else {
+              queued_.emplace_back(
+                  [h=std::move(completion_handler), ex=asio::make_work_guard(ex)](std::shared_ptr<const std::tuple<Args...>> args) mutable {
+                    auto alloc = asio::get_associated_allocator(h);
+                    ex.get_executor().dispatch(
+                        [h=std::move(h), args=std::move(args)]() mutable {
+                          std::apply(h, *args);
+                        },
+                        alloc);
+                  });
+            }
+          },
+          token);
     }
 
     auto operator()(Args... args) {

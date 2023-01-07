@@ -46,8 +46,8 @@ class positional_stream_adapter {
 
   template<typename Arg>
   positional_stream_adapter(Arg& a, offset_type pos)
-  : next_layer_(a),
-    pos_(pos)
+  : pos_(pos),
+    next_layer_(a)
   {}
 
   positional_stream_adapter(positional_stream_adapter&&) = default;

@@ -1589,6 +1589,18 @@ struct xdr_raw_bytes_t {
 #endif
   auto operator()(const std::basic_string<T, CharT, Alloc>& buf) const -> constant_size_const_buffer<Bytes>;
 
+  template<typename T, std::size_t N>
+#if __cpp_concepts >= 201907L
+  requires (std::is_pod_v<T>)
+#endif
+  auto operator()(std::array<T, N>& buf) const -> constant_size_mutable_buffer<Bytes>;
+
+  template<typename T, std::size_t N>
+#if __cpp_concepts >= 201907L
+  requires (std::is_pod_v<T>)
+#endif
+  auto operator()(const std::array<T, N>& buf) const -> constant_size_const_buffer<Bytes>;
+
   auto operator()(asio::mutable_buffer buf) const -> constant_size_mutable_buffer<Bytes>;
   auto operator()(asio::const_buffer buf) const -> constant_size_const_buffer<Bytes>;
 };

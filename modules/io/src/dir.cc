@@ -454,6 +454,24 @@ static auto last_error_() -> std::error_code {
 } /* namespace earnest::<unnamed> */
 
 
+dir::dir(const dir& other)
+: dir()
+{
+  if (other.handle_ != invalid_native_handle) {
+    handle_ = ::dup(other.handle_);
+    if (handle_ == -1) [[unlikely]]
+      throw std::system_error(last_error_());
+  }
+}
+
+auto dir::operator=(const dir& other) -> dir& {
+  using std::swap;
+
+  dir copy = other;
+  swap(handle_, copy.handle_);
+  return *this;
+}
+
 auto dir::open_(const std::filesystem::path& dirname, std::error_code& ec) -> dir {
   ec.clear();
 

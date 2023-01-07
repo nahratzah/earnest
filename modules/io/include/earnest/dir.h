@@ -46,8 +46,8 @@ class dir {
   : handle_(handle)
   {}
 
-  dir(const dir&) = delete;
-  dir& operator=(const dir&) = delete;
+  dir(const dir& other);
+  auto operator=(const dir& other) -> dir&;
 
   dir(dir&& other) noexcept
   : handle_(std::exchange(other.handle_, invalid_native_handle))

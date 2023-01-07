@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
@@ -13,24 +15,52 @@
 #include <asio/error.hpp>
 #include <asio/post.hpp>
 
-template<typename Executor>
+template<typename Executor, typename Allocator = std::allocator<std::byte>>
 class byte_stream {
-  template<typename OtherExecutor> friend class byte_stream;
+  template<typename OtherExecutor, typename OtherAllocator> friend class byte_stream;
 
   public:
   using executor_type = Executor;
+  using allocator_type = Allocator;
 
-  byte_stream(const Executor& ex)
-  : ex_(ex)
-  {}
-
-  byte_stream(std::initializer_list<std::uint8_t> data, const Executor& ex)
+  byte_stream(const Executor& ex, allocator_type alloc = allocator_type())
   : ex_(ex),
-    data_(data)
+    data_(std::move(alloc))
   {}
+
+  byte_stream(std::initializer_list<std::byte> init, const Executor& ex, allocator_type alloc = allocator_type())
+  : ex_(ex),
+    data_(init, std::move(alloc))
+  {}
+
+  byte_stream(std::initializer_list<std::uint8_t> init, const Executor& ex, allocator_type alloc = allocator_type())
+  : ex_(ex),
+    data_(std::move(alloc))
+  {
+    data_.reserve(init.size());
+    std::transform(init.begin(), init.end(),
+        std::back_inserter(data_),
+        [](std::uint8_t b) -> std::byte { return std::byte{b}; });
+  }
 
   auto get_executor() const -> executor_type {
     return ex_;
+  }
+
+  auto get_allocator() const -> allocator_type {
+    return data_.get_allocator();
+  }
+
+  auto data() const & noexcept -> const std::vector<std::byte, allocator_type>& {
+    return data_;
+  }
+
+  auto data() & noexcept -> std::vector<std::byte, allocator_type>& {
+    return data_;
+  }
+
+  auto data() && noexcept -> std::vector<std::byte, allocator_type>&& {
+    return std::move(data_);
   }
 
   template<typename MB>
@@ -118,10 +148,11 @@ class byte_stream {
     constexpr std::array<char, 16> chars{ '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f' };
     out.put(out.widen('['));
     if (!s.data_.empty()) {
-      for (std::uint8_t b : s.data_) {
+      for (std::byte b : s.data_) {
+        const auto b_val = std::to_integer<std::underlying_type_t<std::byte>>(b);
         out.put(out.widen(' '));
-        out.put(out.widen(chars[b / 16u]));
-        out.put(out.widen(chars[b % 16u]));
+        out.put(out.widen(chars[b_val / 16u]));
+        out.put(out.widen(chars[b_val % 16u]));
       }
       out.put(out.widen(' '));
     }
@@ -133,17 +164,17 @@ class byte_stream {
     return data_.empty();
   }
 
-  template<typename OtherExecutor>
-  auto operator==(const byte_stream<OtherExecutor>& y) const -> bool {
+  template<typename OtherExecutor, typename OtherAllocator>
+  auto operator==(const byte_stream<OtherExecutor, OtherAllocator>& y) const -> bool {
     return data_ == y.data_;
   }
 
-  template<typename OtherExecutor>
-  auto operator!=(const byte_stream<OtherExecutor>& y) const -> bool {
+  template<typename OtherExecutor, typename OtherAllocator>
+  auto operator!=(const byte_stream<OtherExecutor, OtherAllocator>& y) const -> bool {
     return !(*this == y);
   }
 
   private:
   Executor ex_;
-  std::vector<std::uint8_t> data_;
+  std::vector<std::byte, allocator_type> data_;
 };
