@@ -581,7 +581,7 @@ class decoder_resolve_helper_<TupleOffset, decoder<void, Fn, void>> {
   {}
 
   template<typename Stream, typename... TT, typename Callback>
-  auto operator()(Stream& s, std::tuple<TT...>& temporaries, Callback&& callback) -> void {
+  auto operator()(Stream& s, [[maybe_unused]] std::tuple<TT...>& temporaries, Callback&& callback) -> void {
     std::invoke(fn, s, std::forward<Callback>(callback));
   }
 
@@ -984,7 +984,7 @@ class encoder_resolve_helper_<TupleOffset, encoder<Fn, void>> {
   {}
 
   template<typename Stream, typename... TT, typename Callback>
-  auto operator()(Stream& s, std::tuple<TT...>& temporaries, Callback&& callback) -> void {
+  auto operator()(Stream& s, [[maybe_unused]] std::tuple<TT...>& temporaries, Callback&& callback) -> void {
     std::invoke(fn, s, std::forward<Callback>(callback));
   }
 

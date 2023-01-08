@@ -28,7 +28,7 @@ auto hex_string(std::string_view sv) -> std::string {
     }
   }
 
-  return out.str();
+  return std::move(out).str();
 }
 
 void ensure_file_is_gone(std::string filename) {
@@ -76,15 +76,15 @@ TEST(read_wal_file_entry) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
 
-        CHECK_EQUAL(1, records.size());
-        if (!records.empty()) CHECK_EQUAL(0, records.back().index());
+        CHECK_EQUAL(1u, records.size());
+        if (!records.empty()) CHECK_EQUAL(0u, records.back().index());
       });
   ioctx.run();
 
-  CHECK_EQUAL(0, f.version);
-  CHECK_EQUAL(17, f.sequence);
-  CHECK_EQUAL(32, f.write_offset());
-  CHECK_EQUAL(28, f.link_offset());
+  CHECK_EQUAL(0u, f.version);
+  CHECK_EQUAL(17u, f.sequence);
+  CHECK_EQUAL(32u, f.write_offset());
+  CHECK_EQUAL(28u, f.link_offset());
 
   REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
 
@@ -92,7 +92,7 @@ TEST(read_wal_file_entry) {
   f.async_records(
       [](std::error_code ec, auto records) {
         CHECK_EQUAL(std::error_code(), ec);
-        CHECK_EQUAL(0, records.size());
+        CHECK_EQUAL(0u, records.size());
       });
   ioctx.run();
 }
@@ -117,9 +117,9 @@ TEST(write_wal_file_entry) {
   CHECK_EQUAL(
       (earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::max_version),
       f.version);
-  CHECK_EQUAL(19, f.sequence);
-  CHECK_EQUAL(32, f.write_offset());
-  CHECK_EQUAL(28, f.link_offset());
+  CHECK_EQUAL(19u, f.sequence);
+  CHECK_EQUAL(32u, f.write_offset());
+  CHECK_EQUAL(28u, f.link_offset());
 
   CHECK_EQUAL(
       hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\023\000\000\000\000"s),
@@ -131,7 +131,7 @@ TEST(write_wal_file_entry) {
   f.async_records(
       [](std::error_code ec, auto records) {
         CHECK_EQUAL(std::error_code(), ec);
-        CHECK_EQUAL(0, records.size());
+        CHECK_EQUAL(0u, records.size());
       });
   ioctx.run();
 }

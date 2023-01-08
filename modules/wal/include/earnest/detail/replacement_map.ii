@@ -375,7 +375,7 @@ auto replacement_map<Alloc>::async_read_at_and_insert(AsyncRandomAccessReadDevic
       device, device_off, buf,
       completion_wrapper<void(std::error_code, std::size_t)>(
           std::move(init.completion_handler),
-          [buffer_ownership=vtptr->shared_data()](auto&& handler, std::error_code ec, std::size_t bytes) {
+          [buffer_ownership=vtptr->shared_data()](auto&& handler, std::error_code ec, [[maybe_unused]] std::size_t bytes) {
             handler(ec);
           }));
 
@@ -407,7 +407,7 @@ auto replacement_map<Alloc>::async_read_at_and_insert_many(AsyncRandomAccessRead
       device, device_off, buf,
       completion_wrapper<void(std::error_code, std::size_t)>(
           std::move(init.completion_handler),
-          [buffer_ownership=vt.shared_data()](auto&& handler, std::error_code ec, std::size_t bytes) {
+          [buffer_ownership=vt.shared_data()](auto&& handler, std::error_code ec, [[maybe_unused]] std::size_t bytes) {
             handler(ec);
           }));
 

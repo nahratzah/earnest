@@ -124,7 +124,7 @@ class fd {
     if (ec) throw std::system_error(ec, "earnest::fd::flush");
   }
 
-  void flush(bool data_only, std::error_code& ec) {
+  void flush([[maybe_unused]] bool data_only, std::error_code& ec) {
     ec.clear();
 
 #if _POSIX_SYNCHRONIZED_IO >= 200112L

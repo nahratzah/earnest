@@ -64,7 +64,7 @@ TEST(read_##TYPE##BITS) {                                                       
       });                                                                                          \
   ioctx.run();                                                                                     \
                                                                                                    \
-  CHECK_EQUAL(1u, v);                                                                              \
+  CHECK_EQUAL(std::TYPE##BITS##_t(1), v);                                                          \
   CHECK(stream.empty());                                                                           \
 }                                                                                                  \
                                                                                                    \
@@ -117,11 +117,10 @@ TEST(write_##TYPE##BITS##_using_getter) {                                       
   asio::io_context ioctx;                                                                          \
   byte_stream<asio::io_context::executor_type> stream(ioctx.get_executor());                       \
                                                                                                    \
-  const int v = 0x17;                                                                              \
   async_write(                                                                                     \
       stream,                                                                                      \
       earnest::xdr_writer<>() &                                                                    \
-          earnest::xdr_getset<int>([&v]() { return v; }).as(earnest::xdr_##TYPE##BITS),            \
+          earnest::xdr_getset<int>([]() { return 0x17; }).as(earnest::xdr_##TYPE##BITS),           \
       [&](std::error_code ec) {                                                                    \
         CHECK_EQUAL(std::error_code(), ec);                                                        \
       });                                                                                          \
@@ -1019,17 +1018,17 @@ TEST(write_opt_##TYPE) {                                                        
       stream);                                                                                     \
 }
 
-OPT_TEST(uint8,   std::uint8_t,    23, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x17                         }))
-OPT_TEST(uint16,  std::uint16_t,   23, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x17                         }))
-OPT_TEST(uint32,  std::uint32_t,   23, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x17                         }))
-OPT_TEST(uint64,  std::uint64_t,   23, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x17 }))
-OPT_TEST(int8,    std::int8_t,    -17, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xef                         }))
-OPT_TEST(int16,   std::int16_t,   -17, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xef                         }))
-OPT_TEST(int32,   std::int32_t,   -17, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xef                         }))
-OPT_TEST(int64,   std::int64_t,   -17, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xef }))
-OPT_TEST(float32, float,          6.0, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x40, 0xc0, 0x00, 0x00                         }))
-OPT_TEST(float64, double,        -2.0, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }))
-OPT_TEST(bool,    bool,          true, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01                         }))
+OPT_TEST(uint8,   std::uint8_t,    23u, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x17                         }))
+OPT_TEST(uint16,  std::uint16_t,   23u, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x17                         }))
+OPT_TEST(uint32,  std::uint32_t,   23u, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x17                         }))
+OPT_TEST(uint64,  std::uint64_t,   23u, (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x17 }))
+OPT_TEST(int8,    std::int8_t,    -17,  (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xef                         }))
+OPT_TEST(int16,   std::int16_t,   -17,  (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xef                         }))
+OPT_TEST(int32,   std::int32_t,   -17,  (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xef                         }))
+OPT_TEST(int64,   std::int64_t,   -17,  (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xef }))
+OPT_TEST(float32, float,          6.0,  (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x40, 0xc0, 0x00, 0x00                         }))
+OPT_TEST(float64, double,        -2.0,  (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }))
+OPT_TEST(bool,    bool,          true,  (std::initializer_list<std::uint8_t>{ 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01                         }))
 
 TEST(read_nullopt_testval) {
   asio::io_context ioctx;
@@ -2212,9 +2211,9 @@ TEST(read_variant) {
   ioctx.run();
 
   CHECK(stream.empty());
-  CHECK_EQUAL(0, v1.index());
+  CHECK_EQUAL(0u, v1.index());
   if (0 == v1.index()) CHECK_EQUAL(7, std::get<0>(v1));
-  CHECK_EQUAL(1, v2.index());
+  CHECK_EQUAL(1u, v2.index());
   if (1 == v2.index()) CHECK_EQUAL(9, std::get<1>(v2));
 }
 

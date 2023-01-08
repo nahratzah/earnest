@@ -75,7 +75,7 @@ inline auto operator+(xdr<detail::xdr_writer::writer<X...>>&& x, xdr<detail::xdr
 
 
 template<typename X>
-inline auto operator&(xdr<X>&& x, const std::monostate& ms) noexcept -> xdr<X>&& {
+inline auto operator&(xdr<X>&& x, [[maybe_unused]] const std::monostate& ms) noexcept -> xdr<X>&& {
   return std::move(x);
 }
 
@@ -104,7 +104,7 @@ inline auto temporaries_factory<T...>::operator()() const -> std::shared_ptr<typ
 
 
 template<typename Alloc>
-inline auto temporaries_factory<>::operator()(Alloc&& alloc) const -> pretend_pointer {
+inline auto temporaries_factory<>::operator()([[maybe_unused]] Alloc&& alloc) const -> pretend_pointer {
   return {};
 }
 
@@ -123,7 +123,7 @@ inline auto temporaries_factory<>::pretend_pointer::operator->() const noexcept 
 
 
 template<typename... X, typename... Y>
-constexpr auto operator+(const temporaries_factory<X...>& x, const temporaries_factory<Y...>& y) -> temporaries_factory<X..., Y...> {
+constexpr auto operator+([[maybe_unused]] const temporaries_factory<X...>& x, [[maybe_unused]] const temporaries_factory<Y...>& y) -> temporaries_factory<X..., Y...> {
   return {};
 }
 
@@ -270,7 +270,7 @@ inline auto maybe_big_endian_to_native_post_processor_tpl(IntType& v) {
   } else {
     return std::make_tuple(
         make_post_processor(
-            [&v]<typename... T> (std::tuple<T...>& temporaries) -> std::error_code {
+            [&v]<typename... T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code {
               boost::endian::big_to_native_inplace(v);
               return {};
             }));
@@ -477,7 +477,7 @@ inline void decoder_callback<Dfn, Nested, Alloc>::continue_(Stream& stream, std:
           reader_callbacks=callbacks(r_),
           &stream,
           &temporaries
-        ](std::error_code ec, std::size_t bytes) mutable {
+        ](std::error_code ec, [[maybe_unused]] std::size_t bytes) mutable {
           if (!ec) ec = std::invoke(reader_callbacks, temporaries);
           std::invoke(done_cb, stream, temporaries, ec);
         });
@@ -538,7 +538,7 @@ inline auto resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...>:
 
 template<typename DoneCb, std::size_t AccumulatedTupleSize, typename... Tail>
 template<typename TTPointer>
-inline auto resolve_n_<DoneCb, AccumulatedTupleSize, direct_completion, Tail...>::operator()(DoneCb&& done_cb, [[maybe_unused]] const TTPointer& temporaries_tuple, direct_completion&& d, [[maybe_unused]] Tail&&... tail) -> std::tuple<reader_type, completion_fn> {
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, direct_completion, Tail...>::operator()(DoneCb&& done_cb, [[maybe_unused]] const TTPointer& temporaries_tuple, [[maybe_unused]] direct_completion&& d, [[maybe_unused]] Tail&&... tail) -> std::tuple<reader_type, completion_fn> {
   static_assert(sizeof...(Tail) == 0u);
   return std::make_tuple(reader_type(), std::move(done_cb));
 }
@@ -893,7 +893,7 @@ inline void encoder_callback<Dfn, Nested, Alloc>::continue_(Stream& stream, std:
         [ done_cb=std::move(cfn_),
           &stream,
           &temporaries
-        ](std::error_code ec, std::size_t bytes) mutable {
+        ](std::error_code ec, [[maybe_unused]] std::size_t bytes) mutable {
           std::invoke(done_cb, stream, temporaries, ec);
         });
   }
@@ -953,7 +953,7 @@ inline auto resolve_n_<DoneCb, AccumulatedTupleSize, temporary<T, Fn>, Tail...>:
 
 template<typename DoneCb, std::size_t AccumulatedTupleSize, typename... Tail>
 template<typename TTPointer>
-inline auto resolve_n_<DoneCb, AccumulatedTupleSize, direct_completion, Tail...>::operator()(DoneCb&& done_cb, [[maybe_unused]] const TTPointer& temporaries_tuple, direct_completion&& d, [[maybe_unused]] Tail&&... tail) -> std::tuple<writer_type, completion_fn> {
+inline auto resolve_n_<DoneCb, AccumulatedTupleSize, direct_completion, Tail...>::operator()(DoneCb&& done_cb, [[maybe_unused]] const TTPointer& temporaries_tuple, [[maybe_unused]] direct_completion&& d, [[maybe_unused]] Tail&&... tail) -> std::tuple<writer_type, completion_fn> {
   static_assert(sizeof...(Tail) == 0u);
   return std::make_tuple(writer_type(), std::move(done_cb));
 }
@@ -1775,12 +1775,12 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const dynamic_padding_h
   return add_raw(
       std::move(x),
       make_temporary<dynamic_padding>(
-          [](const dynamic_padding& p) { return std::error_code(); },
+          []([[maybe_unused]] const dynamic_padding& p) { return std::error_code(); },
           dynamic_padding(h.size())));
 }
 
 template<typename... X, std::size_t N>
-inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const constant_size_padding_holder<N>& h) {
+inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, [[maybe_unused]] const constant_size_padding_holder<N>& h) {
   if constexpr(N == 0) {
     return std::move(x);
   } else {
@@ -1795,7 +1795,7 @@ inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const constant_size_pad
 }
 
 template<typename... X, std::size_t N>
-inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_size_padding_holder<N>& h) {
+inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, [[maybe_unused]] const constant_size_padding_holder<N>& h) {
   if constexpr(N == 0) {
     return x;
   } else {
@@ -1804,7 +1804,7 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_size_pad
     return add_raw(
         std::move(x),
         make_temporary<constant_size_padding<N>>(
-            [](const constant_size_padding<N>& p) { return std::error_code(); },
+            []([[maybe_unused]] const constant_size_padding<N>& p) { return std::error_code(); },
             constant_size_padding<N>()));
   }
 }
@@ -2365,7 +2365,7 @@ inline auto unpack_emplace_result_(const std::pair<Iter, U>& result) noexcept ->
 }
 
 template<typename Iter>
-inline auto unpack_emplace_result_(const Iter& result) noexcept -> bool {
+inline auto unpack_emplace_result_([[maybe_unused]] const Iter& result) noexcept -> bool {
   return true;
 }
 
@@ -3144,7 +3144,7 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const_sequence_holder<C
       add_raw(
           std::move(x),
           make_pre_processor(
-              [c]<typename... T> (std::tuple<T...>& temporaries) -> std::error_code {
+              [c]<typename... T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code {
                 std::error_code ec;
                 if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
                 return ec;
@@ -3618,7 +3618,7 @@ inline constexpr auto apply_index_sequence_(std::size_t idx, Fn&& fn, BadFn&& ba
 }
 
 template<typename Fn, typename BadFn>
-inline constexpr auto apply_index_sequence_(std::size_t idx, [[maybe_unused]] Fn&& fn, BadFn&& bad_fn, [[maybe_unused]] std::index_sequence<> seq) {
+inline constexpr auto apply_index_sequence_([[maybe_unused]] std::size_t idx, [[maybe_unused]] Fn&& fn, BadFn&& bad_fn, [[maybe_unused]] std::index_sequence<> seq) {
   return std::invoke(std::forward<BadFn>(bad_fn));
 }
 

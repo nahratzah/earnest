@@ -471,7 +471,7 @@ auto async_decode_offset_vector(AsyncReadStream& reader, CompletionToken&& token
 
 
 template<typename Executor, typename Allocator>
-wal<Executor, Allocator>::wal(const executor_type& e, allocator_type alloc)
+wal<Executor, Allocator>::wal(const executor_type& e, [[maybe_unused]] allocator_type alloc)
 : fd_(e),
   strand_(e)
 {}
