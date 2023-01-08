@@ -10,7 +10,8 @@ namespace earnest {
 enum class wal_errc {
   bad_version,
   memory_exhausted,
-  bad_state
+  bad_state,
+  bad_read
 };
 
 auto earnest_category() -> const std::error_category& {
@@ -36,6 +37,8 @@ auto earnest_category() -> const std::error_category& {
           return "WAL memory exhausted"s;
         case wal_errc::bad_state:
           return "WAL bad state"s;
+        case wal_errc::bad_read:
+          return "WAL read error"s;
       }
     }
   };

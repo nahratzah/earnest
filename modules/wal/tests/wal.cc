@@ -42,7 +42,7 @@ TEST(read_empty_wal_file_entry) {
   auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
   CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
   f.async_open(source_files, "empty",
-      [&f](std::error_code ec) {
+      [&f](std::error_code ec, [[maybe_unused]] auto records) {
         CHECK(ec);
         CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
       });
@@ -57,7 +57,7 @@ TEST(read_non_existant_wal_file_entry) {
   auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
   CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
   f.async_open(source_files, "non_existant_file",
-      [&f](std::error_code ec) {
+      [&f](std::error_code ec, [[maybe_unused]] auto records) {
         CHECK(ec);
         CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
       });
@@ -72,9 +72,12 @@ TEST(read_wal_file_entry) {
   auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
   CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
   f.async_open(source_files, "version_0",
-      [&f](std::error_code ec) {
+      [&f](std::error_code ec, auto records) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
+
+        CHECK_EQUAL(1, records.size());
+        if (!records.empty()) CHECK_EQUAL(0, records.back().index());
       });
   ioctx.run();
 
@@ -83,10 +86,15 @@ TEST(read_wal_file_entry) {
   CHECK_EQUAL(32, f.write_offset());
   CHECK_EQUAL(28, f.link_offset());
 
-  REQUIRE CHECK(!f.records().empty());
-  CHECK_EQUAL(0, f.records().back().index());
+  REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
 
-  CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
+  ioctx.restart();
+  f.async_records(
+      [](std::error_code ec, auto records) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK_EQUAL(0, records.size());
+      });
+  ioctx.run();
 }
 
 TEST(write_wal_file_entry) {
@@ -117,10 +125,15 @@ TEST(write_wal_file_entry) {
       hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\023\000\000\000\000"s),
       hex_string(f.file.contents<std::string>()));
 
-  REQUIRE CHECK(!f.records().empty());
-  CHECK_EQUAL(0, f.records().back().index());
+  REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
 
-  CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
+  ioctx.restart();
+  f.async_records(
+      [](std::error_code ec, auto records) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK_EQUAL(0, records.size());
+      });
+  ioctx.run();
 }
 
 TEST(append_wal_file_entry) {

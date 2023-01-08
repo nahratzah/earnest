@@ -36,8 +36,7 @@ class positional_stream_adapter {
   public:
   using offset_type = std::uint64_t;
   using next_layer_type = std::remove_reference_t<AsyncRandomAccessDevice>;
-  using lowest_layer_type = typename next_layer_type::lowest_layer_type;
-  using executor_type = typename lowest_layer_type::executor_type;
+  using executor_type = typename next_layer_type::executor_type;
 
   template<typename Arg>
   explicit positional_stream_adapter(Arg& a)
@@ -61,14 +60,6 @@ class positional_stream_adapter {
     return next_layer_;
   }
 
-  auto lowest_layer() -> lowest_layer_type& {
-    return next_layer_.lowest_layer();
-  }
-
-  auto lowest_layer() const -> const lowest_layer_type& {
-    return next_layer_.lowest_layer();
-  }
-
   auto close() -> void {
     next_layer_.close();
   }
@@ -81,8 +72,8 @@ class positional_stream_adapter {
     return pos_;
   }
 
-  auto get_executor() const noexcept -> executor_type {
-    return lowest_layer().get_executor();
+  auto get_executor() const -> executor_type {
+    return next_layer().get_executor();
   }
 
   auto skip(offset_type bytes) {

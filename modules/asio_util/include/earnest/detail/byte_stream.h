@@ -65,8 +65,9 @@ class byte_stream {
 
   template<typename MB>
   auto read_some(MB mb, std::error_code& ec) -> std::size_t {
+    ec.clear();
+
     if (asio::buffer_size(mb) == 0) {
-      ec = std::error_code();
       return 0;
     }
 
@@ -109,6 +110,8 @@ class byte_stream {
 
   template<typename MB>
   auto write_some(MB mb, std::error_code& ec) -> std::size_t {
+    ec.clear();
+
     const auto orig_size = data_.size();
     data_.resize(orig_size + asio::buffer_size(mb));
     const auto written_bytes = asio::buffer_copy(asio::buffer(data_) + orig_size, mb);

@@ -114,7 +114,7 @@ class wal_file_entry {
   wal_file_entry& operator=(wal_file_entry&&) = delete;
 
   auto get_executor() const -> executor_type { return file.get_executor(); }
-  auto get_allocator() const -> allocator_type { return records_.get_allocator(); }
+  auto get_allocator() const -> allocator_type { return alloc_; }
   auto state() const noexcept -> wal_file_entry_state { return state_; }
 
   private:
@@ -122,7 +122,9 @@ class wal_file_entry {
   auto header_writer_() const;
 
   template<typename Stream, typename Callback>
-  auto read_records_(Stream& stream, Callback callback) -> void;
+  auto read_records_(Stream& stream, Callback callback, std::unique_ptr<records_vector> records) -> void; // Has side-effects.
+  template<typename Stream, typename Callback>
+  auto read_records_until_(Stream& stream, Callback callback, typename fd<executor_type>::offset_type end_offset, std::unique_ptr<records_vector> records) const -> void;
   template<typename CompletionToken>
   auto write_records_to_buffer_(write_records_vector&& records, CompletionToken&& token) const;
   template<typename State>
@@ -142,8 +144,9 @@ class wal_file_entry {
 
   auto write_offset() const noexcept -> typename fd<executor_type>::offset_type;
   auto link_offset() const noexcept -> typename fd<executor_type>::offset_type;
-  auto records() const noexcept -> const records_vector& { return records_; }
   auto has_unlinked_data() const -> bool;
+
+  template<typename CompletionToken> auto async_records(CompletionToken&& token) const;
 
   private:
   template<typename CompletionToken>
@@ -175,9 +178,9 @@ class wal_file_entry {
   std::uint_fast64_t sequence;
 
   private:
+  allocator_type alloc_;
   typename fd<executor_type>::offset_type write_offset_;
   typename fd<executor_type>::offset_type link_offset_;
-  records_vector records_;
   asio::strand<executor_type> strand_;
   wal_file_entry_state state_ = wal_file_entry_state::uninitialized;
   fanout<executor_type, void(std::error_code), allocator_type> link_done_event_;

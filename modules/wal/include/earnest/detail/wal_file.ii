@@ -131,7 +131,7 @@ inline auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::os
 template<typename Executor, typename Allocator>
 inline wal_file_entry<Executor, Allocator>::wal_file_entry(const executor_type& ex, allocator_type alloc)
 : file(ex),
-  records_(std::move(alloc)),
+  alloc_(std::move(alloc)),
   strand_(ex),
   link_done_event_(ex, alloc)
 {
@@ -172,14 +172,15 @@ inline auto wal_file_entry<Executor, Allocator>::header_writer_() const {
 
 template<typename Executor, typename Allocator>
 template<typename Stream, typename Callback>
-auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback callback) -> void {
+auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback callback, std::unique_ptr<records_vector> records) -> void {
   link_offset_ = stream.position();
+  auto raw_records_ptr = records.get();
   async_read(
       stream,
       ::earnest::xdr_reader<>() & xdr_getset<variant_type>(
-          [this](variant_type v) -> std::error_code {
+          [records=raw_records_ptr](variant_type v) -> std::error_code {
             try {
-              records_.push_back(std::move(v));
+              records->push_back(std::move(v));
             } catch (const std::bad_alloc&) {
               return make_error_code(wal_errc::memory_exhausted);
             }
@@ -187,21 +188,68 @@ auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback
           }).as(xdr_variant),
       completion_wrapper<void(std::error_code)>(
           std::move(callback),
-          [this, &stream](auto& h, std::error_code ec) mutable {
+          [this, &stream, records=std::move(records)](auto& h, std::error_code ec) mutable {
             write_offset_ = stream.position();
 
             if (ec) {
-              std::invoke(h, ec);
+              std::invoke(h, ec, std::move(*records));
               return;
             }
 
-            assert(!records_.empty());
-            if (records_.back().index() == 0) {
-              std::invoke(h, ec);
+            assert(!records->empty());
+            if (records->back().index() == 0) {
+              std::invoke(h, ec, std::move(*records));
               return;
             }
 
-            read_records_(stream, std::move(h));
+            read_records_(stream, std::move(h), std::move(records));
+          }));
+}
+
+template<typename Executor, typename Allocator>
+template<typename Stream, typename Callback>
+auto wal_file_entry<Executor, Allocator>::read_records_until_(Stream& stream, Callback callback, typename fd<executor_type>::offset_type end_offset, std::unique_ptr<records_vector> records) const -> void {
+  if (stream.position() >= end_offset) {
+    std::error_code ec;
+    if (stream.position() > end_offset) [[unlikely]]
+      ec = make_error_code(wal_errc::bad_read);
+
+    auto ex = asio::get_associated_executor(callback, get_executor());
+    ex.post(
+        [ec, records=std::move(records), callback=std::move(callback)]() mutable {
+          std::invoke(callback, ec, *records);
+        },
+        get_allocator());
+    return;
+  }
+
+  auto raw_records_ptr = records.get();
+  async_read(
+      stream,
+      ::earnest::xdr_reader<>() & xdr_getset<variant_type>(
+          [records=raw_records_ptr](variant_type v) -> std::error_code {
+            try {
+              records->push_back(std::move(v));
+            } catch (const std::bad_alloc&) {
+              return make_error_code(wal_errc::memory_exhausted);
+            }
+            return std::error_code();
+          }).as(xdr_variant),
+      completion_wrapper<void(std::error_code)>(
+          std::move(callback),
+          [ this, &stream, end_offset,
+            records=std::move(records)
+          ](auto& h, std::error_code ec) mutable {
+            // We should not end up in a scenario where a record goes over the end-offset.
+            if (stream.position() > end_offset) [[unlikely]]
+              ec = make_error_code(wal_errc::bad_read);
+
+            if (ec || stream.position() == end_offset) { // Done reading.
+              std::invoke(h, ec, std::move(*records));
+              return;
+            }
+
+            this->read_records_until_(stream, std::move(h), end_offset, std::move(records));
           }));
 }
 
@@ -257,7 +305,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
   using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
 
   if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
-  return asio::async_initiate<CompletionToken, void(std::error_code)>(
+  return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
       [](auto completion_handler, const dir& d, const std::filesystem::path& name, wal_file_entry& wf) {
         asio::dispatch(
             wf.strand_,
@@ -282,29 +330,43 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
                   ex.post(
                       completion_wrapper<void()>(
                           std::move(completion_handler),
-                          [ec](auto h) { std::invoke(h, ec); }),
+                          [ec, alloc=wf.get_allocator()](auto h) { std::invoke(h, ec, records_vector(alloc)); }),
                       alloc);
                   return;
                 }
                 wf.name = name;
               }
 
-              std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf.file);
-              auto& stream = *s;
+              struct state {
+                pos_stream stream;
+                records_vector records;
+              };
+              std::unique_ptr<state> s = std::make_unique<state>(
+                  state{
+                    .stream = pos_stream(wf.file),
+                    .records = records_vector(wf.get_allocator())
+                  });
+              auto& stream = s->stream;
+              auto& state_records = s->records;
 
               async_read(
                   stream,
                   wf.header_reader_() & xdr_manual(
-                      [&wf](auto& stream, auto callback) {
-                        wf.read_records_(stream, std::move(callback));
+                      [&wf, &state_records](auto& stream, auto callback) {
+                        wf.read_records_(
+                            stream,
+                            [callback=std::move(callback), &state_records](std::error_code ec, records_vector records) mutable {
+                              state_records = std::move(records);
+                              std::invoke(callback, ec);
+                            },
+                            std::make_unique<records_vector>());
                       }),
                   completion_wrapper<void(std::error_code)>(
                       std::move(completion_handler),
-                      [&wf, stream_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
+                      [&wf, state_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
                         assert(wf.state_ == wal_file_entry_state::opening);
 
-                        wf.write_offset_ = stream_ptr->position();
-                        stream_ptr.reset();
+                        wf.write_offset_ = state_ptr->stream.position();
                         if (ec) {
                           wf.state_ = wal_file_entry_state::uninitialized;
                           wf.file.close();
@@ -312,7 +374,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
                           wf.state_ = wal_file_entry_state::ready;
                         }
 
-                        std::invoke(h, ec);
+                        std::invoke(h, ec, std::move(state_ptr->records));
                       }));
             });
       },
@@ -372,10 +434,6 @@ inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, cons
                       [stream_ptr=std::move(s), &wf](auto& h, std::error_code ec) mutable {
                         assert(wf.state_ == wal_file_entry_state::opening);
 
-                        // Create a single record.
-                        wf.records_.clear();
-                        wf.records_.emplace_back(std::in_place_index<0>);
-
                         wf.write_offset_ = stream_ptr->position();
                         stream_ptr.reset();
                         if (ec) {
@@ -429,6 +487,54 @@ inline auto wal_file_entry<Executor, Allocator>::link_offset() const noexcept ->
 template<typename Executor, typename Allocator>
 inline auto wal_file_entry<Executor, Allocator>::has_unlinked_data() const -> bool {
   return write_offset_ != file.size();
+}
+
+template<typename Executor, typename Allocator>
+template<typename CompletionToken>
+inline auto wal_file_entry<Executor, Allocator>::async_records(CompletionToken&& token) const {
+  using pos_stream = positional_stream_adapter<const fd<executor_type>&>;
+
+  return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
+      [this](auto completion_handler) {
+        auto ex = asio::make_work_guard(asio::get_associated_executor(completion_handler, get_executor()));
+        strand_.dispatch(
+            [this, completion_handler=std::move(completion_handler), ex=std::move(ex)]() {
+              // If we are not in the correct state, refuse the request.
+              if (state_ != wal_file_entry_state::ready) [[unlikely]] {
+                auto ex_alloc = asio::get_associated_allocator(completion_handler);
+                ex.get_executor().post(
+                    [completion_handler=std::move(completion_handler), alloc=get_allocator()]() mutable {
+                      std::invoke(completion_handler, make_error_code(wal_errc::bad_state), records_vector(alloc));
+                    },
+                    ex_alloc);
+                return;
+              }
+
+              constexpr auto begin_offset = std::remove_cvref_t<decltype(std::declval<wal_file_entry>().header_reader_())>::bytes.value();
+              std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(file, begin_offset);
+              auto& stream = *s;
+
+              read_records_until_(
+                  stream,
+                  completion_wrapper<void(std::error_code, records_vector)>(
+                      std::move(completion_handler),
+                      [stream_ptr=std::move(s)](auto& completion_handler, std::error_code ec, records_vector records) mutable {
+                        stream_ptr.reset();
+
+                        if (!ec && std::any_of(records.begin(), records.end(),
+                                [](const auto& variant) -> bool {
+                                  return variant.index() == 0;
+                                }))
+                          ec = make_error_code(wal_errc::bad_read);
+
+                        std::invoke(completion_handler, ec, std::move(records));
+                      }),
+                  link_offset_,
+                  std::make_unique<records_vector>());
+            },
+            get_allocator());
+      },
+      token);
 }
 
 template<typename Executor, typename Allocator>
