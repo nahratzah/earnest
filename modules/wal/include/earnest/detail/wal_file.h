@@ -154,7 +154,6 @@ class wal_file_entry {
 
   template<typename CompletionToken, typename Barrier, typename Fanout>
   auto append_bytes_at_(
-      typename fd<executor_type>::offset_type link_offset,
       typename fd<executor_type>::offset_type write_offset,
       std::vector<std::byte, rebind_alloc<std::byte>>&& bytes,
       CompletionToken&& token,
@@ -162,13 +161,12 @@ class wal_file_entry {
 
   template<typename CompletionToken>
   auto write_skip_record_(
-      typename fd<executor_type>::offset_type link_offset,
       typename fd<executor_type>::offset_type write_offset,
       std::size_t bytes, CompletionToken&& token);
 
   template<typename CompletionToken>
   auto write_link_(
-      typename fd<executor_type>::offset_type link_offset,
+      typename fd<executor_type>::offset_type write_offset,
       std::array<std::byte, 4> bytes, CompletionToken&& token);
 
   public:

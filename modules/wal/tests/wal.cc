@@ -166,6 +166,9 @@ TEST(append_wal_file_entry) {
 
   CHECK(append_callback_was_called);
 
+  CHECK_EQUAL(60u, f.write_offset());
+  CHECK_EQUAL(56u, f.link_offset());
+
   CHECK_EQUAL(
       hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
           + "\000\000\000\001"s // wal_record_noop
