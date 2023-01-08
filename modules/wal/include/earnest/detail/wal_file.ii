@@ -131,7 +131,7 @@ inline auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::os
 template<typename Executor, typename Allocator>
 inline wal_file_entry<Executor, Allocator>::wal_file_entry(const executor_type& ex, allocator_type alloc)
 : file(ex),
-  alloc_(std::move(alloc)),
+  alloc_(alloc),
   strand_(ex),
   link_done_event_(ex, alloc)
 {
