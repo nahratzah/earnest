@@ -13,6 +13,7 @@
 
 #include <earnest/detail/fanout.h>
 #include <earnest/detail/wal_flusher.h>
+#include <earnest/detail/wal_records.h>
 #include <earnest/dir.h>
 #include <earnest/fd.h>
 #include <earnest/xdr.h>
@@ -20,53 +21,8 @@
 namespace earnest::detail {
 
 
-template<typename> struct record_write_type_;
-template<> struct record_write_type_<std::monostate> { using type = std::monostate; };
-
-template<typename T>
-using record_write_type_t = typename record_write_type_<T>::type;
-
-template<typename... T>
-struct record_write_type_<std::variant<T...>> {
-  using type = std::variant<record_write_type_t<T>...>;
-};
-
-template<typename... T>
-struct record_write_type_<std::tuple<T...>> {
-  using type = std::tuple<record_write_type_t<T>...>;
-};
-
-
-struct wal_record_noop {};
-template<> struct record_write_type_<wal_record_noop> { using type = wal_record_noop; };
-
-template<typename X>
-inline auto operator&(xdr<X>&& x, const wal_record_noop& noop) noexcept -> xdr<X>&&;
-
-
-struct wal_record_skip32 {
-  std::uint32_t bytes;
-};
-template<> struct record_write_type_<wal_record_skip32> { using type = wal_record_skip32; };
-
-struct wal_record_skip64 {
-  std::uint64_t bytes;
-};
-template<> struct record_write_type_<wal_record_skip64> { using type = wal_record_skip64; };
-
-template<typename... X>
-inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip32& skip);
-template<typename... X>
-inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip32& skip);
-
-template<typename... X>
-inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip64& skip);
-template<typename... X>
-inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip64& skip);
-
-
 // XXX this will probably become a template
-using wal_record_variant = std::variant<std::monostate, wal_record_noop, wal_record_skip32, wal_record_skip64>;
+using wal_record_variant = std::variant<std::monostate, wal_record_noop, wal_record_skip32, wal_record_skip64, wal_record_create_file, wal_record_erase_file>;
 
 
 enum class wal_file_entry_state {

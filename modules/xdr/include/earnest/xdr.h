@@ -88,6 +88,11 @@ class xdr {
   static inline constexpr bool is_reader = Impl::is_reader;
   static inline constexpr bool is_writer = Impl::is_writer;
   static inline constexpr std::optional<std::size_t> bytes = Impl::bytes();
+  static_assert(is_reader || is_writer, "we require either a reader or a writer");
+  static_assert(!is_reader || !is_writer, "we require something that isn't both a reader and a writer");
+
+  template<typename T>
+  using typed_function_arg = std::conditional_t<is_reader, T&, const T&>;
 
   xdr();
   explicit xdr(Impl&& impl) noexcept(std::is_nothrow_move_constructible_v<Impl>);
@@ -649,8 +654,8 @@ class reader {
   using known_size_at_compile_time = std::conjunction<typename Factories::known_size...>;
   // number of encoded-bytes, if known in advance. If the number of bytes depends on the input, then an empty optional.
   static constexpr auto bytes() noexcept -> std::optional<std::size_t>;
-  static constexpr bool is_reader = true;
-  static constexpr bool is_writer = false;
+  static inline constexpr bool is_reader = true;
+  static inline constexpr bool is_writer = false;
 
   template<bool IsZeroElement = (sizeof...(Factories) == 0)>
   explicit reader(std::enable_if_t<IsZeroElement, int> = 0) {}
@@ -1053,8 +1058,8 @@ class writer {
   using known_size_at_compile_time = std::conjunction<typename Factories::known_size...>;
   // number of encoded-bytes, if known in advance. If the number of bytes depends on the input, then an empty optional.
   static constexpr auto bytes() noexcept -> std::optional<std::size_t>;
-  static constexpr bool is_reader = false;
-  static constexpr bool is_writer = true;
+  static inline constexpr bool is_reader = false;
+  static inline constexpr bool is_writer = true;
 
   template<bool IsZeroElement = (sizeof...(Factories) == 0)>
   explicit writer(std::enable_if_t<IsZeroElement, int> = 0) {}
