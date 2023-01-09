@@ -12,6 +12,7 @@
 #include <asio/strand.hpp>
 
 #include <earnest/detail/fanout.h>
+#include <earnest/detail/fanout_barrier.h>
 #include <earnest/detail/wal_flusher.h>
 #include <earnest/detail/wal_records.h>
 #include <earnest/dir.h>
@@ -22,13 +23,15 @@ namespace earnest::detail {
 
 
 // XXX this will probably become a template
-using wal_record_variant = std::variant<std::monostate, wal_record_noop, wal_record_skip32, wal_record_skip64, wal_record_create_file, wal_record_erase_file>;
+using wal_record_variant = std::variant<std::monostate, wal_record_noop, wal_record_skip32, wal_record_skip64, wal_record_seal, wal_record_create_file, wal_record_erase_file>;
 
 
 enum class wal_file_entry_state {
   uninitialized,
   opening,
   ready,
+  sealing,
+  sealed,
   failed = -1
 };
 
@@ -92,6 +95,9 @@ class wal_file_entry {
 #endif
   auto async_append(Range&& records, CompletionToken&& token);
 
+  template<typename CompletionToken>
+  auto async_seal(CompletionToken&& token);
+
   auto write_offset() const noexcept -> typename fd<executor_type>::offset_type;
   auto link_offset() const noexcept -> typename fd<executor_type>::offset_type;
   auto has_unlinked_data() const -> bool;
@@ -99,8 +105,8 @@ class wal_file_entry {
   template<typename CompletionToken> auto async_records(CompletionToken&& token) const;
 
   private:
-  template<typename CompletionToken>
-  auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, std::error_code ec);
+  template<typename CompletionToken, typename OnSpaceAssigned>
+  auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state = wal_file_entry_state::ready);
 
   template<typename CompletionToken, typename Barrier, typename Fanout>
   auto append_bytes_at_(
@@ -133,6 +139,11 @@ class wal_file_entry {
   wal_file_entry_state state_ = wal_file_entry_state::uninitialized;
   fanout<executor_type, void(std::error_code), allocator_type> link_done_event_;
   wal_flusher<fd<executor_type>&, allocator_type> wal_flusher_;
+
+  // Seal barrier becomes ready when:
+  // 1. all pending writes have their space allocated.
+  // 2. a seal has been requested.
+  fanout_barrier<executor_type, allocator_type> seal_barrier_;
 };
 
 

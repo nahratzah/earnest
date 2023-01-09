@@ -29,7 +29,9 @@ struct wal_record_noop {};
 template<> struct record_write_type_<wal_record_noop> { using type = wal_record_noop; };
 
 template<typename X>
-inline auto operator&(xdr<X>&& x, const wal_record_noop& noop) noexcept -> xdr<X>&&;
+inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_noop& noop) noexcept -> xdr<X>&& {
+  return std::move(x);
+}
 
 
 struct wal_record_skip32 {
@@ -43,14 +45,78 @@ struct wal_record_skip64 {
 template<> struct record_write_type_<wal_record_skip64> { using type = wal_record_skip64; };
 
 template<typename... X>
-inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip32& skip);
-template<typename... X>
-inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip32& skip);
+inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip32& skip) {
+  return std::move(x) & xdr_uint32(skip.bytes) & xdr_manual(
+      [&skip](auto& stream, auto callback, [[maybe_unused]] std::string& s) {
+        if constexpr(requires { stream.skip(skip.bytes); }) {
+          stream.skip(skip.bytes);
+          std::invoke(callback, std::error_code());
+        } else {
+          s.resize(skip.bytes, '\0');
+          asio::async_read(
+              stream,
+              asio::buffer(s),
+              [callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                std::invoke(callback, ec);
+              });
+        }
+      }).template with_temporary<std::string>();
+}
 
 template<typename... X>
-inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip64& skip);
+inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip32& skip) {
+  return std::move(x) & xdr_uint32(skip.bytes) & xdr_manual(
+      [&skip](auto& stream, auto callback, [[maybe_unused]] std::string& s) {
+        if constexpr(requires { stream.skip(skip.bytes); }) {
+          stream.skip(skip.bytes);
+        } else {
+          s.resize(skip.bytes, '\0');
+          asio::async_write(
+              stream,
+              asio::buffer(s),
+              [callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                std::invoke(callback, ec);
+              });
+        }
+      }).template with_temporary<std::string>();
+}
+
 template<typename... X>
-inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip64& skip);
+inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_skip64& skip) {
+  return std::move(x) & xdr_uint64(skip.bytes) & xdr_manual(
+      [&skip](auto& stream, auto callback, [[maybe_unused]] std::string& s) {
+        if constexpr(requires { stream.skip(skip.bytes); }) {
+          stream.skip(skip.bytes);
+          std::invoke(callback, std::error_code());
+        } else {
+          s.resize(skip.bytes, '\0');
+          asio::async_read(
+              stream,
+              asio::buffer(s),
+              [callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                std::invoke(callback, ec);
+              });
+        }
+      }).template with_temporary<std::string>();
+}
+
+template<typename... X>
+inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip64& skip) {
+  return std::move(x) & xdr_uint64(skip.bytes) & xdr_manual(
+      [&skip](auto& stream, auto callback, [[maybe_unused]] std::string& s) {
+        if constexpr(requires { stream.skip(skip.bytes); }) {
+          stream.skip(skip.bytes);
+        } else {
+          s.resize(skip.bytes, '\0');
+          asio::async_write(
+              stream,
+              asio::buffer(s),
+              [callback=std::move(callback)](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                std::invoke(callback, ec);
+              });
+        }
+      }).template with_temporary<std::string>();
+}
 
 
 struct wal_record_create_file {
@@ -84,6 +150,15 @@ template<> struct record_write_type_<wal_record_truncate_file> { using type = wa
 template<typename X>
 inline auto operator&(::earnest::xdr<X>&& x, typename xdr<X>::template typed_function_arg<wal_record_truncate_file> r) {
   return std::move(x) & r.file & xdr_uint64(r.new_size);
+}
+
+
+struct wal_record_seal {};
+template<> struct record_write_type_<wal_record_seal> { using type = wal_record_seal; };
+
+template<typename X>
+inline auto operator&(::earnest::xdr<X>&& x, [[maybe_unused]] const wal_record_seal& r) -> ::earnest::xdr<X>&& {
+  return std::move(x);
 }
 
 

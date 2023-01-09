@@ -2,12 +2,13 @@
 
 #include "UnitTest++/UnitTest++.h"
 
+#include <iomanip>
 #include <iostream>
-#include <system_error>
+#include <iterator>
+#include <sstream>
 #include <string>
 #include <string_view>
-#include <sstream>
-#include <iomanip>
+#include <system_error>
 
 #include <asio/io_context.hpp>
 
@@ -97,6 +98,39 @@ TEST(read_wal_file_entry) {
   ioctx.run();
 }
 
+TEST(read_sealed_wal_file_entry) {
+  asio::io_context ioctx;
+  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
+  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
+  f.async_open(source_files, "sealed_0",
+      [&f](std::error_code ec, auto records) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK_EQUAL(earnest::detail::wal_file_entry_state::sealed, f.state());
+
+        CHECK_EQUAL(2u, records.size());
+        if (records.size() >= 1) CHECK_EQUAL(0u, records.back().index());
+        if (records.size() >= 2) CHECK_EQUAL(0u, std::prev(records.end())->index());
+      });
+  ioctx.run();
+
+  CHECK_EQUAL(0u, f.version);
+  CHECK_EQUAL(17u, f.sequence);
+  CHECK_EQUAL(36u, f.write_offset());
+  CHECK_EQUAL(32u, f.link_offset());
+
+  REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::sealed, f.state());
+
+  ioctx.restart();
+  f.async_records(
+      [](std::error_code ec, auto records) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK_EQUAL(1u, records.size());
+        if (!records.empty())
+          CHECK(std::holds_alternative<::earnest::detail::wal_record_seal>(records.back()));
+      });
+  ioctx.run();
+}
+
 TEST(write_wal_file_entry) {
   using namespace std::string_literals;
 
@@ -174,6 +208,58 @@ TEST(append_wal_file_entry) {
           + "\000\000\000\001"s // wal_record_noop
           + "\000\000\000\002\000\000\000\010\000\000\000\000\000\000\000\000"s // wal_record_skip32(8)
           + "\000\000\000\002\000\000\000\000"s // wal_record_skip32(0)
+          + "\000\000\000\000"s // sentinel (std::monostate)
+          ),
+      hex_string(f.file.contents<std::string>()));
+}
+
+TEST(seal_wal_file_entry) {
+  using namespace std::string_literals;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using ::earnest::detail::wal_record_noop;
+  using ::earnest::detail::wal_record_skip32;
+
+  // We have to make sure the file doesn't exist, or the test will fail.
+  ensure_file_is_gone("seal_log");
+
+  asio::io_context ioctx;
+  auto f = wal_file_entry_t(ioctx.get_executor(), std::allocator<std::byte>());
+  f.async_create(write_dir, "seal_log", 17,
+      [](std::error_code ec) {
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  // We do a write and a seal.
+  // The code should order this such that the sealing happens after the write has been allocated space.
+  bool append_callback_was_called = false, seal_callback_was_called = false;
+  f.async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
+        wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
+      },
+      [&](std::error_code ec) {
+        CHECK_EQUAL(std::error_code(), ec);
+        append_callback_was_called = true;
+      });
+  f.async_seal([&](std::error_code ec) {
+        CHECK_EQUAL(std::error_code(), ec);
+        seal_callback_was_called = true;
+      });
+  ioctx.run();
+
+  CHECK(append_callback_was_called);
+  CHECK(seal_callback_was_called);
+
+  CHECK_EQUAL(64u, f.write_offset());
+  CHECK_EQUAL(60u, f.link_offset());
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::sealed, f.state());
+
+  CHECK_EQUAL(
+      hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
+          + "\000\000\000\001"s // wal_record_noop
+          + "\000\000\000\002\000\000\000\010\000\000\000\000\000\000\000\000"s // wal_record_skip32(8)
+          + "\000\000\000\002\000\000\000\000"s // wal_record_skip32(0)
+          + "\000\000\000\004"s // wal_record_seal
           + "\000\000\000\000"s // sentinel (std::monostate)
           ),
       hex_string(f.file.contents<std::string>()));

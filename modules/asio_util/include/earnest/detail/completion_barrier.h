@@ -60,9 +60,9 @@ class completion_barrier {
 
     void inc(std::size_t n = 1) {
       std::lock_guard<std::mutex> lck(mtx_);
-      if (await_ == 0)
+      if (await_ == 0) [[unlikely]]
         throw std::logic_error("cannot raise barrier when it has reached level 0");
-      if (n > std::numeric_limits<std::size_t>::max() - await_)
+      if (n > std::numeric_limits<std::size_t>::max() - await_) [[unlikely]]
         throw std::overflow_error("too many barriers");
       await_ += n;
     }
