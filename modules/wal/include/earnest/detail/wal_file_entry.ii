@@ -1,24 +1,21 @@
-#ifndef EARNEST_DETAIL_WAL_FILE_INL_H
-#define EARNEST_DETAIL_WAL_FILE_INL_H
+#pragma once
 
 #include <algorithm>
 #include <functional>
-#include <unordered_map>
-
-#include <earnest/detail/completion_barrier.h>
-#include <earnest/detail/fanout.h>
-#include <earnest/detail/positional_stream_adapter.h>
-#include <earnest/detail/completion_wrapper.h>
-#include <earnest/detail/byte_stream.h>
-#include <earnest/wal_error.h>
 
 #include <asio/associated_allocator.hpp>
 #include <asio/associated_executor.hpp>
 #include <asio/bind_allocator.hpp>
 #include <asio/bind_executor.hpp>
-#include <asio/buffered_read_stream.hpp>
 #include <asio/executor_work_guard.hpp>
 #include <asio/write_at.hpp>
+
+#include <earnest/detail/byte_stream.h>
+#include <earnest/detail/completion_barrier.h>
+#include <earnest/detail/completion_wrapper.h>
+#include <earnest/detail/fanout.h>
+#include <earnest/detail/positional_stream_adapter.h>
+#include <earnest/wal_error.h>
 
 namespace earnest::detail {
 
@@ -741,94 +738,4 @@ inline auto wal_file_entry<Executor, Allocator>::write_link_(
 }
 
 
-template<typename Executor, typename Alloc>
-wal_file<Executor, Alloc>::wal_file(const executor_type& ex, allocator_type alloc)
-: strand_(ex),
-  files_(alloc),
-  pending_writes_(std::move(alloc))
-{}
-
-template<typename Executor, typename Alloc>
-template<typename CompletionToken>
-auto wal_file<Executor, Alloc>::async_open(const std::filesystem::path& dirname, CompletionToken&& token)
--> typename asio::async_result<std::decay_t<CompletionToken>, void(std::error_code)>::return_type {
-  if (d_.is_open()) throw std::runtime_error("wal is already open");
-  d_.open(dirname);
-
-  asio::async_completion<CompletionToken, void(std::error_code)> init(token);
-  auto callback =
-      [ alloc=asio::get_associated_allocator(init.completion_handler, get_allocator()),
-        guard=asio::make_work_guard(asio::get_associated_executor(init.completion_handler, get_executor())),
-        impl=init.completion_handler
-      ](std::error_code ec) {
-        guard.get_executor().dispatch(
-            [impl, ec]() {
-              std::invoke(impl, ec);
-            },
-            alloc);
-        guard.reset();
-      };
-
-  async_populate_wal_files_(std::move(callback));
-
-  return init.result.get();
-}
-
-template<typename Executor, typename Alloc>
-auto wal_file<Executor, Alloc>::get_allocator() const -> allocator_type {
-  return pending_writes_.get_allocator();
-}
-
-template<typename Executor, typename Alloc>
-auto wal_file<Executor, Alloc>::get_executor() const -> executor_type {
-  return strand_.get_inner_executor();
-}
-
-template<typename Executor, typename Alloc>
-template<typename Callback>
-void wal_file<Executor, Alloc>::async_populate_wal_files_(Callback&& callback) {
-  auto barrier = detail::make_completion_barrier(
-      [ sp=this->shared_from_this(),
-        callback=std::forward<Callback>(callback)
-      ](std::error_code ec) mutable {
-        if (ec) {
-          std::invoke(std::move(callback), std::move(ec));
-        } else if (sp->files_.empty()) {
-          std::invoke(std::move(callback), std::make_error_code(std::errc::no_such_file_or_directory));
-        } else {
-          sp->async_process_wal_files_(std::move(callback));
-        }
-      },
-      strand_);
-
-  // Filter down to only the WAL files.
-  for (const dir::entry& dir_entry : d_) {
-    if (dir_entry.is_regular_file() && dir_entry.path().extension() == ".wal") {
-      files_.emplace_back(get_executor());
-      files_.back().async_open(d_, dir_entry, asio::bind_allocator(get_allocator(), ++barrier));
-    }
-  }
-
-  // Allow the barrier to proceed.
-  barrier(std::error_code());
-}
-
-template<typename Executor, typename Alloc>
-template<typename Callback>
-void wal_file<Executor, Alloc>::async_process_wal_files_(Callback&& callback) {
-  // XXX implement
-  std::invoke(std::forward<Callback>(callback), std::make_error_code(std::errc::not_supported));
-}
-
-
-template<typename Executor, typename Alloc>
-inline wal_file<Executor, Alloc>::tx::tx(wal_file& wf)
-: wf_(wf.shared_from_this()),
-  pending_writes_(wf.get_allocator()),
-  read_ranges_(wf.get_allocator())
-{}
-
-
 } /* namespace earnest::detail */
-
-#endif /* EARNEST_DETAIL_WAL_FILE_INL_H */

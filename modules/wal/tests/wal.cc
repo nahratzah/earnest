@@ -1,4 +1,4 @@
-#include <earnest/detail/wal_file.h>
+#include <earnest/detail/wal_file_entry.h>
 
 #include "UnitTest++/UnitTest++.h"
 
