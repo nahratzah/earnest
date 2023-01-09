@@ -141,9 +141,11 @@ TEST(write_wal_file_entry) {
   auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
   CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
   f.async_create(write_dir, "wal_19", 19,
-      [&f](std::error_code ec) {
+      [&f](std::error_code ec, auto link_done_event) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
+
+        std::invoke(link_done_event, std::error_code());
       });
   ioctx.run();
 
@@ -182,8 +184,10 @@ TEST(append_wal_file_entry) {
   asio::io_context ioctx;
   auto f = wal_file_entry_t(ioctx.get_executor(), std::allocator<std::byte>());
   f.async_create(write_dir, "append_log", 17,
-      [](std::error_code ec) {
+      [](std::error_code ec, auto link_done_event) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
+
+        std::invoke(link_done_event, std::error_code());
       });
   ioctx.run();
   ioctx.restart();
@@ -225,8 +229,10 @@ TEST(seal_wal_file_entry) {
   asio::io_context ioctx;
   auto f = wal_file_entry_t(ioctx.get_executor(), std::allocator<std::byte>());
   f.async_create(write_dir, "seal_log", 17,
-      [](std::error_code ec) {
+      [](std::error_code ec, auto link_done_event) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
+
+        std::invoke(link_done_event, std::error_code());
       });
   ioctx.run();
   ioctx.restart();

@@ -59,9 +59,7 @@ inline wal_file_entry<Executor, Allocator>::wal_file_entry(const executor_type& 
   link_done_event_(ex, alloc),
   wal_flusher_(this->file, alloc),
   seal_barrier_(ex, alloc)
-{
-  link_done_event_(std::error_code()); // Start out in the up-to-date state.
-}
+{}
 
 template<typename Executor, typename Allocator>
 inline auto wal_file_entry<Executor, Allocator>::header_reader_() {
@@ -305,6 +303,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
                           }
                         }
 
+                        if (!ec) wf.link_done_event_(ec);
                         std::invoke(h, ec, std::move(state_ptr->records));
                       }));
             });
@@ -318,11 +317,17 @@ inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, cons
   using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
 
   if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
-  return asio::async_initiate<CompletionToken, void(std::error_code)>(
+  return asio::async_initiate<CompletionToken, void(std::error_code, link_done_event_type)>(
       [](auto completion_handler, const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, wal_file_entry& wf) {
+        auto wrapped_handler = completion_wrapper<void(std::error_code)>(
+            std::move(completion_handler),
+            [link_done_event=wf.link_done_event_](auto handler, std::error_code ec) {
+              std::invoke(handler, ec, link_done_event);
+            });
+
         asio::dispatch(
             wf.strand_,
-            [completion_handler=std::move(completion_handler), d, name, sequence, &wf]() {
+            [completion_handler=std::move(wrapped_handler), d, name, sequence, &wf]() {
               {
                 std::error_code ec;
                 if (wf.state_ == wal_file_entry_state::uninitialized) [[likely]] {

@@ -45,6 +45,7 @@ class wal_file_entry {
   static inline constexpr std::size_t read_buffer_size = 2u * 1024u * 1024u;
   using executor_type = Executor;
   using allocator_type = Allocator;
+  using link_done_event_type = fanout<executor_type, void(std::error_code), allocator_type>;
 
   private:
   template<typename T>
@@ -137,7 +138,7 @@ class wal_file_entry {
   typename fd<executor_type>::offset_type link_offset_;
   asio::strand<executor_type> strand_;
   wal_file_entry_state state_ = wal_file_entry_state::uninitialized;
-  fanout<executor_type, void(std::error_code), allocator_type> link_done_event_;
+  link_done_event_type link_done_event_;
   wal_flusher<fd<executor_type>&, allocator_type> wal_flusher_;
 
   // Seal barrier becomes ready when:
