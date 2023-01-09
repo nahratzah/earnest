@@ -21,6 +21,7 @@
 
 #include <earnest/detail/fanout.h>
 #include <earnest/detail/replacement_map.h>
+#include <earnest/detail/wal_flusher.h>
 #include <earnest/xdr.h>
 
 namespace earnest::detail {
@@ -182,6 +183,7 @@ class wal_file_entry {
   asio::strand<executor_type> strand_;
   wal_file_entry_state state_ = wal_file_entry_state::uninitialized;
   fanout<executor_type, void(std::error_code), allocator_type> link_done_event_;
+  wal_flusher<fd<executor_type>&, allocator_type> wal_flusher_;
 };
 
 

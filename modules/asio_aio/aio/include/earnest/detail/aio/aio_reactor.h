@@ -164,6 +164,15 @@ class aio_reactor
         fd, offset, std::forward<Buffers>(buffers), std::forward<CompletionHandler>(handler), std::forward<Executor>(executor));
   }
 
+  auto cancel(int fd) -> std::error_code {
+    std::error_code ec = this->synchronous_reactor::cancel(fd);
+    if (!ec) [[likely]] {
+      if (::aio_cancel(fd, nullptr) == -1) [[unlikely]]
+        ec.assign(errno, std::generic_category());
+    }
+    return ec;
+  }
+
   private:
   template<typename ImplFn, typename Buffers, typename CompletionHandler, typename Executor>
   static void do_op_(ImplFn&& impl_fn, int fd, std::uint64_t offset, Buffers&& buffers, CompletionHandler&& handler, Executor&& executor) {

@@ -117,6 +117,32 @@ class synchronous_reactor
     return {};
   }
 
+  auto flush(int fd, [[maybe_unused]] bool data_only) -> std::error_code {
+#if _POSIX_SYNCHRONIZED_IO >= 200112L
+    if (data_only ? ::fdatasync(fd) : ::fsync(fd))
+      return std::error_code(errno, std::generic_category());
+#else
+    if (::fsync(fd))
+      return std::error_code(errno, std::generic_category());
+#endif
+    return {};
+  }
+
+  template<typename CompletionHandler, typename Executor>
+  auto async_flush(int fd, bool data_only, CompletionHandler&& handler, Executor&& executor) {
+    auto ec = flush(fd, data_only);
+    auto ex = asio::get_associated_executor(handler, std::forward<Executor>(executor));
+    auto alloc = asio::get_associated_allocator(handler);
+
+    ex.post(
+        [ handler=std::forward<CompletionHandler>(handler),
+          ec
+        ]() mutable {
+          std::invoke(handler, ec);
+        },
+        std::move(alloc));
+  }
+
   private:
   template<typename ImplFn, typename Buffers>
   static auto do_op_(ImplFn&& impl_fn, Buffers&& buffers, std::error_code& ec) -> std::size_t {

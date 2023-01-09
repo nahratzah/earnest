@@ -124,21 +124,22 @@ class fd {
     if (ec) throw std::system_error(ec, "earnest::fd::flush");
   }
 
-  void flush([[maybe_unused]] bool data_only, std::error_code& ec) {
-    ec.clear();
-
-#if _POSIX_SYNCHRONIZED_IO >= 200112L
-    if (data_only) {
-      if (::fdatasync(handle_)) ec.assign(errno, std::generic_category());
-    } else {
-      if (::fsync(handle_)) ec.assign(errno, std::generic_category());
-    }
-#else
-    if (::fsync(handle_)) ec.assign(errno, std::generic_category());
-#endif
+  void flush(bool data_only, std::error_code& ec) {
+    ec = aio_.flush(handle_, data_only);
   }
 
-  void flush(std::error_code& ec) { flush(false, ec); }
+  void flush(std::error_code& ec) {
+    flush(false, ec);
+  }
+
+  template<typename CompletionToken>
+  auto async_flush(bool data_only, CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [this](auto completion_handler, bool data_only) {
+          aio_.async_flush(handle_, data_only, std::move(completion_handler), ex_);
+        },
+        token, data_only);
+  }
 
   auto size() const -> size_type {
     std::error_code ec;

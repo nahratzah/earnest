@@ -133,7 +133,8 @@ inline wal_file_entry<Executor, Allocator>::wal_file_entry(const executor_type& 
 : file(ex),
   alloc_(alloc),
   strand_(ex),
-  link_done_event_(ex, alloc)
+  link_done_event_(ex, alloc),
+  wal_flusher_(this->file, alloc)
 {
   link_done_event_(std::error_code()); // Start out in the up-to-date state.
 }
@@ -692,18 +693,35 @@ inline auto wal_file_entry<Executor, Allocator>::write_link_(
       [this, write_offset, bytes](auto completion_handler) {
         using pos_stream = positional_stream_adapter<fd<executor_type>&>;
 
-        std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(file, write_offset - 4u);
-        auto& stream = *s;
 
-        // XXX wait for a flush to complete!
-        async_write(
-            stream,
-            ::earnest::xdr_writer<>() & xdr_constant(bytes).as(xdr_raw_bytes<4>),
-            [ stream_ptr=std::move(s),
-              completion_handler=std::move(completion_handler)
-            ](std::error_code ec) mutable {
-              std::invoke(completion_handler, ec); // XXX don't invoke the handler until another flush completes!
-            });
+        wal_flusher_.async_flush(true,
+            completion_wrapper<void(std::error_code)>(
+                std::move(completion_handler),
+                [this, write_offset, bytes](auto&& handler, std::error_code ec) {
+                  if (ec) {
+                    std::invoke(handler, ec);
+                    return;
+                  }
+
+                  std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(file, write_offset - 4u);
+                  auto& stream = *s;
+                  async_write(
+                      stream,
+                      ::earnest::xdr_writer<>() & xdr_constant(bytes).as(xdr_raw_bytes<4>),
+                      completion_wrapper<void(std::error_code)>(
+                          std::move(handler),
+                          [ stream_ptr=std::move(s),
+                            this
+                          ](auto&& handler, std::error_code ec) mutable {
+                            stream_ptr.reset();
+                            if (ec) {
+                              std::invoke(handler, ec);
+                              return;
+                            }
+
+                            wal_flusher_.async_flush(true, std::move(handler));
+                          }));
+                }));
       },
       token);
 }
