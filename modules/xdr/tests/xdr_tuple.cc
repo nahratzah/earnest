@@ -145,7 +145,3 @@ TEST(write_tuple) {
           ioctx.get_executor()),
       stream);
 }
-
-int main() {
-  return UnitTest::RunAllTests();
-}

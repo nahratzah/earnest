@@ -73,7 +73,3 @@ TEST(write_variant) {
           ioctx.get_executor()),
       stream);
 }
-
-int main() {
-  return UnitTest::RunAllTests();
-}

@@ -234,7 +234,3 @@ TEST(write_opt_testval) {
           ioctx.get_executor()),
       stream);
 }
-
-int main() {
-  return UnitTest::RunAllTests();
-}

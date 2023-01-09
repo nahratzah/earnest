@@ -358,7 +358,3 @@ TEST(write_float64_using_getter) {
           ioctx.get_executor()),
       stream);
 }
-
-int main() {
-  return UnitTest::RunAllTests();
-}

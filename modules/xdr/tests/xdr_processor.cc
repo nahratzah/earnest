@@ -109,7 +109,3 @@ TEST(write_processor_with_error) {
 
   CHECK(was_called);
 }
-
-int main() {
-  return UnitTest::RunAllTests();
-}

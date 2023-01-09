@@ -360,7 +360,3 @@ TEST(write_string_bytes) {
           ioctx.get_executor()),
       stream);
 }
-
-int main() {
-  return UnitTest::RunAllTests();
-}

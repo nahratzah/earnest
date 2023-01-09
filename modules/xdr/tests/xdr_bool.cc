@@ -68,7 +68,3 @@ TEST(write_bool) {
           ioctx.get_executor()),
       stream);
 }
-
-int main() {
-  return UnitTest::RunAllTests();
-}

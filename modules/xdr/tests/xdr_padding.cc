@@ -121,7 +121,3 @@ PADDING_TESTS(0, (std::initializer_list<std::uint8_t>{}),          (std::initial
 PADDING_TESTS(1, (std::initializer_list<std::uint8_t>{ 0 }),       (std::initializer_list<std::uint8_t>{ 1 }))
 PADDING_TESTS(2, (std::initializer_list<std::uint8_t>{ 0, 0 }),    (std::initializer_list<std::uint8_t>{ 1, 1 }))
 PADDING_TESTS(3, (std::initializer_list<std::uint8_t>{ 0, 0, 0 }), (std::initializer_list<std::uint8_t>{ 1, 1, 1 }))
-
-int main() {
-  return UnitTest::RunAllTests();
-}

@@ -859,7 +859,3 @@ TEST(write_multimap_reject_if_too_large) {
       });
   ioctx.run();
 }
-
-int main() {
-  return UnitTest::RunAllTests();
-}
