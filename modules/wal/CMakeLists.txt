@@ -15,10 +15,14 @@ target_sources(wal
     FILE_SET HEADERS
     BASE_DIRS include
     FILES
-    include/earnest/detail/wal_file.h
-    include/earnest/detail/wal_file.ii
     include/earnest/detail/replacement_map.h
-    include/earnest/detail/replacement_map.ii)
+    include/earnest/detail/replacement_map.ii
+    include/earnest/detail/wal_file_entry.h
+    include/earnest/detail/wal_file_entry.ii
+    include/earnest/detail/wal_flusher.h
+    include/earnest/detail/wal_records.h
+    include/earnest/file_id.h
+    include/earnest/wal_error.h)
 target_sources(wal PRIVATE
     src/replacement_map.cc)
 
