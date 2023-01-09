@@ -462,13 +462,24 @@ requires std::ranges::input_range<std::remove_reference_t<Range>>
 inline auto wal_file_entry<Executor, Allocator>::async_append(Range&& records, CompletionToken&& token) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, write_records_vector&& records, wal_file_entry& wf) {
+        auto ex = asio::make_work_guard(completion_handler, wf.get_executor());
+        auto wrapped_handler = [ex, completion_handler=std::move(completion_handler)](std::error_code ec) mutable {
+          auto alloc = asio::get_associated_allocator(completion_handler);
+          ex.get_executor().dispatch(
+              [ec, h=std::move(completion_handler)]() {
+                std::invoke(h, ec);
+              },
+              std::move(alloc));
+          ex.reset();
+        };
+
         wf.write_records_to_buffer_(std::move(records),
             asio::bind_executor(
                 wf.strand_,
                 asio::bind_allocator(
                     wf.get_allocator(),
                     [ &wf,
-                      completion_handler=std::move(completion_handler)
+                      completion_handler=std::move(wrapped_handler)
                     ](std::error_code ec, auto byte_vector) mutable {
                       wf.append_bytes_(std::move(byte_vector), std::move(completion_handler), ec);
                     })));
