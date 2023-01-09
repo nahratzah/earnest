@@ -444,7 +444,10 @@ inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, cons
                           wf.state_ = wal_file_entry_state::ready;
                         }
 
-                        std::invoke(h, ec);
+                        if (ec)
+                          std::invoke(h, ec);
+                        else
+                          wf.wal_flusher_.async_flush(false, std::move(h));
                       }));
             });
       },
