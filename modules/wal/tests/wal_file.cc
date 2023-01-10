@@ -78,6 +78,35 @@ TEST(reread_wal) {
   ioctx.run();
 }
 
+TEST(recovery) {
+  const earnest::dir testdir = ensure_dir_exists_and_is_empty("recovery");
+
+  { // Preparation stage.
+    asio::io_context ioctx;
+    auto f0 = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
+    auto f3 = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
+    f0.async_create(testdir, "0.wal", 0,
+        [](std::error_code ec, auto link_event) {
+          REQUIRE CHECK_EQUAL(std::error_code(), ec);
+          std::invoke(link_event, std::error_code());
+        });
+    f3.async_create(testdir, "3.wal", 3,
+        [](std::error_code ec, auto link_event) {
+          REQUIRE CHECK_EQUAL(std::error_code(), ec);
+          std::invoke(link_event, std::error_code());
+        });
+    ioctx.run();
+  }
+
+  asio::io_context ioctx;
+  auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
+  w.async_open(testdir,
+      [](std::error_code ec) {
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+      });
+  ioctx.run();
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::cerr << "Usage: " << (argc > 0 ? argv[0] : "wal_test") << " writeable_dir\n"

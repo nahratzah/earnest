@@ -361,9 +361,12 @@ class wal_file {
         new_elem_iter->async_create(dir_, filename_for_wal_(missing_sequence), missing_sequence,
             completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
                 ++barrier,
-                [](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
+                [new_elem_iter](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
                   std::invoke(link_event, ec);
-                  std::invoke(handler, ec);
+                  if (ec)
+                    std::invoke(handler, ec);
+                  else
+                    new_elem_iter->async_seal(std::move(handler));
                 }));
       }
     }
