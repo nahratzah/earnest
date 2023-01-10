@@ -233,23 +233,33 @@ class wal_file {
       std::clog << "WAL up to date (last file is accepting writes)\n";
     } else {
       std::clog << "WAL has multiple unsealed files, recovery is required\n";
+
+      // Once we've discarded all trailing files, seal the current file.
+      // Then create a new empty file.
       auto discard_barrier = make_completion_barrier(
           completion_wrapper<void(std::error_code)>(
-              ++recover_barrier,
+              completion_wrapper<void(std::error_code)>(
+                  ++recover_barrier,
+                  [this, unsealed_entry](auto handler, std::error_code ec) {
+                    if (ec) [[unlikely]] {
+                      std::invoke(handler, ec);
+                    } else {
+                      unsealed_entry->async_seal(
+                          completion_wrapper<void(std::error_code)>(
+                              std::move(handler),
+                              [this](auto handler, std::error_code ec) {
+                                if (ec) [[unlikely]]
+                                  std::invoke(handler, ec);
+                                else
+                                  this->create_initial_unsealed_(std::move(handler));
+                              }));
+                    }
+                  }),
               [this, unsealed_entry](auto handler, std::error_code ec) {
-                if (ec) [[unlikely]] {
+                if (ec) [[unlikely]]
                   std::invoke(handler, ec);
-                } else {
-                  unsealed_entry->async_seal(
-                      completion_wrapper<void(std::error_code)>(
-                          std::move(handler),
-                          [this](auto handler, std::error_code ec) {
-                            if (ec) [[unlikely]]
-                              std::invoke(handler, ec);
-                            else
-                              this->create_initial_unsealed_(std::move(handler));
-                          }));
-                }
+                else
+                  this->ensure_no_gaps_after_(unsealed_entry, std::move(handler));
               }),
           strand_);
 
@@ -330,6 +340,35 @@ class wal_file {
     }
 
     return unarchived;
+  }
+
+  template<typename CompletionHandler>
+  auto ensure_no_gaps_after_(typename entries_list::iterator iter, CompletionHandler&& handler) -> void {
+    if (iter == entries_.end()) {
+      std::invoke(handler, std::error_code());
+      return;
+    }
+
+    auto barrier = make_completion_barrier(
+        std::forward<CompletionHandler>(handler),
+        strand_);
+
+    for (typename entries_list::iterator next_iter = std::next(iter);
+         next_iter != entries_.end();
+         iter = std::exchange(next_iter, std::next(next_iter))) {
+      for (auto missing_sequence = iter->sequence + 1u; missing_sequence < next_iter->sequence; ++missing_sequence) {
+        const auto new_elem_iter = entries_.emplace(next_iter, get_executor(), get_allocator());
+        new_elem_iter->async_create(dir_, filename_for_wal_(missing_sequence), missing_sequence,
+            completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
+                ++barrier,
+                [](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
+                  std::invoke(link_event, ec);
+                  std::invoke(handler, ec);
+                }));
+      }
+    }
+
+    std::invoke(barrier, std::error_code());
   }
 
   public:
