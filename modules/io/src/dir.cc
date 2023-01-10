@@ -334,7 +334,7 @@ auto dir::iterator::operator*() const -> entry {
   e.is_other_ = false;
   e.is_regular_file_ = ((fdi_->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0);
   e.is_socket_ = false;
-  e.is_symlink = false;
+  e.is_symlink_ = false;
   return e;
 }
 
@@ -511,13 +511,10 @@ auto dir::create_(const std::filesystem::path& dirname, std::error_code& ec) -> 
 
   ec.clear();
 
-  int fl = O_CREAT | O_EXCL | O_RDWR | O_DIRECTORY;
-#ifdef O_CLOEXEC
-  fl |= O_CLOEXEC;
-#endif
-
-  d.handle_ = ::open(dirname.c_str(), fl);
-  if (d.handle_ == -1) ec = last_error_();
+  if (::mkdir(dirname.c_str(), S_IRWXU|S_IRWXG|S_IRWXO) != 0)
+    ec = last_error_();
+  else
+    d = open_(dirname, ec);
   return d;
 }
 
@@ -531,13 +528,10 @@ auto dir::create_(const dir& parent, const std::filesystem::path& dirname, std::
 
   ec.clear();
 
-  int fl = O_CREAT | O_EXCL | O_RDWR | O_DIRECTORY;
-#ifdef O_CLOEXEC
-  fl |= O_CLOEXEC;
-#endif
-
-  d.handle_ = ::openat(parent.handle_, dirname.c_str(), fl);
-  if (d.handle_ == -1) ec = last_error_();
+  if (::mkdirat(parent.handle_, dirname.c_str(), S_IRWXU|S_IRWXG|S_IRWXO) != 0)
+    ec = last_error_();
+  else
+    d = open_(parent, dirname, ec);
   return d;
 }
 
@@ -580,6 +574,27 @@ dir::iterator::iterator(const dir& d)
 
   // Load the `begin()` state.
   query_(true);
+}
+
+auto dir::iterator::operator*() const -> entry {
+  struct ::stat sb;
+  if (::fstatat(dirfd(handle_), dp_->d_name, &sb, AT_SYMLINK_NOFOLLOW) != 0)
+    throw std::system_error(last_error_(), "fstatat");
+
+  entry e;
+  e.path_.assign(dp_->d_name);
+  e.file_size_ = sb.st_size;
+  e.hard_link_count_ = sb.st_nlink;
+  e.exists_ = true;
+  e.is_block_file_ = S_ISBLK(sb.st_mode);
+  e.is_character_file_ = S_ISCHR(sb.st_mode);
+  e.is_directory_ = S_ISDIR(sb.st_mode);
+  e.is_fifo_ = S_ISFIFO(sb.st_mode);
+  e.is_regular_file_ = S_ISREG(sb.st_mode);
+  e.is_socket_ = S_ISSOCK(sb.st_mode);
+  e.is_symlink_ = S_ISLNK(sb.st_mode);
+  e.is_other_ = e.exists_ && !e.is_block_file_ && !e.is_character_file_ && !e.is_directory_ && !e.is_fifo_ && !e.is_regular_file_ && !e.is_socket_ && !e.is_symlink_;
+  return e;
 }
 
 void dir::iterator::query_([[maybe_unused]] bool first) {

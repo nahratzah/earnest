@@ -59,6 +59,12 @@ class dir {
     open(dirname);
   }
 
+  dir(const dir& parent, const std::filesystem::path& dirname)
+  : dir()
+  {
+    open(parent, dirname);
+  }
+
   auto operator=(dir&& other) noexcept -> dir& {
     close();
     handle_ = std::exchange(other.handle_, invalid_native_handle);
@@ -146,7 +152,7 @@ class dir {
   void erase(const std::filesystem::path& name) {
     std::error_code ec;
     erase(name, ec);
-    if (ec) throw std::system_error(ec, "earnest::dir::create");
+    if (ec) throw std::system_error(ec, "earnest::dir::erase");
   }
 
   void erase(const std::filesystem::path& name, std::error_code& ec) {

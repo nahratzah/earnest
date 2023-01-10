@@ -273,7 +273,7 @@ TEST(seal_wal_file_entry) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "Usage:  " << (argc > 0 ? argv[0] : "wal_test") << " wal_source_dir writeable_dir\n"
+    std::cerr << "Usage:  " << (argc > 0 ? argv[0] : "wal_file_entry_test") << " wal_source_dir writeable_dir\n"
         << "  wal_source_dir:  points at the directory containing test files\n"
         << "  writeable_dir:   points at a directory where we can write files\n";
     return 1;
