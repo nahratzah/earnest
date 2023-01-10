@@ -118,13 +118,8 @@ class synchronous_reactor
   }
 
   auto flush(int fd, [[maybe_unused]] bool data_only) -> std::error_code {
-#if _POSIX_SYNCHRONIZED_IO >= 200112L
     if (data_only ? ::fdatasync(fd) : ::fsync(fd))
       return std::error_code(errno, std::generic_category());
-#else
-    if (::fsync(fd))
-      return std::error_code(errno, std::generic_category());
-#endif
     return {};
   }
 
