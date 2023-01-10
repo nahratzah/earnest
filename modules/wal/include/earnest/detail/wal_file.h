@@ -58,8 +58,8 @@ class wal_file {
   public:
   wal_file(executor_type ex, allocator_type alloc = allocator_type())
   : unarchived_wal_files(alloc),
-    strand_(std::move(ex)),
-    entries_(alloc)
+    entries(alloc),
+    strand_(std::move(ex))
   {}
 
   wal_file(const wal_file&) = delete;
@@ -68,7 +68,7 @@ class wal_file {
   wal_file& operator=(wal_file&&) = delete;
 
   auto get_executor() const -> executor_type { return strand_.get_inner_executor(); }
-  auto get_allocator() const -> allocator_type { return entries_.get_allocator(); }
+  auto get_allocator() const -> allocator_type { return entries.get_allocator(); }
 
   template<typename CompletionToken>
   auto async_open(dir d, CompletionToken&& token) {
@@ -108,13 +108,13 @@ class wal_file {
                               // - the entries should be ordered by their sequence
                               // - the entries should have unique sequence numbers
                               if (!ec) [[likely]] {
-                                this->entries_.sort([](const entry_type& x, const entry_type& y) { return x.sequence < y.sequence; });
+                                this->entries.sort([](const entry_type& x, const entry_type& y) { return x.sequence < y.sequence; });
                                 const auto same_sequence_iter = std::adjacent_find(
-                                    this->entries_.begin(), this->entries_.end(),
+                                    this->entries.begin(), this->entries.end(),
                                     [](const entry_type& x, const entry_type& y) -> bool {
                                       return x.sequence == y.sequence;
                                     });
-                                if (same_sequence_iter != this->entries_.end()) [[unlikely]] {
+                                if (same_sequence_iter != this->entries.end()) [[unlikely]] {
                                   std::clog << "WAL unrecoverable error: files " << same_sequence_iter->name << " and " << std::next(same_sequence_iter)->name << " have the same sequence number " << same_sequence_iter->sequence << std::endl;
                                   ec = make_error_code(wal_errc::unrecoverable);
                                 }
@@ -136,8 +136,8 @@ class wal_file {
                         continue;
                       std::filesystem::path filename = dir_entry.path();
 
-                      entries_.emplace_back(get_executor(), get_allocator());
-                      entries_.back().async_open(this->dir_, filename,
+                      entries.emplace_back(get_executor(), get_allocator());
+                      entries.back().async_open(this->dir_, filename,
                           completion_wrapper<void(std::error_code, typename entry_type::records_vector records)>(
                               ++barrier,
                               [filename, records_map](auto handler, std::error_code ec, typename entry_type::records_vector records) {
@@ -185,8 +185,8 @@ class wal_file {
                     }
 
                     this->dir_ = std::move(d);
-                    entries_.emplace_back(get_executor(), get_allocator());
-                    entries_.back().async_create(this->dir_, filename_for_wal_(0), 0,
+                    entries.emplace_back(get_executor(), get_allocator());
+                    entries.back().async_create(this->dir_, filename_for_wal_(0), 0,
                         completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
                             std::move(handler),
                             [](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
@@ -208,7 +208,7 @@ class wal_file {
 
   template<typename RecordsMap, typename CompletionHandler>
   auto recover_(RecordsMap&& records, CompletionHandler&& handler) {
-    if (this->entries_.empty()) [[unlikely]] {
+    if (this->entries.empty()) [[unlikely]] {
       std::invoke(handler, make_error_code(wal_errc::no_data_files));
       return;
     }
@@ -226,10 +226,10 @@ class wal_file {
         strand_);
 
     const typename entries_list::iterator unsealed_entry = find_first_unsealed_();
-    if (unsealed_entry == this->entries_.end()) {
+    if (unsealed_entry == this->entries.end()) {
       std::clog << "WAL up to date (last file is sealed)\n";
       create_initial_unsealed_(++recover_barrier); // Start a new file, so we have an unsealed file.
-    } else if (std::next(unsealed_entry) == this->entries_.end()) {
+    } else if (std::next(unsealed_entry) == this->entries.end()) {
       std::clog << "WAL up to date (last file is accepting writes)\n";
     } else {
       std::clog << "WAL has multiple unsealed files, recovery is required\n";
@@ -266,7 +266,7 @@ class wal_file {
       // Files past the unsealed file never had their writes confirmed,
       // and we cannot know if all preceding writes made it into the unsealed-entry.
       // So we must discard those files.
-      std::for_each(std::next(unsealed_entry), this->entries_.end(),
+      std::for_each(std::next(unsealed_entry), this->entries.end(),
           [&discard_barrier, records_ptr](entry_type& e) {
             std::clog << "WAL: discarding never-confirmed entries in " << e.name << "\n";
             records_ptr->erase(e.name);
@@ -280,9 +280,9 @@ class wal_file {
 
   template<typename CompletionHandler>
   auto create_initial_unsealed_(CompletionHandler&& handler) -> void {
-    const auto new_sequence = entries_.back().sequence + 1u;
-    entries_.emplace_back(get_executor(), get_allocator());
-    entries_.back().async_create(dir_, filename_for_wal_(new_sequence), new_sequence,
+    const auto new_sequence = entries.back().sequence + 1u;
+    entries.emplace_back(get_executor(), get_allocator());
+    entries.back().async_create(dir_, filename_for_wal_(new_sequence), new_sequence,
         completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type)>(
             std::forward<CompletionHandler>(handler),
             [](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_done) {
@@ -294,12 +294,12 @@ class wal_file {
 
   template<typename RecordsMap, typename CompletionHandler>
   auto update_bookkeeping_(RecordsMap&& records, CompletionHandler&& handler) {
-    assert(!entries_.empty());
-    assert(std::all_of(entries_.begin(), std::prev(entries_.end()),
+    assert(!entries.empty());
+    assert(std::all_of(entries.begin(), std::prev(entries.end()),
             [](const entry_type& e) {
               return e.state() == wal_file_entry_state::sealed;
             }));
-    assert(entries_.back().state() == wal_file_entry_state::ready);
+    assert(entries.back().state() == wal_file_entry_state::ready);
 
     auto bookkeeping_barrier = make_completion_barrier(
         std::forward<CompletionHandler>(handler),
@@ -311,7 +311,7 @@ class wal_file {
 
   auto find_first_unsealed_() -> typename entries_list::iterator {
     return std::find_if(
-        this->entries_.begin(), this->entries_.end(),
+        this->entries.begin(), this->entries.end(),
         [](const entry_type& e) {
           return e.state() != wal_file_entry_state::sealed;
         });
@@ -331,8 +331,8 @@ class wal_file {
         });
 
     std::unordered_set<std::filesystem::path, fs_path_hash, std::equal_to<std::filesystem::path>, rebind_alloc<std::filesystem::path>> unarchived(get_allocator());
-    if (!this->entries_.empty()) {
-      std::for_each(this->entries_.begin(), std::prev(this->entries_.end()),
+    if (!this->entries.empty()) {
+      std::for_each(this->entries.begin(), std::prev(this->entries.end()),
           [&unarchived, &archived_sequences](const entry_type& e) {
             if (!archived_sequences.contains(e.sequence))
               unarchived.insert(e.name);
@@ -344,7 +344,7 @@ class wal_file {
 
   template<typename CompletionHandler>
   auto ensure_no_gaps_after_(typename entries_list::iterator iter, CompletionHandler&& handler) -> void {
-    if (iter == entries_.end()) {
+    if (iter == entries.end()) {
       std::invoke(handler, std::error_code());
       return;
     }
@@ -354,10 +354,10 @@ class wal_file {
         strand_);
 
     for (typename entries_list::iterator next_iter = std::next(iter);
-         next_iter != entries_.end();
+         next_iter != entries.end();
          iter = std::exchange(next_iter, std::next(next_iter))) {
       for (auto missing_sequence = iter->sequence + 1u; missing_sequence < next_iter->sequence; ++missing_sequence) {
-        const auto new_elem_iter = entries_.emplace(next_iter, get_executor(), get_allocator());
+        const auto new_elem_iter = entries.emplace(next_iter, get_executor(), get_allocator());
         new_elem_iter->async_create(dir_, filename_for_wal_(missing_sequence), missing_sequence,
             completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
                 ++barrier,
@@ -376,10 +376,10 @@ class wal_file {
 
   public:
   std::unordered_set<std::filesystem::path, fs_path_hash, std::equal_to<std::filesystem::path>, rebind_alloc<std::filesystem::path>> unarchived_wal_files;
+  entries_list entries;
 
   private:
   asio::strand<executor_type> strand_;
-  entries_list entries_;
   dir dir_;
 };
 

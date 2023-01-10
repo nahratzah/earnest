@@ -3,6 +3,7 @@
 #include "UnitTest++/UnitTest++.h"
 
 #include <iostream>
+#include <algorithm>
 
 #include <asio/io_context.hpp>
 
@@ -45,6 +46,9 @@ TEST(create_wal) {
   asio::io_context ioctx;
   auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
 
+  /*
+   * Test: create a new wal.
+   */
   bool handler_was_called = false;
   w.async_create(testdir,
       [&](std::error_code ec) {
@@ -54,6 +58,37 @@ TEST(create_wal) {
   ioctx.run();
 
   CHECK(handler_was_called);
+
+  /*
+   * Validation.
+   */
+  const std::array<std::uint64_t, 1> expected_indices{ 0 };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_indices.begin(), expected_indices.end(),
+          [](const auto& entry, std::uint64_t expected_index) -> bool {
+            return entry.sequence == expected_index;
+          }));
+
+  const std::array<std::string_view, 1> expected_names{
+    "0000000000000000.wal",
+  };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_names.begin(), expected_names.end(),
+          [](const auto& entry, std::string_view expected_name) -> bool {
+            return entry.name == expected_name;
+          }));
+
+  const std::array<::earnest::detail::wal_file_entry_state, 1> expected_states{
+    ::earnest::detail::wal_file_entry_state::ready,
+  };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_states.begin(), expected_states.end(),
+          [](const auto& entry, auto expected_state) -> bool {
+            return entry.state() == expected_state;
+          }));
 }
 
 TEST(reread_wal) {
@@ -69,6 +104,9 @@ TEST(reread_wal) {
     ioctx.run();
   }
 
+  /*
+   * Test: reopen a previously create wal.
+   */
   asio::io_context ioctx;
   auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
   w.async_open(testdir,
@@ -76,6 +114,37 @@ TEST(reread_wal) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
       });
   ioctx.run();
+
+  /*
+   * Validation.
+   */
+  const std::array<std::uint64_t, 1> expected_indices{ 0 };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_indices.begin(), expected_indices.end(),
+          [](const auto& entry, std::uint64_t expected_index) -> bool {
+            return entry.sequence == expected_index;
+          }));
+
+  const std::array<std::string_view, 1> expected_names{
+    "0000000000000000.wal",
+  };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_names.begin(), expected_names.end(),
+          [](const auto& entry, std::string_view expected_name) -> bool {
+            return entry.name == expected_name;
+          }));
+
+  const std::array<::earnest::detail::wal_file_entry_state, 1> expected_states{
+    ::earnest::detail::wal_file_entry_state::ready,
+  };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_states.begin(), expected_states.end(),
+          [](const auto& entry, auto expected_state) -> bool {
+            return entry.state() == expected_state;
+          }));
 }
 
 TEST(recovery) {
@@ -98,6 +167,9 @@ TEST(recovery) {
     ioctx.run();
   }
 
+  /*
+   * Test: recovering from a interrupted wal.
+   */
   asio::io_context ioctx;
   auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
   w.async_open(testdir,
@@ -105,6 +177,45 @@ TEST(recovery) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
       });
   ioctx.run();
+
+  /*
+   * Validation.
+   */
+  const std::array<std::uint64_t, 5> expected_indices{ 0, 1, 2, 3, 4 };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_indices.begin(), expected_indices.end(),
+          [](const auto& entry, std::uint64_t expected_index) -> bool {
+            return entry.sequence == expected_index;
+          }));
+
+  const std::array<std::string_view, 5> expected_names{
+    "0.wal",
+    "0000000000000001.wal",
+    "0000000000000002.wal",
+    "3.wal",
+    "0000000000000004.wal",
+  };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_names.begin(), expected_names.end(),
+          [](const auto& entry, std::string_view expected_name) -> bool {
+            return entry.name == expected_name;
+          }));
+
+  const std::array<::earnest::detail::wal_file_entry_state, 5> expected_states{
+    ::earnest::detail::wal_file_entry_state::sealed,
+    ::earnest::detail::wal_file_entry_state::sealed,
+    ::earnest::detail::wal_file_entry_state::sealed,
+    ::earnest::detail::wal_file_entry_state::sealed,
+    ::earnest::detail::wal_file_entry_state::ready,
+  };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_states.begin(), expected_states.end(),
+          [](const auto& entry, auto expected_state) -> bool {
+            return entry.state() == expected_state;
+          }));
 }
 
 int main(int argc, char** argv) {
