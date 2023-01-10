@@ -129,6 +129,18 @@ inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip64& 
 }
 
 
+// Indicates a specific WAL file has been archived.
+struct wal_record_wal_archived {
+  std::uint64_t sequence;
+};
+template<> struct record_write_type_<wal_record_wal_archived> { using type = wal_record_wal_archived; };
+
+template<typename X>
+inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<wal_record_wal_archived> r) {
+  return std::move(x) & xdr_uint64(r.sequence);
+}
+
+
 struct wal_record_create_file {
   file_id file;
 };

@@ -271,6 +271,55 @@ TEST(seal_wal_file_entry) {
       hex_string(f.file.contents<std::string>()));
 }
 
+TEST(discard_all) {
+  using namespace std::string_literals;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using ::earnest::detail::wal_record_noop;
+  using ::earnest::detail::wal_record_skip32;
+
+  // We have to make sure the file doesn't exist, or the test will fail.
+  ensure_file_is_gone("discard_all");
+
+  asio::io_context ioctx;
+  auto f = wal_file_entry_t(ioctx.get_executor(), std::allocator<std::byte>());
+  // Preparation: create a file with data.
+  f.async_create(write_dir, "discard_all", 17,
+      [&f](std::error_code ec, auto link_done_event) {
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+        std::invoke(link_done_event, std::error_code());
+
+        f.async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
+              wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
+            },
+            [&](std::error_code ec) {
+              REQUIRE CHECK_EQUAL(std::error_code(), ec);
+            });
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  bool completion_all_was_called = false;
+  f.async_discard_all(
+      [&](std::error_code ec) {
+        CHECK_EQUAL(std::error_code(), ec);
+        completion_all_was_called = true;
+      });
+  ioctx.run();
+  CHECK(completion_all_was_called);
+
+  CHECK_EQUAL(36u, f.write_offset());
+  CHECK_EQUAL(32u, f.link_offset());
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::sealed, f.state());
+
+
+  CHECK_EQUAL(
+      hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
+          + "\000\000\000\004"s // wal_record_seal
+          + "\000\000\000\000"s // sentinel (std::monostate)
+          ),
+      hex_string(f.file.contents<std::string>().substr(0, 36)));
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::cerr << "Usage:  " << (argc > 0 ? argv[0] : "wal_file_entry_test") << " wal_source_dir writeable_dir\n"

@@ -65,7 +65,7 @@ class fanout<Executor, void(Args...), Alloc> {
 
     auto ready() const noexcept -> bool {
       std::lock_guard<std::mutex> lck(mtx_);
-      return args_;
+      return args_ != nullptr;
     }
 
     auto values() const -> std::optional<std::tuple<Args...>> {

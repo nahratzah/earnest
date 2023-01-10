@@ -29,7 +29,7 @@ using wal_record_variant = std::variant<
     wal_record_skip32, // 2
     wal_record_skip64, // 3
     wal_record_seal, // 4
-    wal_record_reserved<5>,
+    wal_record_wal_archived, // 5
     wal_record_reserved<6>,
     wal_record_reserved<7>,
     wal_record_reserved<8>,
@@ -59,6 +59,15 @@ using wal_record_variant = std::variant<
     wal_record_create_file, // 32
     wal_record_erase_file // 33
     >;
+
+// Indices 0..31 (inclusive) are reserved for bookkeeping of the WAL.
+inline constexpr auto wal_record_is_bookkeeping(std::size_t idx) noexcept -> bool {
+  return idx < 32;
+}
+
+inline auto wal_record_is_bookkeeping(const wal_record_variant& r) noexcept -> bool {
+  return wal_record_is_bookkeeping(r.index());
+}
 
 
 enum class wal_file_entry_state {
@@ -133,6 +142,9 @@ class wal_file_entry {
 
   template<typename CompletionToken>
   auto async_seal(CompletionToken&& token);
+
+  template<typename CompletionToken>
+  auto async_discard_all(CompletionToken&& token);
 
   auto write_offset() const noexcept -> typename fd<executor_type>::offset_type;
   auto link_offset() const noexcept -> typename fd<executor_type>::offset_type;

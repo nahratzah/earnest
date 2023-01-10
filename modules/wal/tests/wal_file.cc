@@ -56,6 +56,28 @@ TEST(create_wal) {
   CHECK(handler_was_called);
 }
 
+TEST(reread_wal) {
+  const earnest::dir testdir = ensure_dir_exists_and_is_empty("reread_wal");
+
+  { // Preparation stage.
+    asio::io_context ioctx;
+    auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
+    w.async_create(testdir,
+        [](std::error_code ec) {
+          REQUIRE CHECK_EQUAL(std::error_code(), ec);
+        });
+    ioctx.run();
+  }
+
+  asio::io_context ioctx;
+  auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
+  w.async_open(testdir,
+      [](std::error_code ec) {
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+      });
+  ioctx.run();
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::cerr << "Usage: " << (argc > 0 ? argv[0] : "wal_test") << " writeable_dir\n"

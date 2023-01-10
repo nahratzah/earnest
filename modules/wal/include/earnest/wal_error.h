@@ -11,7 +11,9 @@ enum class wal_errc {
   bad_version,
   memory_exhausted,
   bad_state,
-  bad_read
+  bad_read,
+  no_data_files,
+  unrecoverable
 };
 
 auto earnest_category() -> const std::error_category& {
@@ -39,6 +41,10 @@ auto earnest_category() -> const std::error_category& {
           return "WAL bad state"s;
         case wal_errc::bad_read:
           return "WAL read error"s;
+        case wal_errc::no_data_files:
+          return "WAL has no data files"s;
+        case wal_errc::unrecoverable:
+          return "WAL is unrecoverable"s;
       }
     }
   };
