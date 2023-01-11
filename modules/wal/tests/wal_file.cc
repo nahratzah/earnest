@@ -44,13 +44,13 @@ TEST(create_wal) {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("create_wal");
 
   asio::io_context ioctx;
-  auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
+  auto w = std::make_shared<earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
 
   /*
    * Test: create a new wal.
    */
   bool handler_was_called = false;
-  w.async_create(testdir,
+  w->async_create(testdir,
       [&](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
         handler_was_called = true;
@@ -62,12 +62,12 @@ TEST(create_wal) {
   /*
    * Validation.
    */
-  REQUIRE CHECK_EQUAL(1u, w.entries.size());
-  CHECK(std::prev(w.entries.end()) == w.active);
+  REQUIRE CHECK_EQUAL(1u, w->entries.size());
+  CHECK(std::prev(w->entries.end()) == w->active);
 
   const std::array<std::uint64_t, 1> expected_indices{ 0 };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
             return entry->sequence == expected_index;
@@ -77,7 +77,7 @@ TEST(create_wal) {
     "0000000000000000.wal",
   };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_names.begin(), expected_names.end(),
           [](const auto& entry, std::string_view expected_name) -> bool {
             return entry->name == expected_name;
@@ -87,7 +87,7 @@ TEST(create_wal) {
     ::earnest::detail::wal_file_entry_state::ready,
   };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
             return entry->state() == expected_state;
@@ -99,8 +99,8 @@ TEST(reread_wal) {
 
   { // Preparation stage.
     asio::io_context ioctx;
-    auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-    w.async_create(testdir,
+    auto w = std::make_shared<earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+    w->async_create(testdir,
         [](std::error_code ec) {
           REQUIRE CHECK_EQUAL(std::error_code(), ec);
         });
@@ -111,8 +111,8 @@ TEST(reread_wal) {
    * Test: reopen a previously create wal.
    */
   asio::io_context ioctx;
-  auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-  w.async_open(testdir,
+  auto w = std::make_shared<earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+  w->async_open(testdir,
       [](std::error_code ec) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
       });
@@ -121,12 +121,12 @@ TEST(reread_wal) {
   /*
    * Validation.
    */
-  REQUIRE CHECK_EQUAL(1u, w.entries.size());
-  CHECK(std::prev(w.entries.end()) == w.active);
+  REQUIRE CHECK_EQUAL(1u, w->entries.size());
+  CHECK(std::prev(w->entries.end()) == w->active);
 
   const std::array<std::uint64_t, 1> expected_indices{ 0 };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
             return entry->sequence == expected_index;
@@ -136,7 +136,7 @@ TEST(reread_wal) {
     "0000000000000000.wal",
   };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_names.begin(), expected_names.end(),
           [](const auto& entry, std::string_view expected_name) -> bool {
             return entry->name == expected_name;
@@ -146,7 +146,7 @@ TEST(reread_wal) {
     ::earnest::detail::wal_file_entry_state::ready,
   };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
             return entry->state() == expected_state;
@@ -177,8 +177,8 @@ TEST(recovery) {
    * Test: recovering from a interrupted wal.
    */
   asio::io_context ioctx;
-  auto w = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-  w.async_open(testdir,
+  auto w = std::make_shared<earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+  w->async_open(testdir,
       [](std::error_code ec) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
       });
@@ -187,12 +187,12 @@ TEST(recovery) {
   /*
    * Validation.
    */
-  REQUIRE CHECK_EQUAL(5u, w.entries.size());
-  CHECK(std::prev(w.entries.end()) == w.active);
+  REQUIRE CHECK_EQUAL(5u, w->entries.size());
+  CHECK(std::prev(w->entries.end()) == w->active);
 
   const std::array<std::uint64_t, 5> expected_indices{ 0, 1, 2, 3, 4 };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
             return entry->sequence == expected_index;
@@ -206,7 +206,7 @@ TEST(recovery) {
     "0000000000000004.wal",
   };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_names.begin(), expected_names.end(),
           [](const auto& entry, std::string_view expected_name) -> bool {
             return entry->name == expected_name;
@@ -220,7 +220,7 @@ TEST(recovery) {
     ::earnest::detail::wal_file_entry_state::ready,
   };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
             return entry->state() == expected_state;
@@ -235,8 +235,8 @@ TEST(write) {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("write");
 
   asio::io_context ioctx;
-  auto w = wal_file_t(ioctx.get_executor(), std::allocator<std::byte>());
-  w.async_create(testdir,
+  auto w = std::make_shared<wal_file_t>(ioctx.get_executor(), std::allocator<std::byte>());
+  w->async_create(testdir,
       [](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
       });
@@ -247,7 +247,7 @@ TEST(write) {
    * Test: write to wal.
    */
   bool append_callback_was_called = false;
-  w.async_append(std::initializer_list<wal_file_t::write_variant_type>{
+  w->async_append(std::initializer_list<wal_file_t::write_variant_type>{
         wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
       },
       [&](std::error_code ec) {
@@ -260,10 +260,10 @@ TEST(write) {
   /*
    * Validation.
    */
-  REQUIRE CHECK_EQUAL(1u, w.entries.size());
-  CHECK(std::prev(w.entries.end()) == w.active);
+  REQUIRE CHECK_EQUAL(1u, w->entries.size());
+  CHECK(std::prev(w->entries.end()) == w->active);
 
-  w.async_records(
+  w->async_records(
       [](std::error_code ec, const auto& records) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
@@ -285,32 +285,32 @@ TEST(rollover) {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("rollover");
 
   asio::io_context ioctx;
-  auto w = wal_file_t(ioctx.get_executor(), std::allocator<std::byte>());
-  w.async_create(testdir,
+  auto w = std::make_shared<wal_file_t>(ioctx.get_executor(), std::allocator<std::byte>());
+  w->async_create(testdir,
       [](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
       });
   ioctx.run();
   ioctx.restart();
-  REQUIRE CHECK_EQUAL(1u, w.entries.size());
-  REQUIRE CHECK_EQUAL(0u, (*w.active)->sequence);
+  REQUIRE CHECK_EQUAL(1u, w->entries.size());
+  REQUIRE CHECK_EQUAL(0u, (*w->active)->sequence);
 
   /*
    * Test: rollover, while writing to wal.
    */
   bool rollover_callback_was_called = false;
-  w.async_append(std::initializer_list<wal_file_t::write_variant_type>{
+  w->async_append(std::initializer_list<wal_file_t::write_variant_type>{
         wal_record_skip32{ .bytes = 4 }, wal_record_skip32{ .bytes = 8 }
       },
       [](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
       });
-  w.async_rollover(
+  w->async_rollover(
       [&](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
         rollover_callback_was_called = true;
       });
-  w.async_append(std::initializer_list<wal_file_t::write_variant_type>{
+  w->async_append(std::initializer_list<wal_file_t::write_variant_type>{
         wal_record_skip32{ .bytes = 12 }, wal_record_skip32{ .bytes = 16 }
       },
       [](std::error_code ec) {
@@ -323,10 +323,10 @@ TEST(rollover) {
    * Validation.
    */
   CHECK(rollover_callback_was_called);
-  REQUIRE CHECK_EQUAL(2u, w.entries.size());
-  CHECK(std::prev(w.entries.end()) == w.active);
+  REQUIRE CHECK_EQUAL(2u, w->entries.size());
+  CHECK(std::prev(w->entries.end()) == w->active);
 
-  w.async_records(
+  w->async_records(
       [](std::error_code ec, const auto& records) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
@@ -343,7 +343,7 @@ TEST(rollover) {
 
   const std::array<std::uint64_t, 2> expected_indices{ 0, 1 };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
             return entry->sequence == expected_index;
@@ -354,7 +354,7 @@ TEST(rollover) {
     ::earnest::detail::wal_file_entry_state::ready,
   };
   CHECK(std::equal(
-          w.entries.begin(), w.entries.end(),
+          w->entries.begin(), w->entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
             return entry->state() == expected_state;
