@@ -267,7 +267,7 @@ TEST(write) {
       [](std::error_code ec, const auto& records) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
-        auto expected = std::initializer_list<wal_file_t::write_variant_type>{
+        auto expected = std::initializer_list<wal_file_t::variant_type>{
           wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
         };
         CHECK(std::equal(
@@ -330,7 +330,7 @@ TEST(rollover) {
       [](std::error_code ec, const auto& records) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
-        auto expected = std::initializer_list<wal_file_t::write_variant_type>{
+        auto expected = std::initializer_list<wal_file_t::variant_type>{
           wal_record_seal{}, // There is a single seal in the list, because of the rollover.
           wal_record_skip32{ .bytes = 4 }, wal_record_skip32{ .bytes = 8 },
           wal_record_skip32{ .bytes = 12 }, wal_record_skip32{ .bytes = 16 },

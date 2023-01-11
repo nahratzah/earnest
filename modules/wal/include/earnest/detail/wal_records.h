@@ -137,6 +137,17 @@ inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip64& 
 }
 
 
+struct wal_record_seal {
+  auto operator<=>(const wal_record_seal& y) const noexcept = default;
+};
+template<> struct record_write_type_<wal_record_seal> { using type = wal_record_seal; };
+
+template<typename X>
+inline auto operator&(::earnest::xdr<X>&& x, [[maybe_unused]] const wal_record_seal& r) -> ::earnest::xdr<X>&& {
+  return std::move(x);
+}
+
+
 // Indicates a specific WAL file has been archived.
 struct wal_record_wal_archived {
   std::uint64_t sequence;
@@ -186,19 +197,8 @@ struct wal_record_truncate_file {
 template<> struct record_write_type_<wal_record_truncate_file> { using type = wal_record_truncate_file; };
 
 template<typename X>
-inline auto operator&(::earnest::xdr<X>&& x, typename xdr<X>::template typed_function_arg<wal_record_truncate_file> r) {
+inline auto operator&(::earnest::xdr<X>&& x, typename ::earnest::xdr<X>::template typed_function_arg<wal_record_truncate_file> r) {
   return std::move(x) & r.file & xdr_uint64(r.new_size);
-}
-
-
-struct wal_record_seal {
-  auto operator<=>(const wal_record_seal& y) const noexcept = default;
-};
-template<> struct record_write_type_<wal_record_seal> { using type = wal_record_seal; };
-
-template<typename X>
-inline auto operator&(::earnest::xdr<X>&& x, [[maybe_unused]] const wal_record_seal& r) -> ::earnest::xdr<X>&& {
-  return std::move(x);
 }
 
 
@@ -219,22 +219,23 @@ struct wal_record_modify_file_write32 {
 
 template<> struct record_write_type_<wal_record_modify_file32> { using type = wal_record_modify_file_write32; };
 
-template<typename X>
-inline auto operator&(::earnest::xdr<X>&& x, typename xdr<X>::template typed_function_arg<wal_record_modify_file32> r) {
+template<typename... X>
+inline auto operator&(::earnest::xdr_reader<X...>&& x, typename ::earnest::xdr_reader<X...>::template typed_function_arg<wal_record_modify_file32> r) {
   return std::move(x)
       & r.file
       & xdr_uint64(r.file_offset)
       & xdr_uint32(r.wal_len)
       & xdr_manual(
           [&r](auto& stream, auto callback) {
-            static_assert(::earnest::xdr<X>::is_reader);
             r.wal_offset = stream.position();
+            stream.skip(r.wal_len);
+            if (r.wal_len % 4u != 0u) stream.skip(4u - (r.wal_len % 4u));
             std::invoke(callback, std::error_code());
           });
 }
 
-template<typename X>
-inline auto operator&(::earnest::xdr<X>&& x, typename xdr<X>::template typed_function_arg<wal_record_modify_file_write32> r) {
+template<typename... X>
+inline auto operator&(::earnest::xdr_writer<X...>&& x, typename ::earnest::xdr_writer<X...>::template typed_function_arg<wal_record_modify_file_write32> r) {
   return std::move(x)
       & r.file
       & xdr_uint64(r.file_offset)

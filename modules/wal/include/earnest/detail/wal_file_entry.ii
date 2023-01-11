@@ -379,7 +379,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, cons
 
               async_write(
                   stream,
-                  wf->header_writer_() & xdr_constant(variant_type()).as(xdr_variant),
+                  wf->header_writer_() & xdr_constant(write_variant_type()).as(xdr_variant),
                   completion_wrapper<void(std::error_code)>(
                       std::move(completion_handler),
                       [stream_ptr=std::move(s), wf](auto& h, std::error_code ec) mutable {

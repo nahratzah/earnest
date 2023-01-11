@@ -57,7 +57,9 @@ using wal_record_variant = std::variant<
     wal_record_reserved<30>,
     wal_record_reserved<31>,
     wal_record_create_file, // 32
-    wal_record_erase_file // 33
+    wal_record_erase_file, // 33
+    wal_record_truncate_file, // 34
+    wal_record_modify_file32 // 35
     >;
 
 // Indices 0..31 (inclusive) are reserved for bookkeeping of the WAL.
