@@ -287,7 +287,7 @@ class wal_file
     using namespace std::literals;
 
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [this](auto completion_handler, std::shared_ptr<wal_file> wf, dir d) {
+        [](auto completion_handler, std::shared_ptr<wal_file> wf, dir d) {
           auto ex = asio::make_work_guard(completion_handler, wf->get_executor());
           auto wrapped_handler = asio::bind_executor(
               wf->strand_,
