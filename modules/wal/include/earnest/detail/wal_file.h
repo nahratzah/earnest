@@ -65,8 +65,11 @@ class wal_file {
   wal_file(executor_type ex, allocator_type alloc = allocator_type())
   : unarchived_wal_files(alloc),
     entries(alloc),
-    strand_(std::move(ex))
-  {}
+    strand_(ex),
+    rollover_barrier_(ex, alloc)
+  {
+    std::invoke(rollover_barrier_, std::error_code());
+  }
 
   wal_file(const wal_file&) = delete;
   wal_file(wal_file&&) = delete;
@@ -99,11 +102,86 @@ class wal_file {
                   return;
                 }
 
-                this->entries.back().async_append(std::move(records), std::move(handler));
+                this->active->async_append(std::move(records), std::move(handler));
               },
               get_allocator());
         },
         token, write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()));
+  }
+
+  template<typename CompletionToken>
+  auto async_rollover(CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [this](auto handler) {
+          auto ex = asio::make_work_guard(handler, get_executor());
+
+          strand_.dispatch(
+              [ex, this, handler=std::move(handler)]() {
+                if (entries.empty()) {
+                  auto alloc = asio::get_associated_allocator(handler);
+                  ex.get_executor().post(
+                      completion_wrapper<void()>(
+                          std::move(handler),
+                          [](auto handler) {
+                            std::invoke(handler, make_error_code(wal_errc::bad_state));
+                          }),
+                      alloc);
+                  return;
+                }
+
+                auto wrapped_handler = asio::bind_executor(
+                    strand_,
+                    asio::bind_allocator(
+                        get_allocator(),
+                        [ex, handler=std::move(handler)](std::error_code ec) mutable {
+                          auto alloc = asio::get_associated_allocator(handler);
+                          ex.get_executor().post(
+                              completion_wrapper<void()>(
+                                  std::move(handler),
+                                  [ec](auto handler) {
+                                    std::invoke(handler, ec);
+                                  }),
+                              alloc);
+                        }));
+
+                fanout_barrier<executor_type, allocator_type> new_barrier(get_executor(), get_allocator());
+                rollover_barrier_.async_on_ready(
+                    completion_wrapper<void(std::error_code)>(
+                        std::move(wrapped_handler),
+                        [this, new_barrier](auto wrapped_handler, std::error_code ec) mutable {
+                          if (ec) [[unlikely]] {
+                            std::invoke(new_barrier, ec);
+                            std::invoke(wrapped_handler, ec);
+                            return;
+                          }
+
+                          entries.emplace_back(get_executor(), get_allocator());
+                          const auto new_sequence = entries.back().sequence + 1u;
+                          entries.back().async_create(this->dir_, filename_for_wal_(new_sequence), new_sequence,
+                              completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type)>(
+                                  std::move(wrapped_handler),
+                                  [ this, new_barrier=std::move(new_barrier),
+                                    new_active=std::prev(entries.end())
+                                  ](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) mutable {
+                                    if (!ec) [[likely]] {
+                                      assert(this->active == std::prev(new_active)); // guaranteed by rollover-barrier.
+                                      this->active = new_active;
+                                    }
+                                    std::invoke(new_barrier, std::error_code());
+                                    if (ec) [[unlikely]] {
+                                      std::invoke(handler, ec);
+                                      return;
+                                    }
+
+                                    link_event.async_on_ready(std::move(handler));
+                                    std::prev(new_active)->async_seal(std::move(link_event));
+                                  }));
+                        }));
+                this->rollover_barrier_ = std::move(new_barrier);
+              },
+              get_allocator());
+        },
+        token);
   }
 
   template<typename CompletionToken>
@@ -222,6 +300,7 @@ class wal_file {
 
                     this->dir_ = std::move(d);
                     entries.emplace_back(get_executor(), get_allocator());
+                    this->active = std::prev(entries.end());
                     entries.back().async_create(this->dir_, filename_for_wal_(0), 0,
                         completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
                             std::move(handler),
@@ -235,7 +314,52 @@ class wal_file {
         token, std::move(d));
   }
 
+  template<typename CompletionToken>
+  auto async_records(CompletionToken&& token) const {
+    return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
+        [this](auto handler) {
+          auto ex = asio::make_work_guard(handler, get_executor());
+          auto wrapped_handler = asio::bind_executor(
+              strand_,
+              asio::bind_allocator(
+                  get_allocator(),
+                  [handler=std::move(handler)](std::error_code ec, records_vector records) mutable {
+                    std::invoke(handler, ec, records);
+                  }));
+
+          this->async_records_iter_(records_vector(get_allocator()), this->entries.cbegin(), std::move(wrapped_handler));
+        },
+        token);
+  }
+
   private:
+  template<typename CompletionHandler>
+  auto async_records_iter_(records_vector&& result, typename entries_list::const_iterator iter, CompletionHandler&& handler) const -> void {
+    if (iter == active) {
+      iter->async_records(
+          completion_wrapper<void(std::error_code, records_vector)>(
+              std::move(handler),
+              [result=std::move(result)](auto handler, std::error_code ec, records_vector records) mutable {
+                result.insert(result.end(), std::make_move_iterator(records.begin()), std::make_move_iterator(records.end()));
+                std::invoke(handler, ec, std::move(result));
+              }));
+      return;
+    }
+
+    iter->async_records(
+        completion_wrapper<void(std::error_code, records_vector)>(
+            std::move(handler),
+            [this, iter, result=std::move(result)](auto handler, std::error_code ec, records_vector records) mutable {
+              if (ec) [[unlikely]] {
+                std::invoke(handler, ec, std::move(result));
+                return;
+              }
+
+              result.insert(result.end(), std::make_move_iterator(records.begin()), std::make_move_iterator(records.end()));
+              this->async_records_iter_(std::move(result), std::next(iter), std::move(handler));
+            }));
+  }
+
   static auto filename_for_wal_(std::uint64_t sequence) -> std::filesystem::path {
     std::ostringstream s;
     s << std::hex << std::setfill('0') << std::setw(16) << sequence << wal_file_extension;
@@ -337,6 +461,8 @@ class wal_file {
             }));
     assert(entries.back().state() == wal_file_entry_state::ready);
 
+    this->active = std::prev(entries.end());
+
     auto bookkeeping_barrier = make_completion_barrier(
         std::forward<CompletionHandler>(handler),
         strand_);
@@ -413,10 +539,15 @@ class wal_file {
   public:
   std::unordered_set<std::filesystem::path, fs_path_hash, std::equal_to<std::filesystem::path>, rebind_alloc<std::filesystem::path>> unarchived_wal_files;
   entries_list entries;
+  typename entries_list::iterator active;
 
   private:
   asio::strand<executor_type> strand_;
   dir dir_;
+
+  // We use a fanout-barrier to make sure the rollovers update the 'active' pointer
+  // in sequence of invocation.
+  fanout_barrier<executor_type, allocator_type> rollover_barrier_;
 };
 
 
