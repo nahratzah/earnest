@@ -54,7 +54,7 @@ class wal_file {
   using rebind_alloc = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
 
   using entry_type = wal_file_entry<executor_type, allocator_type>;
-  using entries_list = std::list<entry_type, rebind_alloc<entry_type>>;
+  using entries_list = std::list<std::shared_ptr<entry_type>, rebind_alloc<std::shared_ptr<entry_type>>>;
 
   public:
   using variant_type = typename entry_type::variant_type;
@@ -102,7 +102,7 @@ class wal_file {
                   return;
                 }
 
-                this->active->async_append(std::move(records), std::move(handler));
+                (*this->active)->async_append(std::move(records), std::move(handler));
               },
               get_allocator());
         },
@@ -155,9 +155,9 @@ class wal_file {
                             return;
                           }
 
-                          const auto new_sequence = entries.back().sequence + 1u;
-                          entries.emplace_back(get_executor(), get_allocator());
-                          entries.back().async_create(this->dir_, filename_for_wal_(new_sequence), new_sequence,
+                          const auto new_sequence = entries.back()->sequence + 1u;
+                          entries.emplace_back(allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator()));
+                          entries.back()->async_create(this->dir_, filename_for_wal_(new_sequence), new_sequence,
                               completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type)>(
                                   std::move(wrapped_handler),
                                   [ this, new_barrier=std::move(new_barrier),
@@ -169,9 +169,9 @@ class wal_file {
                                       std::invoke(new_barrier, std::error_code());
 
                                       link_event.async_on_ready(std::move(handler));
-                                      std::prev(new_active)->async_seal(std::move(link_event));
+                                      (*std::prev(new_active))->async_seal(std::move(link_event));
                                     } else { // Fail, remove the new file.
-                                      auto name = new_active->name;
+                                      auto name = (*new_active)->name;
                                       entries.erase(new_active);
                                       std::error_code undo_ec;
                                       this->dir_.erase(name, undo_ec);
@@ -229,14 +229,17 @@ class wal_file {
                               // - the entries should be ordered by their sequence
                               // - the entries should have unique sequence numbers
                               if (!ec) [[likely]] {
-                                this->entries.sort([](const entry_type& x, const entry_type& y) { return x.sequence < y.sequence; });
+                                this->entries.sort(
+                                    [](const std::shared_ptr<entry_type>& x, const std::shared_ptr<entry_type>& y) {
+                                      return x->sequence < y->sequence;
+                                    });
                                 const auto same_sequence_iter = std::adjacent_find(
                                     this->entries.begin(), this->entries.end(),
-                                    [](const entry_type& x, const entry_type& y) -> bool {
-                                      return x.sequence == y.sequence;
+                                    [](const std::shared_ptr<entry_type>& x, const std::shared_ptr<entry_type>& y) -> bool {
+                                      return x->sequence == y->sequence;
                                     });
                                 if (same_sequence_iter != this->entries.end()) [[unlikely]] {
-                                  std::clog << "WAL unrecoverable error: files " << same_sequence_iter->name << " and " << std::next(same_sequence_iter)->name << " have the same sequence number " << same_sequence_iter->sequence << std::endl;
+                                  std::clog << "WAL unrecoverable error: files " << (*same_sequence_iter)->name << " and " << (*std::next(same_sequence_iter))->name << " have the same sequence number " << (*same_sequence_iter)->sequence << std::endl;
                                   ec = make_error_code(wal_errc::unrecoverable);
                                 }
                               }
@@ -257,8 +260,8 @@ class wal_file {
                         continue;
                       std::filesystem::path filename = dir_entry.path();
 
-                      entries.emplace_back(get_executor(), get_allocator());
-                      entries.back().async_open(this->dir_, filename,
+                      entries.emplace_back(std::allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator()));
+                      entries.back()->async_open(this->dir_, filename,
                           completion_wrapper<void(std::error_code, typename entry_type::records_vector records)>(
                               ++barrier,
                               [filename, records_map](auto handler, std::error_code ec, typename entry_type::records_vector records) {
@@ -306,9 +309,9 @@ class wal_file {
                     }
 
                     this->dir_ = std::move(d);
-                    entries.emplace_back(get_executor(), get_allocator());
+                    entries.emplace_back(std::allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator()));
                     this->active = std::prev(entries.end());
-                    entries.back().async_create(this->dir_, filename_for_wal_(0), 0,
+                    entries.back()->async_create(this->dir_, filename_for_wal_(0), 0,
                         completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
                             std::move(handler),
                             [](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
@@ -343,7 +346,7 @@ class wal_file {
   template<typename CompletionHandler>
   auto async_records_iter_(records_vector&& result, typename entries_list::const_iterator iter, CompletionHandler&& handler) const -> void {
     if (iter == active) {
-      iter->async_records(
+      (*iter)->async_records(
           completion_wrapper<void(std::error_code, records_vector)>(
               std::move(handler),
               [result=std::move(result)](auto handler, std::error_code ec, records_vector records) mutable {
@@ -353,7 +356,7 @@ class wal_file {
       return;
     }
 
-    iter->async_records(
+    (*iter)->async_records(
         completion_wrapper<void(std::error_code, records_vector)>(
             std::move(handler),
             [this, iter, result=std::move(result)](auto handler, std::error_code ec, records_vector records) mutable {
@@ -411,7 +414,7 @@ class wal_file {
                     if (ec) [[unlikely]] {
                       std::invoke(handler, ec);
                     } else {
-                      unsealed_entry->async_seal(
+                      (*unsealed_entry)->async_seal(
                           completion_wrapper<void(std::error_code)>(
                               std::move(handler),
                               [this](auto handler, std::error_code ec) {
@@ -434,10 +437,10 @@ class wal_file {
       // and we cannot know if all preceding writes made it into the unsealed-entry.
       // So we must discard those files.
       std::for_each(std::next(unsealed_entry), this->entries.end(),
-          [&discard_barrier, records_ptr](entry_type& e) {
-            std::clog << "WAL: discarding never-confirmed entries in " << e.name << "\n";
-            records_ptr->erase(e.name);
-            e.async_discard_all(++discard_barrier);
+          [&discard_barrier, records_ptr](const std::shared_ptr<entry_type>& e) {
+            std::clog << "WAL: discarding never-confirmed entries in " << e->name << "\n";
+            records_ptr->erase(e->name);
+            e->async_discard_all(++discard_barrier);
           });
       std::invoke(discard_barrier, std::error_code());
     }
@@ -447,9 +450,9 @@ class wal_file {
 
   template<typename CompletionHandler>
   auto create_initial_unsealed_(CompletionHandler&& handler) -> void {
-    const auto new_sequence = entries.back().sequence + 1u;
-    entries.emplace_back(get_executor(), get_allocator());
-    entries.back().async_create(dir_, filename_for_wal_(new_sequence), new_sequence,
+    const auto new_sequence = entries.back()->sequence + 1u;
+    entries.emplace_back(std::allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator()));
+    entries.back()->async_create(dir_, filename_for_wal_(new_sequence), new_sequence,
         completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type)>(
             std::forward<CompletionHandler>(handler),
             [](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_done) {
@@ -463,10 +466,10 @@ class wal_file {
   auto update_bookkeeping_(RecordsMap&& records, CompletionHandler&& handler) {
     assert(!entries.empty());
     assert(std::all_of(entries.begin(), std::prev(entries.end()),
-            [](const entry_type& e) {
-              return e.state() == wal_file_entry_state::sealed;
+            [](const std::shared_ptr<entry_type>& e) {
+              return e->state() == wal_file_entry_state::sealed;
             }));
-    assert(entries.back().state() == wal_file_entry_state::ready);
+    assert(entries.back()->state() == wal_file_entry_state::ready);
 
     this->active = std::prev(entries.end());
 
@@ -481,8 +484,8 @@ class wal_file {
   auto find_first_unsealed_() -> typename entries_list::iterator {
     return std::find_if(
         this->entries.begin(), this->entries.end(),
-        [](const entry_type& e) {
-          return e.state() != wal_file_entry_state::sealed;
+        [](const std::shared_ptr<entry_type>& e) {
+          return e->state() != wal_file_entry_state::sealed;
         });
   }
 
@@ -502,9 +505,9 @@ class wal_file {
     std::unordered_set<std::filesystem::path, fs_path_hash, std::equal_to<std::filesystem::path>, rebind_alloc<std::filesystem::path>> unarchived(get_allocator());
     if (!this->entries.empty()) {
       std::for_each(this->entries.begin(), std::prev(this->entries.end()),
-          [&unarchived, &archived_sequences](const entry_type& e) {
-            if (!archived_sequences.contains(e.sequence))
-              unarchived.insert(e.name);
+          [&unarchived, &archived_sequences](const std::shared_ptr<entry_type>& e) {
+            if (!archived_sequences.contains(e->sequence))
+              unarchived.insert(e->name);
           });
     }
 
@@ -525,9 +528,9 @@ class wal_file {
     for (typename entries_list::iterator next_iter = std::next(iter);
          next_iter != entries.end();
          iter = std::exchange(next_iter, std::next(next_iter))) {
-      for (auto missing_sequence = iter->sequence + 1u; missing_sequence < next_iter->sequence; ++missing_sequence) {
-        const auto new_elem_iter = entries.emplace(next_iter, get_executor(), get_allocator());
-        new_elem_iter->async_create(dir_, filename_for_wal_(missing_sequence), missing_sequence,
+      for (auto missing_sequence = (*iter)->sequence + 1u; missing_sequence < (*next_iter)->sequence; ++missing_sequence) {
+        const auto new_elem_iter = entries.emplace(next_iter, std::allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator()));
+        (*new_elem_iter)->async_create(dir_, filename_for_wal_(missing_sequence), missing_sequence,
             completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
                 ++barrier,
                 [new_elem_iter](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
@@ -535,7 +538,7 @@ class wal_file {
                   if (ec)
                     std::invoke(handler, ec);
                   else
-                    new_elem_iter->async_seal(std::move(handler));
+                    (*new_elem_iter)->async_seal(std::move(handler));
                 }));
       }
     }

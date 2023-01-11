@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -40,57 +41,57 @@ void ensure_file_is_gone(std::string filename) {
 
 TEST(read_empty_wal_file_entry) {
   asio::io_context ioctx;
-  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
-  f.async_open(source_files, "empty",
+  auto f = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
+  f->async_open(source_files, "empty",
       [&f](std::error_code ec, [[maybe_unused]] auto records) {
         CHECK(ec);
-        CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
+        CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
       });
   ioctx.run();
 
-  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
-  CHECK(!f.file.is_open());
+  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
+  CHECK(!f->file.is_open());
 }
 
 TEST(read_non_existant_wal_file_entry) {
   asio::io_context ioctx;
-  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
-  f.async_open(source_files, "non_existant_file",
+  auto f = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
+  f->async_open(source_files, "non_existant_file",
       [&f](std::error_code ec, [[maybe_unused]] auto records) {
         CHECK(ec);
-        CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
+        CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
       });
   ioctx.run();
 
-  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
-  CHECK(!f.file.is_open());
+  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
+  CHECK(!f->file.is_open());
 }
 
 TEST(read_wal_file_entry) {
   asio::io_context ioctx;
-  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
-  f.async_open(source_files, "version_0",
+  auto f = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
+  f->async_open(source_files, "version_0",
       [&f](std::error_code ec, auto records) {
         CHECK_EQUAL(std::error_code(), ec);
-        CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
+        CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f->state());
 
         CHECK_EQUAL(1u, records.size());
         if (!records.empty()) CHECK_EQUAL(0u, records.back().index());
       });
   ioctx.run();
 
-  CHECK_EQUAL(0u, f.version);
-  CHECK_EQUAL(17u, f.sequence);
-  CHECK_EQUAL(32u, f.write_offset());
-  CHECK_EQUAL(28u, f.link_offset());
+  CHECK_EQUAL(0u, f->version);
+  CHECK_EQUAL(17u, f->sequence);
+  CHECK_EQUAL(32u, f->write_offset());
+  CHECK_EQUAL(28u, f->link_offset());
 
-  REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
+  REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f->state());
 
   ioctx.restart();
-  f.async_records(
+  f->async_records(
       [](std::error_code ec, auto records) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(0u, records.size());
@@ -100,12 +101,12 @@ TEST(read_wal_file_entry) {
 
 TEST(read_sealed_wal_file_entry) {
   asio::io_context ioctx;
-  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
-  f.async_open(source_files, "sealed_0",
+  auto f = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
+  f->async_open(source_files, "sealed_0",
       [&f](std::error_code ec, auto records) {
         CHECK_EQUAL(std::error_code(), ec);
-        CHECK_EQUAL(earnest::detail::wal_file_entry_state::sealed, f.state());
+        CHECK_EQUAL(earnest::detail::wal_file_entry_state::sealed, f->state());
 
         CHECK_EQUAL(2u, records.size());
         if (records.size() >= 1) CHECK_EQUAL(0u, records.back().index());
@@ -113,15 +114,15 @@ TEST(read_sealed_wal_file_entry) {
       });
   ioctx.run();
 
-  CHECK_EQUAL(0u, f.version);
-  CHECK_EQUAL(17u, f.sequence);
-  CHECK_EQUAL(36u, f.write_offset());
-  CHECK_EQUAL(32u, f.link_offset());
+  CHECK_EQUAL(0u, f->version);
+  CHECK_EQUAL(17u, f->sequence);
+  CHECK_EQUAL(36u, f->write_offset());
+  CHECK_EQUAL(32u, f->link_offset());
 
-  REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::sealed, f.state());
+  REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::sealed, f->state());
 
   ioctx.restart();
-  f.async_records(
+  f->async_records(
       [](std::error_code ec, auto records) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(1u, records.size());
@@ -138,33 +139,33 @@ TEST(write_wal_file_entry) {
   ensure_file_is_gone("wal_19");
 
   asio::io_context ioctx;
-  auto f = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f.state());
-  f.async_create(write_dir, "wal_19", 19,
+  auto f = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+  CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
+  f->async_create(write_dir, "wal_19", 19,
       [&f](std::error_code ec, auto link_done_event) {
         CHECK_EQUAL(std::error_code(), ec);
-        CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
+        CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f->state());
 
         std::invoke(link_done_event, std::error_code());
       });
   ioctx.run();
 
-  CHECK(f.file.is_open());
+  CHECK(f->file.is_open());
   CHECK_EQUAL(
       (earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::max_version),
-      f.version);
-  CHECK_EQUAL(19u, f.sequence);
-  CHECK_EQUAL(32u, f.write_offset());
-  CHECK_EQUAL(28u, f.link_offset());
+      f->version);
+  CHECK_EQUAL(19u, f->sequence);
+  CHECK_EQUAL(32u, f->write_offset());
+  CHECK_EQUAL(28u, f->link_offset());
 
   CHECK_EQUAL(
       hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\023\000\000\000\000"s),
-      hex_string(f.file.contents<std::string>()));
+      hex_string(f->file.contents<std::string>()));
 
-  REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f.state());
+  REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f->state());
 
   ioctx.restart();
-  f.async_records(
+  f->async_records(
       [](std::error_code ec, auto records) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(0u, records.size());
@@ -182,8 +183,8 @@ TEST(append_wal_file_entry) {
   ensure_file_is_gone("append_log");
 
   asio::io_context ioctx;
-  auto f = wal_file_entry_t(ioctx.get_executor(), std::allocator<std::byte>());
-  f.async_create(write_dir, "append_log", 17,
+  auto f = std::make_shared<wal_file_entry_t>(ioctx.get_executor(), std::allocator<std::byte>());
+  f->async_create(write_dir, "append_log", 17,
       [](std::error_code ec, auto link_done_event) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
@@ -193,7 +194,7 @@ TEST(append_wal_file_entry) {
   ioctx.restart();
 
   bool append_callback_was_called = false;
-  f.async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
+  f->async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
         wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
       },
       [&](std::error_code ec) {
@@ -204,8 +205,8 @@ TEST(append_wal_file_entry) {
 
   CHECK(append_callback_was_called);
 
-  CHECK_EQUAL(60u, f.write_offset());
-  CHECK_EQUAL(56u, f.link_offset());
+  CHECK_EQUAL(60u, f->write_offset());
+  CHECK_EQUAL(56u, f->link_offset());
 
   CHECK_EQUAL(
       hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
@@ -214,7 +215,7 @@ TEST(append_wal_file_entry) {
           + "\000\000\000\002\000\000\000\000"s // wal_record_skip32(0)
           + "\000\000\000\000"s // sentinel (std::monostate)
           ),
-      hex_string(f.file.contents<std::string>()));
+      hex_string(f->file.contents<std::string>()));
 }
 
 TEST(seal_wal_file_entry) {
@@ -227,8 +228,8 @@ TEST(seal_wal_file_entry) {
   ensure_file_is_gone("seal_log");
 
   asio::io_context ioctx;
-  auto f = wal_file_entry_t(ioctx.get_executor(), std::allocator<std::byte>());
-  f.async_create(write_dir, "seal_log", 17,
+  auto f = std::make_shared<wal_file_entry_t>(ioctx.get_executor(), std::allocator<std::byte>());
+  f->async_create(write_dir, "seal_log", 17,
       [](std::error_code ec, auto link_done_event) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
@@ -240,14 +241,14 @@ TEST(seal_wal_file_entry) {
   // We do a write and a seal.
   // The code should order this such that the sealing happens after the write has been allocated space.
   bool append_callback_was_called = false, seal_callback_was_called = false;
-  f.async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
+  f->async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
         wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
       },
       [&](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
         append_callback_was_called = true;
       });
-  f.async_seal([&](std::error_code ec) {
+  f->async_seal([&](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
         seal_callback_was_called = true;
       });
@@ -256,9 +257,9 @@ TEST(seal_wal_file_entry) {
   CHECK(append_callback_was_called);
   CHECK(seal_callback_was_called);
 
-  CHECK_EQUAL(64u, f.write_offset());
-  CHECK_EQUAL(60u, f.link_offset());
-  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::sealed, f.state());
+  CHECK_EQUAL(64u, f->write_offset());
+  CHECK_EQUAL(60u, f->link_offset());
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::sealed, f->state());
 
   CHECK_EQUAL(
       hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
@@ -268,7 +269,7 @@ TEST(seal_wal_file_entry) {
           + "\000\000\000\004"s // wal_record_seal
           + "\000\000\000\000"s // sentinel (std::monostate)
           ),
-      hex_string(f.file.contents<std::string>()));
+      hex_string(f->file.contents<std::string>()));
 }
 
 TEST(discard_all) {
@@ -281,14 +282,14 @@ TEST(discard_all) {
   ensure_file_is_gone("discard_all");
 
   asio::io_context ioctx;
-  auto f = wal_file_entry_t(ioctx.get_executor(), std::allocator<std::byte>());
+  auto f = std::make_shared<wal_file_entry_t>(ioctx.get_executor(), std::allocator<std::byte>());
   // Preparation: create a file with data.
-  f.async_create(write_dir, "discard_all", 17,
+  f->async_create(write_dir, "discard_all", 17,
       [&f](std::error_code ec, auto link_done_event) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
         std::invoke(link_done_event, std::error_code());
 
-        f.async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
+        f->async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
               wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
             },
             [&](std::error_code ec) {
@@ -299,7 +300,7 @@ TEST(discard_all) {
   ioctx.restart();
 
   bool completion_all_was_called = false;
-  f.async_discard_all(
+  f->async_discard_all(
       [&](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
         completion_all_was_called = true;
@@ -307,9 +308,9 @@ TEST(discard_all) {
   ioctx.run();
   CHECK(completion_all_was_called);
 
-  CHECK_EQUAL(36u, f.write_offset());
-  CHECK_EQUAL(32u, f.link_offset());
-  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::sealed, f.state());
+  CHECK_EQUAL(36u, f->write_offset());
+  CHECK_EQUAL(32u, f->link_offset());
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::sealed, f->state());
 
 
   CHECK_EQUAL(
@@ -317,7 +318,7 @@ TEST(discard_all) {
           + "\000\000\000\004"s // wal_record_seal
           + "\000\000\000\000"s // sentinel (std::monostate)
           ),
-      hex_string(f.file.contents<std::string>().substr(0, 36)));
+      hex_string(f->file.contents<std::string>().substr(0, 36)));
 }
 
 int main(int argc, char** argv) {

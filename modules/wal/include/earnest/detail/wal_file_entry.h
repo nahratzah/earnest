@@ -83,7 +83,9 @@ auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::ostream&;
 
 
 template<typename Executor, typename Allocator>
-class wal_file_entry {
+class wal_file_entry
+: public std::enable_shared_from_this<wal_file_entry<Executor, Allocator>>
+{
   public:
   static inline constexpr std::uint_fast32_t max_version = 0;
   static inline constexpr std::size_t read_buffer_size = 2u * 1024u * 1024u;

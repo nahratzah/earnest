@@ -432,7 +432,7 @@ class decoder_callback {
 
   private:
   template<typename Stream, typename... T>
-  void continue_(Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
+  static void continue_(completion_fn&& cfn, reader_type&& r, Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
 
   allocator_type alloc;
   Dfn dfn_;
@@ -874,11 +874,11 @@ class encoder_callback {
 
   private:
   template<typename Stream, typename... T>
-  void continue_(Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
+  static void continue_(completion_fn&& cfn, writer_type&& w, Stream& stream, std::tuple<T...>& temporaries, std::error_code ec);
 
   allocator_type alloc;
   Dfn dfn_;
-  writer_type r_;
+  writer_type w_;
   completion_fn cfn_;
 };
 

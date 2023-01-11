@@ -460,21 +460,21 @@ inline void decoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std
         dfn_,
         stream,
         temporaries,
-        [self=std::move(*this), &stream, &temporaries](std::error_code ec) mutable {
-          self.continue_(stream, temporaries, ec);
+        [cfn=std::move(cfn_), r=std::move(r_), &stream, &temporaries](std::error_code ec) mutable {
+          continue_(std::move(cfn), std::move(r), stream, temporaries, ec);
         });
   }
 }
 
 template<typename Dfn, typename Nested, typename Alloc>
 template<typename Stream, typename... T>
-inline void decoder_callback<Dfn, Nested, Alloc>::continue_(Stream& stream, std::tuple<T...>& temporaries, std::error_code ec) {
+inline void decoder_callback<Dfn, Nested, Alloc>::continue_(completion_fn&& cfn, reader_type&& r, Stream& stream, std::tuple<T...>& temporaries, std::error_code ec) {
   if (ec) {
-    std::invoke(cfn_, stream, temporaries, ec);
+    std::invoke(cfn, stream, temporaries, ec);
   } else {
-    async_read(stream, buffers(r_),
-        [ done_cb=std::move(cfn_),
-          reader_callbacks=callbacks(r_),
+    async_read(stream, buffers(r),
+        [ done_cb=std::move(cfn),
+          reader_callbacks=callbacks(r),
           &stream,
           &temporaries
         ](std::error_code ec, [[maybe_unused]] std::size_t bytes) mutable {
@@ -857,7 +857,7 @@ template<typename Dfn, typename Nested, typename Alloc>
 inline encoder_callback<Dfn, Nested, Alloc>::encoder_callback(Dfn&& dfn, std::tuple<writer_type, completion_fn>&& rc, allocator_type alloc)
 : alloc(std::move(alloc)),
   dfn_(std::move(dfn)),
-  r_(std::get<0>(std::move(rc))),
+  w_(std::get<0>(std::move(rc))),
   cfn_(std::get<1>(std::move(rc)))
 {}
 
@@ -876,21 +876,21 @@ inline void encoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std
         dfn_,
         stream,
         temporaries,
-        [self=std::move(*this), &stream, &temporaries](std::error_code ec) mutable {
-          self.continue_(stream, temporaries, ec);
+        [cfn=std::move(cfn_), w=std::move(w_), &stream, &temporaries](std::error_code ec) mutable {
+          continue_(std::move(cfn), std::move(w), stream, temporaries, ec);
         });
   }
 }
 
 template<typename Dfn, typename Nested, typename Alloc>
 template<typename Stream, typename... T>
-inline void encoder_callback<Dfn, Nested, Alloc>::continue_(Stream& stream, std::tuple<T...>& temporaries, std::error_code ec) {
-  if (!ec) ec = std::invoke(callbacks(r_), temporaries);
+inline void encoder_callback<Dfn, Nested, Alloc>::continue_(completion_fn&& cfn, writer_type&& w, Stream& stream, std::tuple<T...>& temporaries, std::error_code ec) {
+  if (!ec) ec = std::invoke(callbacks(w), temporaries);
   if (ec) {
-    std::invoke(cfn_, stream, temporaries, ec);
+    std::invoke(cfn, stream, temporaries, ec);
   } else {
-    async_write(stream, buffers(r_),
-        [ done_cb=std::move(cfn_),
+    async_write(stream, buffers(w),
+        [ done_cb=std::move(cfn),
           &stream,
           &temporaries
         ](std::error_code ec, [[maybe_unused]] std::size_t bytes) mutable {

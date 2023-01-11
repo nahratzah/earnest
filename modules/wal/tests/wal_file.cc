@@ -70,7 +70,7 @@ TEST(create_wal) {
           w.entries.begin(), w.entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
-            return entry.sequence == expected_index;
+            return entry->sequence == expected_index;
           }));
 
   const std::array<std::string_view, 1> expected_names{
@@ -80,7 +80,7 @@ TEST(create_wal) {
           w.entries.begin(), w.entries.end(),
           expected_names.begin(), expected_names.end(),
           [](const auto& entry, std::string_view expected_name) -> bool {
-            return entry.name == expected_name;
+            return entry->name == expected_name;
           }));
 
   const std::array<::earnest::detail::wal_file_entry_state, 1> expected_states{
@@ -90,7 +90,7 @@ TEST(create_wal) {
           w.entries.begin(), w.entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
-            return entry.state() == expected_state;
+            return entry->state() == expected_state;
           }));
 }
 
@@ -129,7 +129,7 @@ TEST(reread_wal) {
           w.entries.begin(), w.entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
-            return entry.sequence == expected_index;
+            return entry->sequence == expected_index;
           }));
 
   const std::array<std::string_view, 1> expected_names{
@@ -139,7 +139,7 @@ TEST(reread_wal) {
           w.entries.begin(), w.entries.end(),
           expected_names.begin(), expected_names.end(),
           [](const auto& entry, std::string_view expected_name) -> bool {
-            return entry.name == expected_name;
+            return entry->name == expected_name;
           }));
 
   const std::array<::earnest::detail::wal_file_entry_state, 1> expected_states{
@@ -149,7 +149,7 @@ TEST(reread_wal) {
           w.entries.begin(), w.entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
-            return entry.state() == expected_state;
+            return entry->state() == expected_state;
           }));
 }
 
@@ -158,14 +158,14 @@ TEST(recovery) {
 
   { // Preparation stage.
     asio::io_context ioctx;
-    auto f0 = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-    auto f3 = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>(ioctx.get_executor(), std::allocator<std::byte>());
-    f0.async_create(testdir, "0.wal", 0,
+    auto f0 = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+    auto f3 = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
+    f0->async_create(testdir, "0.wal", 0,
         [](std::error_code ec, auto link_event) {
           REQUIRE CHECK_EQUAL(std::error_code(), ec);
           std::invoke(link_event, std::error_code());
         });
-    f3.async_create(testdir, "3.wal", 3,
+    f3->async_create(testdir, "3.wal", 3,
         [](std::error_code ec, auto link_event) {
           REQUIRE CHECK_EQUAL(std::error_code(), ec);
           std::invoke(link_event, std::error_code());
@@ -195,7 +195,7 @@ TEST(recovery) {
           w.entries.begin(), w.entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
-            return entry.sequence == expected_index;
+            return entry->sequence == expected_index;
           }));
 
   const std::array<std::string_view, 5> expected_names{
@@ -209,7 +209,7 @@ TEST(recovery) {
           w.entries.begin(), w.entries.end(),
           expected_names.begin(), expected_names.end(),
           [](const auto& entry, std::string_view expected_name) -> bool {
-            return entry.name == expected_name;
+            return entry->name == expected_name;
           }));
 
   const std::array<::earnest::detail::wal_file_entry_state, 5> expected_states{
@@ -223,7 +223,7 @@ TEST(recovery) {
           w.entries.begin(), w.entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
-            return entry.state() == expected_state;
+            return entry->state() == expected_state;
           }));
 }
 
@@ -263,7 +263,7 @@ TEST(write) {
   REQUIRE CHECK_EQUAL(1u, w.entries.size());
   CHECK(std::prev(w.entries.end()) == w.active);
 
-  w.entries.front().async_records(
+  w.async_records(
       [](std::error_code ec, const auto& records) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
@@ -293,7 +293,7 @@ TEST(rollover) {
   ioctx.run();
   ioctx.restart();
   REQUIRE CHECK_EQUAL(1u, w.entries.size());
-  REQUIRE CHECK_EQUAL(0u, w.active->sequence);
+  REQUIRE CHECK_EQUAL(0u, (*w.active)->sequence);
 
   /*
    * Test: rollover, while writing to wal.
@@ -346,7 +346,7 @@ TEST(rollover) {
           w.entries.begin(), w.entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
-            return entry.sequence == expected_index;
+            return entry->sequence == expected_index;
           }));
 
   const std::array<::earnest::detail::wal_file_entry_state, 2> expected_states{
@@ -357,7 +357,7 @@ TEST(rollover) {
           w.entries.begin(), w.entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
-            return entry.state() == expected_state;
+            return entry->state() == expected_state;
           }));
 }
 
