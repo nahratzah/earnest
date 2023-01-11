@@ -280,6 +280,7 @@ TEST(rollover) {
   using wal_file_t = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
+  using ::earnest::detail::wal_record_seal;
 
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("rollover");
 
@@ -291,6 +292,8 @@ TEST(rollover) {
       });
   ioctx.run();
   ioctx.restart();
+  REQUIRE CHECK_EQUAL(1u, w.entries.size());
+  REQUIRE CHECK_EQUAL(0u, w.active->sequence);
 
   /*
    * Test: rollover, while writing to wal.
@@ -319,6 +322,7 @@ TEST(rollover) {
   /*
    * Validation.
    */
+  CHECK(rollover_callback_was_called);
   REQUIRE CHECK_EQUAL(2u, w.entries.size());
   CHECK(std::prev(w.entries.end()) == w.active);
 
@@ -327,12 +331,34 @@ TEST(rollover) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
         auto expected = std::initializer_list<wal_file_t::write_variant_type>{
-          wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
+          wal_record_seal{}, // There is a single seal in the list, because of the rollover.
+          wal_record_skip32{ .bytes = 4 }, wal_record_skip32{ .bytes = 8 },
+          wal_record_skip32{ .bytes = 12 }, wal_record_skip32{ .bytes = 16 },
         };
         CHECK(std::is_permutation(
                 expected.begin(), expected.end(),
                 records.begin(), records.end()));
       });
+  ioctx.run();
+
+  const std::array<std::uint64_t, 2> expected_indices{ 0, 1 };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_indices.begin(), expected_indices.end(),
+          [](const auto& entry, std::uint64_t expected_index) -> bool {
+            return entry.sequence == expected_index;
+          }));
+
+  const std::array<::earnest::detail::wal_file_entry_state, 2> expected_states{
+    ::earnest::detail::wal_file_entry_state::sealed,
+    ::earnest::detail::wal_file_entry_state::ready,
+  };
+  CHECK(std::equal(
+          w.entries.begin(), w.entries.end(),
+          expected_states.begin(), expected_states.end(),
+          [](const auto& entry, auto expected_state) -> bool {
+            return entry.state() == expected_state;
+          }));
 }
 
 int main(int argc, char** argv) {

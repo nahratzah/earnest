@@ -155,26 +155,33 @@ class wal_file {
                             return;
                           }
 
-                          entries.emplace_back(get_executor(), get_allocator());
                           const auto new_sequence = entries.back().sequence + 1u;
+                          entries.emplace_back(get_executor(), get_allocator());
                           entries.back().async_create(this->dir_, filename_for_wal_(new_sequence), new_sequence,
                               completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type)>(
                                   std::move(wrapped_handler),
                                   [ this, new_barrier=std::move(new_barrier),
                                     new_active=std::prev(entries.end())
                                   ](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) mutable {
-                                    if (!ec) [[likely]] {
+                                    if (!ec) [[likely]] { // Success!
                                       assert(this->active == std::prev(new_active)); // guaranteed by rollover-barrier.
                                       this->active = new_active;
-                                    }
-                                    std::invoke(new_barrier, std::error_code());
-                                    if (ec) [[unlikely]] {
+                                      std::invoke(new_barrier, std::error_code());
+
+                                      link_event.async_on_ready(std::move(handler));
+                                      std::prev(new_active)->async_seal(std::move(link_event));
+                                    } else { // Fail, remove the new file.
+                                      auto name = new_active->name;
+                                      entries.erase(new_active);
+                                      std::error_code undo_ec;
+                                      this->dir_.erase(name, undo_ec);
+                                      if (undo_ec)
+                                        std::clog << "WAL: rollover failed, and during recovery, the file erase failed (filename: " << name << ", error: " << undo_ec << "); further rollovers will be impossible\n";
+                                      std::invoke(new_barrier, undo_ec);
+
                                       std::invoke(handler, ec);
                                       return;
                                     }
-
-                                    link_event.async_on_ready(std::move(handler));
-                                    std::prev(new_active)->async_seal(std::move(link_event));
                                   }));
                         }));
                 this->rollover_barrier_ = std::move(new_barrier);

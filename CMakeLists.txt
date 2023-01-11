@@ -9,15 +9,15 @@ if (UNIX AND
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fcolor-diagnostics")
 endif()
 
-find_program(CLANG_TIDY_BINARY clang-tidy14)
-if (CLANG_TIDY_BINARY)
-  set(CMAKE_CXX_CLANG_TIDY
-    ${CLANG_TIDY_BINARY};
-    --format-style='file';
-    --header-filter=${CMAKE_CURRENT_SOURCE_DIR};
-    --use-color;
-  )
-endif ()
+# find_program(CLANG_TIDY_BINARY clang-tidy14)
+# if (CLANG_TIDY_BINARY)
+#   set(CMAKE_CXX_CLANG_TIDY
+#     ${CLANG_TIDY_BINARY};
+#     --format-style='file';
+#     --header-filter=${CMAKE_CURRENT_SOURCE_DIR};
+#     --use-color;
+#   )
+# endif ()
 
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
