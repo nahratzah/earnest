@@ -28,6 +28,7 @@ struct file_id {
   auto get_allocator() const -> allocator_type { return ns.get_allocator(); }
 
   auto operator<=>(const file_id& y) const noexcept = default;
+  auto operator==(const file_id& y) const noexcept -> bool = default;
 
   std::string ns; // Namespace in which the file is located.
   std::string filename; // Name of the file.

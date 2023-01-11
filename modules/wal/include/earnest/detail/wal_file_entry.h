@@ -99,11 +99,8 @@ class wal_file_entry {
   using variant_type = wal_record_variant;
   using write_variant_type = record_write_type_t<wal_record_variant>;
   using records_vector = std::vector<variant_type, rebind_alloc<variant_type>>;
-
-  private:
   using write_records_vector = std::vector<write_variant_type, std::scoped_allocator_adaptor<rebind_alloc<write_variant_type>>>;
 
-  public:
   wal_file_entry(const executor_type& ex, allocator_type alloc);
 
   wal_file_entry(const wal_file_entry&) = delete;
@@ -139,6 +136,9 @@ class wal_file_entry {
   requires std::ranges::input_range<std::remove_reference_t<Range>>
 #endif
   auto async_append(Range&& records, CompletionToken&& token);
+
+  template<typename CompletionToken>
+  auto async_append(write_records_vector records, CompletionToken&& token);
 
   template<typename CompletionToken>
   auto async_seal(CompletionToken&& token);

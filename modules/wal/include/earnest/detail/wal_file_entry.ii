@@ -409,6 +409,14 @@ template<typename Range, typename CompletionToken>
 requires std::ranges::input_range<std::remove_reference_t<Range>>
 #endif
 inline auto wal_file_entry<Executor, Allocator>::async_append(Range&& records, CompletionToken&& token) {
+  return async_append(
+      write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()),
+      std::forward<CompletionToken>(token));
+}
+
+template<typename Executor, typename Allocator>
+template<typename CompletionToken>
+inline auto wal_file_entry<Executor, Allocator>::async_append(write_records_vector records, CompletionToken&& token) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, write_records_vector&& records, wal_file_entry& wf, auto on_space_assigned) {
         auto ex = asio::make_work_guard(completion_handler, wf.get_executor());

@@ -11,6 +11,7 @@
 #include <list>
 #include <memory>
 #include <ranges>
+#include <concepts>
 #include <scoped_allocator>
 #include <sstream>
 #include <string_view>
@@ -56,6 +57,11 @@ class wal_file {
   using entries_list = std::list<entry_type, rebind_alloc<entry_type>>;
 
   public:
+  using variant_type = typename entry_type::variant_type;
+  using write_variant_type = typename entry_type::write_variant_type;
+  using records_vector = typename entry_type::records_vector;
+  using write_records_vector = typename entry_type::write_records_vector;
+
   wal_file(executor_type ex, allocator_type alloc = allocator_type())
   : unarchived_wal_files(alloc),
     entries(alloc),
@@ -69,6 +75,36 @@ class wal_file {
 
   auto get_executor() const -> executor_type { return strand_.get_inner_executor(); }
   auto get_allocator() const -> allocator_type { return entries.get_allocator(); }
+
+  template<typename Range, typename CompletionToken>
+#if __cpp_concepts >= 201907L
+  requires std::ranges::input_range<std::remove_reference_t<Range>>
+#endif
+  auto async_append(Range&& records, CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [this](auto handler, auto records) {
+          auto ex = asio::make_work_guard(handler, get_executor());
+
+          strand_.dispatch(
+              [ex, this, handler=std::move(handler), records=std::move(records)]() mutable {
+                if (entries.empty()) {
+                  auto alloc = asio::get_associated_allocator(handler);
+                  ex.get_executor().post(
+                      completion_wrapper<void()>(
+                          std::move(handler),
+                          [](auto handler) {
+                            std::invoke(handler, make_error_code(wal_errc::bad_state));
+                          }),
+                      alloc);
+                  return;
+                }
+
+                this->entries.back().async_append(std::move(records), std::move(handler));
+              },
+              get_allocator());
+        },
+        token, write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()));
+  }
 
   template<typename CompletionToken>
   auto async_open(dir d, CompletionToken&& token) {

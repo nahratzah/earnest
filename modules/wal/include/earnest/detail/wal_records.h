@@ -25,7 +25,9 @@ struct record_write_type_<std::tuple<T...>> {
 };
 
 
-template<std::size_t Index> struct wal_record_reserved {};
+template<std::size_t Index> struct wal_record_reserved {
+  auto operator<=>(const wal_record_reserved& y) const noexcept = default;
+};
 template<std::size_t Index> struct record_write_type_<wal_record_reserved<Index>> { using type = wal_record_reserved<Index>; };
 
 template<typename X, std::size_t Index>
@@ -35,7 +37,9 @@ inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_reserved<Ind
 }
 
 
-struct wal_record_noop {};
+struct wal_record_noop {
+  auto operator<=>(const wal_record_noop& y) const noexcept = default;
+};
 template<> struct record_write_type_<wal_record_noop> { using type = wal_record_noop; };
 
 template<typename X>
@@ -46,11 +50,15 @@ inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_noop& noop) 
 
 struct wal_record_skip32 {
   std::uint32_t bytes;
+
+  auto operator<=>(const wal_record_skip32& y) const noexcept = default;
 };
 template<> struct record_write_type_<wal_record_skip32> { using type = wal_record_skip32; };
 
 struct wal_record_skip64 {
   std::uint64_t bytes;
+
+  auto operator<=>(const wal_record_skip64& y) const noexcept = default;
 };
 template<> struct record_write_type_<wal_record_skip64> { using type = wal_record_skip64; };
 
@@ -132,6 +140,8 @@ inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip64& 
 // Indicates a specific WAL file has been archived.
 struct wal_record_wal_archived {
   std::uint64_t sequence;
+
+  auto operator<=>(const wal_record_wal_archived& y) const noexcept = default;
 };
 template<> struct record_write_type_<wal_record_wal_archived> { using type = wal_record_wal_archived; };
 
@@ -143,6 +153,8 @@ inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<w
 
 struct wal_record_create_file {
   file_id file;
+
+  auto operator<=>(const wal_record_create_file& y) const noexcept = default;
 };
 template<> struct record_write_type_<wal_record_create_file> { using type = wal_record_create_file; };
 
@@ -154,6 +166,8 @@ inline auto operator&(::earnest::xdr<X>&& x, typename xdr<X>::template typed_fun
 
 struct wal_record_erase_file {
   file_id file;
+
+  auto operator<=>(const wal_record_erase_file& y) const noexcept = default;
 };
 template<> struct record_write_type_<wal_record_erase_file> { using type = wal_record_erase_file; };
 
@@ -166,6 +180,8 @@ inline auto operator&(::earnest::xdr<X>&& x, typename xdr<X>::template typed_fun
 struct wal_record_truncate_file {
   file_id file;
   std::uint64_t new_size;
+
+  auto operator<=>(const wal_record_truncate_file& y) const noexcept = default;
 };
 template<> struct record_write_type_<wal_record_truncate_file> { using type = wal_record_truncate_file; };
 
@@ -175,7 +191,9 @@ inline auto operator&(::earnest::xdr<X>&& x, typename xdr<X>::template typed_fun
 }
 
 
-struct wal_record_seal {};
+struct wal_record_seal {
+  auto operator<=>(const wal_record_seal& y) const noexcept = default;
+};
 template<> struct record_write_type_<wal_record_seal> { using type = wal_record_seal; };
 
 template<typename X>
@@ -189,6 +207,8 @@ struct wal_record_modify_file32 {
   std::uint64_t file_offset;
   std::uint64_t wal_offset;
   std::uint32_t wal_len;
+
+  auto operator<=>(const wal_record_modify_file32& y) const noexcept = default;
 };
 
 struct wal_record_modify_file_write32 {
