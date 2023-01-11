@@ -19,6 +19,12 @@ endif()
 #   )
 # endif ()
 
+# add_compile_options(-fsanitize=address)
+# add_link_options(-fsanitize=address)
+
+# add_compile_options(-fsanitize=thread)
+# add_link_options(-fsanitize=thread)
+
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 
 add_subdirectory(modules)
