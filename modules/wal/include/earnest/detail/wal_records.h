@@ -25,13 +25,13 @@ struct record_write_type_<std::tuple<T...>> {
 };
 
 
-template<std::size_t Index> struct wal_record_reserved {
+struct wal_record_reserved {
   auto operator<=>(const wal_record_reserved& y) const noexcept = default;
 };
-template<std::size_t Index> struct record_write_type_<wal_record_reserved<Index>> { using type = wal_record_reserved<Index>; };
+template<> struct record_write_type_<wal_record_reserved> { using type = wal_record_reserved; };
 
-template<typename X, std::size_t Index>
-inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_reserved<Index>& noop) -> xdr<X>&& {
+template<typename X>
+inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_reserved& noop) -> xdr<X>&& {
   throw std::logic_error("bug: shouldn't be serializing/deserializing reserved elements");
   return std::move(x);
 }
