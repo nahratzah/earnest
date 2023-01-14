@@ -17,8 +17,6 @@
 #include <sstream>
 #include <string_view>
 #include <system_error>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -67,8 +65,7 @@ class wal_file
   using write_records_vector = typename entry_type::write_records_vector;
 
   wal_file(executor_type ex, allocator_type alloc = allocator_type())
-  : unarchived_wal_files(alloc),
-    entries(alloc),
+  : entries(alloc),
     strand_(ex),
     rollover_barrier_(ex, alloc)
   {
@@ -224,11 +221,10 @@ class wal_file
                       return;
                     }
 
-                    auto records_map = std::allocate_shared<std::unordered_map<std::filesystem::path, typename entry_type::records_vector, fs_path_hash, std::equal_to<std::filesystem::path>, std::scoped_allocator_adaptor<rebind_alloc<std::pair<const std::filesystem::path, typename entry_type::records_vector>>>>>(wf->get_allocator(), wf->get_allocator());
                     auto barrier = make_completion_barrier(
                         completion_wrapper<void(std::error_code)>(
                             std::move(handler),
-                            [wf, records_map](auto handler, std::error_code ec) {
+                            [wf](auto handler, std::error_code ec) {
                               // We want to do some initial verification:
                               // - the entries should be ordered by their sequence
                               // - the entries should have unique sequence numbers
@@ -244,7 +240,7 @@ class wal_file
                                       return x->sequence == y->sequence;
                                     });
                                 if (same_sequence_iter != wf->entries.end()) [[unlikely]] {
-                                  std::clog << "WAL unrecoverable error: files " << (*same_sequence_iter)->name << " and " << (*std::next(same_sequence_iter))->name << " have the same sequence number " << (*same_sequence_iter)->sequence << std::endl;
+                                  std::clog << "WAL: unrecoverable error: files " << (*same_sequence_iter)->name << " and " << (*std::next(same_sequence_iter))->name << " have the same sequence number " << (*same_sequence_iter)->sequence << std::endl;
                                   ec = make_error_code(wal_errc::unrecoverable);
                                 }
                               }
@@ -254,7 +250,7 @@ class wal_file
                                 return;
                               }
 
-                              wf->recover_(std::move(*records_map), std::move(handler));
+                              wf->recover_(std::move(handler));
                             }),
                             wf->strand_);
 
@@ -269,11 +265,9 @@ class wal_file
                       wf->entries.back()->async_open(wf->dir_, filename,
                           completion_wrapper<void(std::error_code, typename entry_type::records_vector records)>(
                               ++barrier,
-                              [filename, records_map](auto handler, std::error_code ec, typename entry_type::records_vector records) {
+                              [filename](auto handler, std::error_code ec, [[maybe_unused]] typename entry_type::records_vector records) {
                                 if (ec) [[unlikely]]
-                                  std::clog << "error while opening WAL file '"sv << filename << "': "sv << ec << "\n";
-                                else
-                                  records_map->emplace(filename, std::move(records));
+                                  std::clog << "WAL: error while opening WAL file '"sv << filename << "': "sv << ec << "\n";
                                 std::invoke(handler, ec);
                               }));
                     }
@@ -392,33 +386,32 @@ class wal_file
     return std::move(s).str();
   }
 
-  template<typename RecordsMap, typename CompletionHandler>
-  auto recover_(RecordsMap&& records, CompletionHandler&& handler) {
+  template<typename CompletionHandler>
+  auto recover_(CompletionHandler&& handler) {
     if (this->entries.empty()) [[unlikely]] {
       std::invoke(handler, make_error_code(wal_errc::no_data_files));
       return;
     }
 
-    auto records_ptr = std::allocate_shared<std::remove_cvref_t<RecordsMap>>(get_allocator(), std::forward<RecordsMap>(records));
     auto recover_barrier = make_completion_barrier(
         completion_wrapper<void(std::error_code)>(
             std::forward<CompletionHandler>(handler),
-            [wf=this->shared_from_this(), records_ptr](auto handler, std::error_code ec) mutable {
+            [wf=this->shared_from_this()](auto handler, std::error_code ec) mutable {
               if (ec) [[unlikely]]
                 std::invoke(handler, ec);
               else
-                wf->update_bookkeeping_(std::move(*records_ptr), std::move(handler));
+                wf->update_bookkeeping_(std::move(handler));
             }),
         strand_);
 
     const typename entries_list::iterator unsealed_entry = find_first_unsealed_();
     if (unsealed_entry == this->entries.end()) {
-      std::clog << "WAL up to date (last file is sealed)\n";
+      std::clog << "WAL: up to date (last file is sealed)\n";
       create_initial_unsealed_(++recover_barrier); // Start a new file, so we have an unsealed file.
     } else if (std::next(unsealed_entry) == this->entries.end()) {
-      std::clog << "WAL up to date (last file is accepting writes)\n";
+      std::clog << "WAL: up to date (last file is accepting writes)\n";
     } else {
-      std::clog << "WAL has multiple unsealed files, recovery is required\n";
+      std::clog << "WAL: has multiple unsealed files, recovery is required\n";
 
       // Once we've discarded all trailing files, seal the current file.
       // Then create a new empty file.
@@ -453,9 +446,8 @@ class wal_file
       // and we cannot know if all preceding writes made it into the unsealed-entry.
       // So we must discard those files.
       std::for_each(std::next(unsealed_entry), this->entries.end(),
-          [&discard_barrier, records_ptr](const std::shared_ptr<entry_type>& e) {
+          [&discard_barrier](const std::shared_ptr<entry_type>& e) {
             std::clog << "WAL: discarding never-confirmed entries in " << e->name << "\n";
-            records_ptr->erase(e->name);
             e->async_discard_all(++discard_barrier);
           });
       std::invoke(discard_barrier, std::error_code());
@@ -478,8 +470,8 @@ class wal_file
         ));
   }
 
-  template<typename RecordsMap, typename CompletionHandler>
-  auto update_bookkeeping_(RecordsMap&& records, CompletionHandler&& handler) {
+  template<typename CompletionHandler>
+  auto update_bookkeeping_(CompletionHandler&& handler) {
     assert(!entries.empty());
     assert(std::all_of(entries.begin(), std::prev(entries.end()),
             [](const std::shared_ptr<entry_type>& e) {
@@ -490,12 +482,7 @@ class wal_file
     this->active = entries.back();
     entries.pop_back();
 
-    auto bookkeeping_barrier = make_completion_barrier(
-        std::forward<CompletionHandler>(handler),
-        strand_);
-
-    unarchived_wal_files = compute_unarchived_wal_files_(records);
-    std::invoke(bookkeeping_barrier, std::error_code());
+    std::invoke(handler, std::error_code());
   }
 
   auto find_first_unsealed_() -> typename entries_list::iterator {
@@ -504,31 +491,6 @@ class wal_file
         [](const std::shared_ptr<entry_type>& e) {
           return e->state() != wal_file_entry_state::sealed;
         });
-  }
-
-  template<typename RecordsMap>
-  auto compute_unarchived_wal_files_(const RecordsMap& records) const -> std::unordered_set<std::filesystem::path, fs_path_hash, std::equal_to<std::filesystem::path>, rebind_alloc<std::filesystem::path>> {
-    std::unordered_set<std::uint64_t, std::hash<std::uint64_t>, std::equal_to<std::uint64_t>, rebind_alloc<std::uint64_t>> archived_sequences(get_allocator());
-    std::for_each(records.begin(), records.end(),
-        [&archived_sequences](const auto& rp) {
-          std::for_each(
-              rp.second.begin(), rp.second.end(),
-              [&archived_sequences](const auto& record_variant) {
-                if (std::holds_alternative<wal_record_wal_archived>(record_variant))
-                  archived_sequences.insert(std::get<wal_record_wal_archived>(record_variant).sequence);
-              });
-        });
-
-    std::unordered_set<std::filesystem::path, fs_path_hash, std::equal_to<std::filesystem::path>, rebind_alloc<std::filesystem::path>> unarchived(get_allocator());
-    if (!this->entries.empty()) {
-      std::for_each(this->entries.begin(), std::prev(this->entries.end()),
-          [&unarchived, &archived_sequences](const std::shared_ptr<entry_type>& e) {
-            if (!archived_sequences.contains(e->sequence))
-              unarchived.insert(e->name);
-          });
-    }
-
-    return unarchived;
   }
 
   template<typename CompletionHandler>
@@ -566,7 +528,6 @@ class wal_file
   }
 
   public:
-  std::unordered_set<std::filesystem::path, fs_path_hash, std::equal_to<std::filesystem::path>, rebind_alloc<std::filesystem::path>> unarchived_wal_files;
   entries_list entries;
   std::shared_ptr<entry_type> active;
 
