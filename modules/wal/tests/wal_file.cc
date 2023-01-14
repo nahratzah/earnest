@@ -62,36 +62,10 @@ TEST(create_wal) {
   /*
    * Validation.
    */
-  REQUIRE CHECK_EQUAL(1u, w->entries.size());
-  CHECK(std::prev(w->entries.end()) == w->active);
-
-  const std::array<std::uint64_t, 1> expected_indices{ 0 };
-  CHECK(std::equal(
-          w->entries.begin(), w->entries.end(),
-          expected_indices.begin(), expected_indices.end(),
-          [](const auto& entry, std::uint64_t expected_index) -> bool {
-            return entry->sequence == expected_index;
-          }));
-
-  const std::array<std::string_view, 1> expected_names{
-    "0000000000000000.wal",
-  };
-  CHECK(std::equal(
-          w->entries.begin(), w->entries.end(),
-          expected_names.begin(), expected_names.end(),
-          [](const auto& entry, std::string_view expected_name) -> bool {
-            return entry->name == expected_name;
-          }));
-
-  const std::array<::earnest::detail::wal_file_entry_state, 1> expected_states{
-    ::earnest::detail::wal_file_entry_state::ready,
-  };
-  CHECK(std::equal(
-          w->entries.begin(), w->entries.end(),
-          expected_states.begin(), expected_states.end(),
-          [](const auto& entry, auto expected_state) -> bool {
-            return entry->state() == expected_state;
-          }));
+  CHECK(w->entries.empty());
+  CHECK_EQUAL(0u, w->active->sequence);
+  CHECK_EQUAL("0000000000000000.wal", w->active->name);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
 }
 
 TEST(reread_wal) {
@@ -121,36 +95,10 @@ TEST(reread_wal) {
   /*
    * Validation.
    */
-  REQUIRE CHECK_EQUAL(1u, w->entries.size());
-  CHECK(std::prev(w->entries.end()) == w->active);
-
-  const std::array<std::uint64_t, 1> expected_indices{ 0 };
-  CHECK(std::equal(
-          w->entries.begin(), w->entries.end(),
-          expected_indices.begin(), expected_indices.end(),
-          [](const auto& entry, std::uint64_t expected_index) -> bool {
-            return entry->sequence == expected_index;
-          }));
-
-  const std::array<std::string_view, 1> expected_names{
-    "0000000000000000.wal",
-  };
-  CHECK(std::equal(
-          w->entries.begin(), w->entries.end(),
-          expected_names.begin(), expected_names.end(),
-          [](const auto& entry, std::string_view expected_name) -> bool {
-            return entry->name == expected_name;
-          }));
-
-  const std::array<::earnest::detail::wal_file_entry_state, 1> expected_states{
-    ::earnest::detail::wal_file_entry_state::ready,
-  };
-  CHECK(std::equal(
-          w->entries.begin(), w->entries.end(),
-          expected_states.begin(), expected_states.end(),
-          [](const auto& entry, auto expected_state) -> bool {
-            return entry->state() == expected_state;
-          }));
+  CHECK(w->entries.empty());
+  CHECK_EQUAL(0u, w->active->sequence);
+  CHECK_EQUAL("0000000000000000.wal", w->active->name);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
 }
 
 TEST(recovery) {
@@ -187,10 +135,11 @@ TEST(recovery) {
   /*
    * Validation.
    */
-  REQUIRE CHECK_EQUAL(5u, w->entries.size());
-  CHECK(std::prev(w->entries.end()) == w->active);
+  CHECK_EQUAL("0000000000000004.wal", w->active->name);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
+  REQUIRE CHECK_EQUAL(4u, w->entries.size());
 
-  const std::array<std::uint64_t, 5> expected_indices{ 0, 1, 2, 3, 4 };
+  const std::array<std::uint64_t, 4> expected_indices{ 0, 1, 2, 3 };
   CHECK(std::equal(
           w->entries.begin(), w->entries.end(),
           expected_indices.begin(), expected_indices.end(),
@@ -198,12 +147,11 @@ TEST(recovery) {
             return entry->sequence == expected_index;
           }));
 
-  const std::array<std::string_view, 5> expected_names{
+  const std::array<std::string_view, 4> expected_names{
     "0.wal",
     "0000000000000001.wal",
     "0000000000000002.wal",
     "3.wal",
-    "0000000000000004.wal",
   };
   CHECK(std::equal(
           w->entries.begin(), w->entries.end(),
@@ -212,12 +160,11 @@ TEST(recovery) {
             return entry->name == expected_name;
           }));
 
-  const std::array<::earnest::detail::wal_file_entry_state, 5> expected_states{
+  const std::array<::earnest::detail::wal_file_entry_state, 4> expected_states{
     ::earnest::detail::wal_file_entry_state::sealed,
     ::earnest::detail::wal_file_entry_state::sealed,
     ::earnest::detail::wal_file_entry_state::sealed,
     ::earnest::detail::wal_file_entry_state::sealed,
-    ::earnest::detail::wal_file_entry_state::ready,
   };
   CHECK(std::equal(
           w->entries.begin(), w->entries.end(),
@@ -260,8 +207,8 @@ TEST(write) {
   /*
    * Validation.
    */
-  REQUIRE CHECK_EQUAL(1u, w->entries.size());
-  CHECK(std::prev(w->entries.end()) == w->active);
+  CHECK(append_callback_was_called);
+  CHECK(w->entries.empty());
 
   w->async_records(
       [](std::error_code ec, const auto& records) {
@@ -274,6 +221,7 @@ TEST(write) {
                 expected.begin(), expected.end(),
                 records.begin(), records.end()));
       });
+  ioctx.run();
 }
 
 TEST(rollover) {
@@ -292,8 +240,8 @@ TEST(rollover) {
       });
   ioctx.run();
   ioctx.restart();
-  REQUIRE CHECK_EQUAL(1u, w->entries.size());
-  REQUIRE CHECK_EQUAL(0u, (*w->active)->sequence);
+  REQUIRE CHECK_EQUAL(0u, w->entries.size());
+  REQUIRE CHECK_EQUAL(0u, w->active->sequence);
 
   /*
    * Test: rollover, while writing to wal.
@@ -323,8 +271,9 @@ TEST(rollover) {
    * Validation.
    */
   CHECK(rollover_callback_was_called);
-  REQUIRE CHECK_EQUAL(2u, w->entries.size());
-  CHECK(std::prev(w->entries.end()) == w->active);
+  REQUIRE CHECK_EQUAL(1u, w->entries.size());
+  CHECK_EQUAL(1u, w->active->sequence);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
 
   w->async_records(
       [](std::error_code ec, const auto& records) {
@@ -341,7 +290,7 @@ TEST(rollover) {
       });
   ioctx.run();
 
-  const std::array<std::uint64_t, 2> expected_indices{ 0, 1 };
+  const std::array<std::uint64_t, 1> expected_indices{ 0 };
   CHECK(std::equal(
           w->entries.begin(), w->entries.end(),
           expected_indices.begin(), expected_indices.end(),
@@ -349,9 +298,8 @@ TEST(rollover) {
             return entry->sequence == expected_index;
           }));
 
-  const std::array<::earnest::detail::wal_file_entry_state, 2> expected_states{
+  const std::array<::earnest::detail::wal_file_entry_state, 1> expected_states{
     ::earnest::detail::wal_file_entry_state::sealed,
-    ::earnest::detail::wal_file_entry_state::ready,
   };
   CHECK(std::equal(
           w->entries.begin(), w->entries.end(),

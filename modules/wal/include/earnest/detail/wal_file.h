@@ -12,6 +12,7 @@
 #include <iterator>
 #include <list>
 #include <memory>
+#include <queue>
 #include <ranges>
 #include <scoped_allocator>
 #include <sstream>
@@ -93,7 +94,7 @@ class wal_file
 
           wf->strand_.dispatch(
               [ex, wf, handler=std::move(handler), records=std::move(records)]() mutable {
-                if (wf->entries.empty()) {
+                if (wf->active == nullptr) [[unlikely]] {
                   auto alloc = asio::get_associated_allocator(handler);
                   ex.get_executor().post(
                       completion_wrapper<void()>(
@@ -105,7 +106,7 @@ class wal_file
                   return;
                 }
 
-                (*wf->active)->async_append(std::move(records), std::move(handler));
+                wf->active->async_append(std::move(records), std::move(handler));
               },
               wf->get_allocator());
         },
@@ -120,7 +121,7 @@ class wal_file
 
           wf->strand_.dispatch(
               [ex, wf, handler=std::move(handler)]() {
-                if (wf->entries.empty()) {
+                if (wf->active == nullptr) {
                   auto alloc = asio::get_associated_allocator(handler);
                   ex.get_executor().post(
                       completion_wrapper<void()>(
@@ -158,24 +159,24 @@ class wal_file
                             return;
                           }
 
-                          const auto new_sequence = wf->entries.back()->sequence + 1u;
-                          wf->entries.emplace_back(allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator()));
-                          wf->entries.back()->async_create(wf->dir_, filename_for_wal_(new_sequence), new_sequence,
+                          const auto new_sequence = wf->active->sequence + 1u;
+                          auto new_active = allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator());
+                          new_active->async_create(wf->dir_, filename_for_wal_(new_sequence), new_sequence,
                               completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type)>(
                                   std::move(wrapped_handler),
                                   [ wf, new_barrier=std::move(new_barrier),
-                                    new_active=std::prev(wf->entries.end())
+                                    new_active=std::move(new_active)
                                   ](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) mutable {
                                     if (!ec) [[likely]] { // Success!
-                                      assert(wf->active == std::prev(new_active)); // guaranteed by rollover-barrier.
-                                      wf->active = new_active;
+                                      assert(wf->active->sequence + 1u == new_active->sequence); // guaranteed by rollover-barrier.
+                                      const auto old_active = std::exchange(wf->active, new_active);
+                                      wf->entries.push_back(old_active);
                                       std::invoke(new_barrier, std::error_code());
 
                                       link_event.async_on_ready(std::move(handler));
-                                      (*std::prev(new_active))->async_seal(std::move(link_event));
+                                      old_active->async_seal(std::move(link_event));
                                     } else { // Fail, remove the new file.
-                                      auto name = (*new_active)->name;
-                                      wf->entries.erase(new_active);
+                                      auto name = new_active->name;
                                       std::error_code undo_ec;
                                       wf->dir_.erase(name, undo_ec);
                                       if (undo_ec)
@@ -312,12 +313,12 @@ class wal_file
                     }
 
                     wf->dir_ = std::move(d);
-                    wf->entries.emplace_back(std::allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator()));
-                    wf->active = std::prev(wf->entries.end());
-                    wf->entries.back()->async_create(wf->dir_, filename_for_wal_(0), 0,
+                    auto new_active = std::allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator());
+                    new_active->async_create(wf->dir_, filename_for_wal_(0), 0,
                         completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
                             std::move(handler),
-                            [](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
+                            [wf, new_active](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
+                              wf->active = new_active;
                               std::invoke(link_event, ec);
                               std::invoke(handler, ec);
                             }));;
@@ -347,10 +348,14 @@ class wal_file
                             alloc);
                       })));
 
+          auto queue = std::queue<std::shared_ptr<const entry_type>, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>>(
+              std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>(
+                  wf->entries.begin(), wf->entries.end(), wf->get_allocator()));
+          queue.push(wf->active);
+
           wf->async_records_iter_(
               records_vector(wf->get_allocator()),
-              std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>(
-                  wf->entries.cbegin(), typename entries_list::const_iterator(std::next(wf->active)), wf->get_allocator()),
+              std::move(queue),
               std::move(wrapped_handler));
         },
         token, this->shared_from_this());
@@ -358,14 +363,14 @@ class wal_file
 
   private:
   template<typename CompletionHandler>
-  static auto async_records_iter_(records_vector&& result, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>&& files, CompletionHandler&& handler) -> void {
+  static auto async_records_iter_(records_vector&& result, std::queue<std::shared_ptr<const entry_type>, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>>&& files, CompletionHandler&& handler) -> void {
     if (files.empty()) {
       std::invoke(handler, std::error_code(), std::move(result));
       return;
     }
 
     auto current = std::move(files.front());
-    files.pop_front();
+    files.pop();
     current->async_records(
         completion_wrapper<void(std::error_code, records_vector)>(
             std::move(handler),
@@ -481,7 +486,8 @@ class wal_file
             }));
     assert(entries.back()->state() == wal_file_entry_state::ready);
 
-    this->active = std::prev(entries.end());
+    this->active = entries.back();
+    entries.pop_back();
 
     auto bookkeeping_barrier = make_completion_barrier(
         std::forward<CompletionHandler>(handler),
@@ -559,7 +565,7 @@ class wal_file
   public:
   std::unordered_set<std::filesystem::path, fs_path_hash, std::equal_to<std::filesystem::path>, rebind_alloc<std::filesystem::path>> unarchived_wal_files;
   entries_list entries;
-  typename entries_list::iterator active;
+  std::shared_ptr<entry_type> active;
 
   private:
   asio::strand<executor_type> strand_;
