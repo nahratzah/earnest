@@ -10,7 +10,6 @@
 #include <ios>
 #include <iostream>
 #include <iterator>
-#include <list>
 #include <memory>
 #include <queue>
 #include <ranges>
@@ -21,6 +20,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include <asio/strand.hpp>
 #include <asio/associated_allocator.hpp>
@@ -58,7 +58,7 @@ class wal_file
   using rebind_alloc = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
 
   using entry_type = wal_file_entry<executor_type, allocator_type>;
-  using entries_list = std::list<std::shared_ptr<entry_type>, rebind_alloc<std::shared_ptr<entry_type>>>;
+  using entries_list = std::vector<std::shared_ptr<entry_type>, rebind_alloc<std::shared_ptr<entry_type>>>;
 
   public:
   using variant_type = typename entry_type::variant_type;
@@ -233,7 +233,8 @@ class wal_file
                               // - the entries should be ordered by their sequence
                               // - the entries should have unique sequence numbers
                               if (!ec) [[likely]] {
-                                wf->entries.sort(
+                                std::sort(
+                                    wf->entries.begin(), wf->entries.end(),
                                     [](const std::shared_ptr<entry_type>& x, const std::shared_ptr<entry_type>& y) {
                                       return x->sequence < y->sequence;
                                     });
@@ -425,11 +426,11 @@ class wal_file
           completion_wrapper<void(std::error_code)>(
               completion_wrapper<void(std::error_code)>(
                   ++recover_barrier,
-                  [wf=this->shared_from_this(), unsealed_entry](auto handler, std::error_code ec) {
+                  [wf=this->shared_from_this(), unsealed_entry=*unsealed_entry](auto handler, std::error_code ec) {
                     if (ec) [[unlikely]] {
                       std::invoke(handler, ec);
                     } else {
-                      (*unsealed_entry)->async_seal(
+                      unsealed_entry->async_seal(
                           completion_wrapper<void(std::error_code)>(
                               std::move(handler),
                               [wf](auto handler, std::error_code ec) {
@@ -545,17 +546,19 @@ class wal_file
          next_iter != entries.end();
          iter = std::exchange(next_iter, std::next(next_iter))) {
       for (auto missing_sequence = (*iter)->sequence + 1u; missing_sequence < (*next_iter)->sequence; ++missing_sequence) {
-        const auto new_elem_iter = entries.emplace(next_iter, std::allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator()));
-        (*new_elem_iter)->async_create(dir_, filename_for_wal_(missing_sequence), missing_sequence,
+        const auto new_elem = std::allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator());
+        new_elem->async_create(dir_, filename_for_wal_(missing_sequence), missing_sequence,
             completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
                 ++barrier,
-                [new_elem_iter](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
+                [new_elem](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
                   std::invoke(link_event, ec);
                   if (ec)
                     std::invoke(handler, ec);
                   else
-                    (*new_elem_iter)->async_seal(std::move(handler));
+                    new_elem->async_seal(std::move(handler));
                 }));
+        auto inserted_iter = entries.insert(next_iter, std::move(new_elem)); // Invalidates iter, next_iter.
+        next_iter = std::next(inserted_iter);
       }
     }
 
