@@ -109,7 +109,7 @@ auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback
           [wf=this->shared_from_this(), &stream, ptr=std::move(ptr)](auto h, std::error_code ec) mutable {
             wf->write_offset_ = stream.position();
 
-            const bool done = std::holds_alternative<std::monostate>(*ptr);
+            const bool done = std::holds_alternative<wal_record_end_of_records>(*ptr);
             if (!ec && !done) {
               if (wf->state_ == wal_file_entry_state::sealed) {
                 std::clog << "WAL: file " << wf->name << " is bad: record after seal\n";
@@ -594,7 +594,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_records(CompletionToken&&
 
                         if (!ec && std::any_of(records.begin(), records.end(),
                                 [](const auto& variant) -> bool {
-                                  return variant.index() == 0;
+                                  return std::holds_alternative<wal_record_end_of_records>(variant);
                                 }))
                           ec = make_error_code(wal_errc::bad_read);
 

@@ -9,7 +9,6 @@ namespace earnest::detail {
 
 
 template<typename> struct record_write_type_;
-template<> struct record_write_type_<std::monostate> { using type = std::monostate; };
 
 template<typename T>
 using record_write_type_t = typename record_write_type_<T>::type;
@@ -33,6 +32,17 @@ template<> struct record_write_type_<wal_record_reserved> { using type = wal_rec
 template<typename X>
 inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_reserved& noop) -> xdr<X>&& {
   throw std::logic_error("bug: shouldn't be serializing/deserializing reserved elements");
+  return std::move(x);
+}
+
+
+struct wal_record_end_of_records {
+  auto operator<=>(const wal_record_end_of_records& y) const noexcept = default;
+};
+template<> struct record_write_type_<wal_record_end_of_records> { using type = wal_record_end_of_records; };
+
+template<typename X>
+inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_end_of_records& eor) noexcept -> xdr<X>&& {
   return std::move(x);
 }
 
@@ -244,7 +254,7 @@ inline auto operator&(::earnest::xdr_writer<X...>&& x, typename ::earnest::xdr_w
 
 
 using wal_record_variant = std::variant<
-    std::monostate, // 0
+    wal_record_end_of_records, // 0
     wal_record_noop, // 1
     wal_record_skip32, // 2
     wal_record_skip64, // 3
