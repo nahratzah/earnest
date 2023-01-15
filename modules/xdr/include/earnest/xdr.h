@@ -88,6 +88,8 @@ class xdr {
   static inline constexpr bool is_reader = Impl::is_reader;
   static inline constexpr bool is_writer = Impl::is_writer;
   static inline constexpr std::optional<std::size_t> bytes = Impl::bytes();
+  static inline constexpr bool empty = Impl::empty();
+  using empty_type = xdr<typename Impl::empty_type>;
   static_assert(is_reader || is_writer, "we require either a reader or a writer");
   static_assert(!is_reader || !is_writer, "we require something that isn't both a reader and a writer");
 
@@ -668,6 +670,9 @@ class reader {
   auto get_factories() && -> factories_tuple&&;
   auto get_factories() const & -> const factories_tuple&;
 
+  static constexpr auto empty() noexcept -> bool { return sizeof...(Factories) == 0; }
+  using empty_type = reader<>;
+
   private:
   factories_tuple factories_;
 };
@@ -1071,6 +1076,9 @@ class writer {
 
   auto get_factories() const & -> const factories_tuple&;
   auto get_factories() && -> factories_tuple&&;
+
+  static constexpr auto empty() noexcept -> bool { return sizeof...(Factories) == 0; }
+  using empty_type = writer<>;
 
   private:
   factories_tuple factories_;
@@ -1478,6 +1486,12 @@ class constant_size_padding_holder {
 
   public:
   constexpr constant_size_padding_holder() noexcept = default;
+};
+
+struct padding_setter_noop_ {
+  auto operator()(const dynamic_padding& p) const noexcept -> std::error_code;
+  template<std::size_t N>
+  auto operator()(const constant_size_padding<N>& p) const noexcept -> std::error_code;
 };
 
 

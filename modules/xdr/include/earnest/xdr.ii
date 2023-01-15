@@ -1268,60 +1268,64 @@ inline xdr_integral_ref<SimulatedInt, ActualInt, T>::xdr_integral_ref(T& ref) no
 
 template<typename X, typename SimulatedInt, typename ActualInt, typename T>
 inline auto operator&(xdr<X>&& x, xdr_integral_ref<SimulatedInt, ActualInt, T> v) {
-  using tmp_integral = temporary_with_spec<ActualInt, typename int_spec_selector_<ActualInt>::type>;
-
-  static_assert(xdr<X>::is_reader || xdr<X>::is_writer);
-  constexpr bool has_same_sign = (std::is_signed_v<ActualInt> == std::is_signed_v<std::decay_t<T>>);
-
-  if constexpr(xdr<X>::is_reader) {
-    using xdr_reader::make_temporary;
-    using xdr_reader::constant_size_buffer_factory;
-    using xdr_reader::maybe_big_endian_to_native_post_processor_tpl;
-
-    if constexpr(has_same_sign && sizeof(SimulatedInt) == sizeof(ActualInt) && sizeof(std::decay_t<T>) == sizeof(ActualInt)) {
-      return std::apply(
-          [&x, v](auto... tpl_elems) {
-            return add_raw(
-                std::move(x),
-                constant_size_buffer_factory<sizeof(T)>(asio::mutable_buffer(&v.ref, sizeof(T))),
-                std::move(tpl_elems)...);
-          },
-          maybe_big_endian_to_native_post_processor_tpl(v.ref));
-    } else {
-      return add_raw(
-          std::move(x),
-          xdr_reader::make_temporary<tmp_integral>(
-              [v](const tmp_integral& x) -> std::error_code {
-                return xdr_convert_int_<SimulatedInt>(v.ref, x.value);
-              }));
-    }
+  if constexpr(!xdr<X>::empty) {
+    return std::move(x) + (typename xdr<X>::empty_type() & std::move(v));
   } else {
-    using xdr_writer::make_temporary;
-    using xdr_writer::constant_size_buffer_factory;
-    using xdr_writer::network_byte_order_int_;
+    using tmp_integral = temporary_with_spec<ActualInt, typename int_spec_selector_<ActualInt>::type>;
 
-    if constexpr(has_same_sign && sizeof(SimulatedInt) == sizeof(ActualInt) && sizeof(std::decay_t<T>) == sizeof(ActualInt)) {
-      if constexpr(boost::endian::order::native == boost::endian::order::big) {
-        return add_raw(
-            std::move(x),
-            constant_size_buffer_factory<sizeof(T)>(asio::const_buffer(&v.ref, sizeof(T))));
+    static_assert(xdr<X>::is_reader || xdr<X>::is_writer);
+    constexpr bool has_same_sign = (std::is_signed_v<ActualInt> == std::is_signed_v<std::decay_t<T>>);
+
+    if constexpr(xdr<X>::is_reader) {
+      using xdr_reader::make_temporary;
+      using xdr_reader::constant_size_buffer_factory;
+      using xdr_reader::maybe_big_endian_to_native_post_processor_tpl;
+
+      if constexpr(has_same_sign && sizeof(SimulatedInt) == sizeof(ActualInt) && sizeof(std::decay_t<T>) == sizeof(ActualInt)) {
+        return std::apply(
+            [&x, v](auto... tpl_elems) {
+              return add_raw(
+                  std::move(x),
+                  constant_size_buffer_factory<sizeof(T)>(asio::mutable_buffer(&v.ref, sizeof(T))),
+                  std::move(tpl_elems)...);
+            },
+            maybe_big_endian_to_native_post_processor_tpl(v.ref));
       } else {
         return add_raw(
             std::move(x),
-            make_temporary<network_byte_order_int_<ActualInt>>(
-                [v](network_byte_order_int_<ActualInt>& x) {
-                  std::error_code ec = xdr_convert_int_<SimulatedInt>(x.value, v.ref);
-                  boost::endian::native_to_big_inplace(x.value);
-                  return ec;
+            xdr_reader::make_temporary<tmp_integral>(
+                [v](const tmp_integral& x) -> std::error_code {
+                  return xdr_convert_int_<SimulatedInt>(v.ref, x.value);
                 }));
       }
     } else {
-      return add_raw(
-          std::move(x),
-          make_temporary<tmp_integral>(
-              [v](tmp_integral& x) -> std::error_code {
-                return xdr_convert_int_<SimulatedInt>(x.value, v.ref);
-              }));
+      using xdr_writer::make_temporary;
+      using xdr_writer::constant_size_buffer_factory;
+      using xdr_writer::network_byte_order_int_;
+
+      if constexpr(has_same_sign && sizeof(SimulatedInt) == sizeof(ActualInt) && sizeof(std::decay_t<T>) == sizeof(ActualInt)) {
+        if constexpr(boost::endian::order::native == boost::endian::order::big) {
+          return add_raw(
+              std::move(x),
+              constant_size_buffer_factory<sizeof(T)>(asio::const_buffer(&v.ref, sizeof(T))));
+        } else {
+          return add_raw(
+              std::move(x),
+              make_temporary<network_byte_order_int_<ActualInt>>(
+                  [v](network_byte_order_int_<ActualInt>& x) {
+                    std::error_code ec = xdr_convert_int_<SimulatedInt>(x.value, v.ref);
+                    boost::endian::native_to_big_inplace(x.value);
+                    return ec;
+                  }));
+        }
+      } else {
+        return add_raw(
+            std::move(x),
+            make_temporary<tmp_integral>(
+                [v](tmp_integral& x) -> std::error_code {
+                  return xdr_convert_int_<SimulatedInt>(x.value, v.ref);
+                }));
+      }
     }
   }
 }
@@ -1465,30 +1469,38 @@ auto operator&(xdr<xdr_writer::writer<X...>>&& x, const temporary_with_spec<T, S
 
 template<typename... X, typename Fn, typename T, typename Spec>
 auto operator&(xdr<xdr_reader::reader<X...>>&& x, getset_impl<Fn, T, Spec> gs) {
-  using xdr_reader::make_temporary;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & std::move(gs));
+  } else {
+    using xdr_reader::make_temporary;
 
-  return add_raw(
-      std::move(x),
-      make_temporary(
-          [setter=std::move(gs.fn)](const temporary_with_spec<T, Spec>& v) -> std::error_code {
-            std::invoke(setter, v.value);
-            return {};
-          },
-          temporary_with_spec<T, Spec>(std::move(gs.spec))));
+    return add_raw(
+        std::move(x),
+        make_temporary(
+            [setter=std::move(gs.fn)](const temporary_with_spec<T, Spec>& v) -> std::error_code {
+              std::invoke(setter, v.value);
+              return {};
+            },
+            temporary_with_spec<T, Spec>(std::move(gs.spec))));
+  }
 }
 
 template<typename... X, typename Fn, typename T, typename Spec>
 auto operator&(xdr<xdr_writer::writer<X...>>&& x, getset_impl<Fn, T, Spec> gs) {
-  using xdr_writer::make_temporary;
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & std::move(gs));
+  } else {
+    using xdr_writer::make_temporary;
 
-  return add_raw(
-      std::move(x),
-      make_temporary(
-          [getter=std::move(gs.fn)](temporary_with_spec<T, Spec>& v) -> std::error_code {
-            v.value = std::invoke(getter);
-            return {};
-          },
-          temporary_with_spec<T, Spec>(std::move(gs.spec))));
+    return add_raw(
+        std::move(x),
+        make_temporary(
+            [getter=std::move(gs.fn)](temporary_with_spec<T, Spec>& v) -> std::error_code {
+              v.value = std::invoke(getter);
+              return {};
+            },
+            temporary_with_spec<T, Spec>(std::move(gs.spec))));
+  }
 }
 
 
@@ -1542,55 +1554,63 @@ template<typename... X, typename T>
 requires (!std::is_const_v<T>)
 #endif
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const xdr_float32_ref<T>& v) {
-  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
-  using xdr_reader::make_temporary;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & v);
+  } else {
+    using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+    using xdr_reader::make_temporary;
 
-  static_assert(std::numeric_limits<float>::is_iec559,
-      "XDR requires the floating point types are encoded as iec559");
+    static_assert(std::numeric_limits<float>::is_iec559,
+        "XDR requires the floating point types are encoded as iec559");
 
-  return add_raw(
-      std::move(x),
-      make_temporary<tmp_integral>(
-          [v](tmp_integral x) -> std::error_code {
-            float tmp;
-            static_assert(sizeof(x.value) == 4 && sizeof(tmp) == 4);
-            std::memcpy(&tmp, &x.value, 4);
+    return add_raw(
+        std::move(x),
+        make_temporary<tmp_integral>(
+            [v](tmp_integral x) -> std::error_code {
+              float tmp;
+              static_assert(sizeof(x.value) == 4 && sizeof(tmp) == 4);
+              std::memcpy(&tmp, &x.value, 4);
 
 #if 0 // XXX somehow rejects everything?
-            // Validation.
-            if (std::isfinite(tmp) && (tmp < std::numeric_limits<std::remove_const_t<T>>::min() || tmp > std::numeric_limits<std::remove_const_t<T>>::max()))
-              return make_error_code(xdr_errc::decoding_error);
+              // Validation.
+              if (std::isfinite(tmp) && (tmp < std::numeric_limits<std::remove_const_t<T>>::min() || tmp > std::numeric_limits<std::remove_const_t<T>>::max()))
+                return make_error_code(xdr_errc::decoding_error);
 #endif
 
-            v.ref() = tmp;
-            return {};
-          }));
+              v.ref() = tmp;
+              return {};
+            }));
+  }
 }
 
 template<typename... X, typename T>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const xdr_float32_ref<T>& v) {
-  using xdr_writer::network_byte_order_int_;
-  using xdr_writer::make_temporary;
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & v);
+  } else {
+    using xdr_writer::network_byte_order_int_;
+    using xdr_writer::make_temporary;
 
-  static_assert(std::numeric_limits<float>::is_iec559,
-      "XDR requires the floating point types are encoded as iec559");
+    static_assert(std::numeric_limits<float>::is_iec559,
+        "XDR requires the floating point types are encoded as iec559");
 
-  return add_raw(
-      std::move(x),
-      make_temporary<network_byte_order_int_<std::uint32_t>>(
-          [v](network_byte_order_int_<std::uint32_t>& x) -> std::error_code {
+    return add_raw(
+        std::move(x),
+        make_temporary<network_byte_order_int_<std::uint32_t>>(
+            [v](network_byte_order_int_<std::uint32_t>& x) -> std::error_code {
 #if 0 // XXX somehow rejects everything?
-            // Validation.
-            if (std::isfinite(v.ref()) && (v.ref() < std::numeric_limits<float>::min() || v.ref() > std::numeric_limits<float>::max()))
-              return make_error_code(xdr_errc::encoding_error);
+              // Validation.
+              if (std::isfinite(v.ref()) && (v.ref() < std::numeric_limits<float>::min() || v.ref() > std::numeric_limits<float>::max()))
+                return make_error_code(xdr_errc::encoding_error);
 #endif
 
-            float tmp = v.ref();
-            static_assert(sizeof(x.value) == 4 && sizeof(tmp) == 4);
-            std::memcpy(&x.value, &tmp, 4);
-            boost::endian::native_to_big_inplace(x.value);
-            return {};
-          }));
+              float tmp = v.ref();
+              static_assert(sizeof(x.value) == 4 && sizeof(tmp) == 4);
+              std::memcpy(&x.value, &tmp, 4);
+              boost::endian::native_to_big_inplace(x.value);
+              return {};
+            }));
+  }
 }
 
 template<typename... X, typename T>
@@ -1598,55 +1618,63 @@ template<typename... X, typename T>
 requires (!std::is_const_v<T>)
 #endif
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const xdr_float64_ref<T>& v) {
-  using tmp_integral = temporary_with_spec<std::uint64_t, typename int_spec_selector_<std::uint64_t>::type>;
-  using xdr_reader::make_temporary;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & v);
+  } else {
+    using tmp_integral = temporary_with_spec<std::uint64_t, typename int_spec_selector_<std::uint64_t>::type>;
+    using xdr_reader::make_temporary;
 
-  static_assert(std::numeric_limits<double>::is_iec559,
-      "XDR requires the floating point types are encoded as iec559");
+    static_assert(std::numeric_limits<double>::is_iec559,
+        "XDR requires the floating point types are encoded as iec559");
 
-  return add_raw(
-      std::move(x),
-      make_temporary<tmp_integral>(
-          [v](tmp_integral x) -> std::error_code {
-            double tmp;
-            static_assert(sizeof(x.value) == 8 && sizeof(tmp) == 8);
-            std::memcpy(&tmp, &x.value, 8);
+    return add_raw(
+        std::move(x),
+        make_temporary<tmp_integral>(
+            [v](tmp_integral x) -> std::error_code {
+              double tmp;
+              static_assert(sizeof(x.value) == 8 && sizeof(tmp) == 8);
+              std::memcpy(&tmp, &x.value, 8);
 
 #if 0 // XXX somehow rejects everything?
-            // Validation.
-            if (std::isfinite(tmp) && tmp < std::numeric_limits<std::remove_const_t<T>>::min() || tmp > std::numeric_limits<std::remove_const_t<T>>::max())
-              return make_error_code(xdr_errc::decoding_error);
+              // Validation.
+              if (std::isfinite(tmp) && tmp < std::numeric_limits<std::remove_const_t<T>>::min() || tmp > std::numeric_limits<std::remove_const_t<T>>::max())
+                return make_error_code(xdr_errc::decoding_error);
 #endif
 
-            v.ref() = tmp;
-            return {};
-          }));
+              v.ref() = tmp;
+              return {};
+            }));
+  }
 }
 
 template<typename... X, typename T>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const xdr_float64_ref<T>& v) {
-  using xdr_writer::network_byte_order_int_;
-  using xdr_writer::make_temporary;
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & v);
+  } else {
+    using xdr_writer::network_byte_order_int_;
+    using xdr_writer::make_temporary;
 
-  static_assert(std::numeric_limits<double>::is_iec559,
-      "XDR requires the floating point types are encoded as iec559");
+    static_assert(std::numeric_limits<double>::is_iec559,
+        "XDR requires the floating point types are encoded as iec559");
 
-  return add_raw(
-      std::move(x),
-      make_temporary<network_byte_order_int_<std::uint64_t>>(
-          [v](network_byte_order_int_<std::uint64_t>& x) -> std::error_code {
+    return add_raw(
+        std::move(x),
+        make_temporary<network_byte_order_int_<std::uint64_t>>(
+            [v](network_byte_order_int_<std::uint64_t>& x) -> std::error_code {
 #if 0 // XXX somehow rejects everything?
-            // Validation.
-            if (std::isfinite(v.ref()) && (v.ref() < std::numeric_limits<double>::min() || v.ref() > std::numeric_limits<double>::max()))
-              return make_error_code(xdr_errc::encoding_error);
+              // Validation.
+              if (std::isfinite(v.ref()) && (v.ref() < std::numeric_limits<double>::min() || v.ref() > std::numeric_limits<double>::max()))
+                return make_error_code(xdr_errc::encoding_error);
 #endif
 
-            double tmp = v.ref();
-            static_assert(sizeof(x.value) == 8 && sizeof(tmp) == 8);
-            std::memcpy(&x.value, &tmp, 8);
-            boost::endian::native_to_big_inplace(x.value);
-            return {};
-          }));
+              double tmp = v.ref();
+              static_assert(sizeof(x.value) == 8 && sizeof(tmp) == 8);
+              std::memcpy(&x.value, &tmp, 8);
+              boost::endian::native_to_big_inplace(x.value);
+              return {};
+            }));
+  }
 }
 
 
@@ -1757,6 +1785,16 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const constant_size_pad
 }
 
 
+inline auto padding_setter_noop_::operator()([[maybe_unused]] const dynamic_padding& p) const noexcept -> std::error_code {
+  return {};
+}
+
+template<std::size_t N>
+inline auto padding_setter_noop_::operator()([[maybe_unused]] const constant_size_padding<N>& p) const noexcept -> std::error_code {
+  return {};
+}
+
+
 template<typename... X>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const dynamic_padding_holder& h) {
   using xdr_reader::make_temporary;
@@ -1775,7 +1813,7 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const dynamic_padding_h
   return add_raw(
       std::move(x),
       make_temporary<dynamic_padding>(
-          []([[maybe_unused]] const dynamic_padding& p) { return std::error_code(); },
+          padding_setter_noop_(),
           dynamic_padding(h.size())));
 }
 
@@ -1804,7 +1842,7 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, [[maybe_unused]] const 
     return add_raw(
         std::move(x),
         make_temporary<constant_size_padding<N>>(
-            []([[maybe_unused]] const constant_size_padding<N>& p) { return std::error_code(); },
+            padding_setter_noop_(),
             constant_size_padding<N>()));
   }
 }
@@ -2058,38 +2096,46 @@ inline auto sized_const_buffer<ContiguousCollection>::buffer() const -> asio::co
 
 template<typename... X, typename ContiguousCollection>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const sized_buffer<ContiguousCollection>& b) {
-  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
-  using xdr_reader::reader;
-  using xdr_reader::make_decoder;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & b);
+  } else {
+    using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+    using xdr_reader::reader;
+    using xdr_reader::make_decoder;
 
-  return add_raw(
-      std::move(x),
-      make_decoder<tmp_integral>(
-          [b=b](tmp_integral len, auto& stream, auto callback) mutable {
-            if (len.value > b.max_size()) {
-              std::invoke(callback, make_error_code(xdr_errc::decoding_error));
-              return;
-            }
-            b.resize(len.value);
+    return add_raw(
+        std::move(x),
+        make_decoder<tmp_integral>(
+            [b=b](tmp_integral len, auto& stream, auto callback) mutable {
+              if (len.value > b.max_size()) {
+                std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+                return;
+              }
+              b.resize(len.value);
 
-            async_read(
-                stream,
-                xdr<reader<>>() & xdr_dynamic_raw_bytes(b.buffer()),
-                std::move(callback));
-          }));
+              async_read(
+                  stream,
+                  xdr<reader<>>() & xdr_dynamic_raw_bytes(b.buffer()),
+                  std::move(callback));
+            }));
+  }
 }
 
 template<typename... X, typename ContiguousCollection>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const sized_const_buffer<ContiguousCollection>& b) {
-  using xdr_writer::writer;
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & b);
+  } else {
+    using xdr_writer::writer;
 
-  std::error_code ec;
-  if (b.size() > b.max_size() || b.size() > std::numeric_limits<std::uint32_t>::max())
-    ec = make_error_code(xdr_errc::encoding_error);
+    std::error_code ec;
+    if (b.size() > b.max_size() || b.size() > std::numeric_limits<std::uint32_t>::max())
+      ec = make_error_code(xdr_errc::encoding_error);
 
-  return add_raw(std::move(x), xdr_writer::make_pre_processor([ec]<typename...T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code { return ec; }))
-      & xdr_getset<std::remove_cvref_t<decltype(b.size())>>([bsize=b.size()]() { return bsize; }).as(xdr_uint32)
-      & xdr_dynamic_raw_bytes(b.buffer());
+    return add_raw(std::move(x), xdr_writer::make_pre_processor([ec]<typename...T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code { return ec; }))
+        & xdr_getset<std::remove_cvref_t<decltype(b.size())>>([bsize=b.size()]() { return bsize; }).as(xdr_uint32)
+        & xdr_dynamic_raw_bytes(b.buffer());
+  }
 }
 
 template<typename... X, typename ContiguousCollection>
@@ -2154,37 +2200,45 @@ inline auto const_bool_ref::address() const noexcept -> const bool* {
 
 template<typename... X>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, bool_ref b) {
-  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & std::move(b));
+  } else {
+    using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
 
-  return add_raw(
-      std::move(x),
-      xdr_reader::make_temporary<tmp_integral>(
-          [b](const tmp_integral& x) -> std::error_code {
-            switch (x.value) {
-              default:
-                return make_error_code(xdr_errc::decoding_error);
-              case 0:
-                *b.address() = false;
-                break;
-              case 1:
-                *b.address() = true;
-                break;
-            }
-            return {};
-          }));
+    return add_raw(
+        std::move(x),
+        xdr_reader::make_temporary<tmp_integral>(
+            [b](const tmp_integral& x) -> std::error_code {
+              switch (x.value) {
+                default:
+                  return make_error_code(xdr_errc::decoding_error);
+                case 0:
+                  *b.address() = false;
+                  break;
+                case 1:
+                  *b.address() = true;
+                  break;
+              }
+              return {};
+            }));
+  }
 }
 
 template<typename... X>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const_bool_ref b) {
-  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & std::move(b));
+  } else {
+    using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
 
-  return add_raw(
-      std::move(x),
-      xdr_writer::make_temporary<tmp_integral>(
-          [b](tmp_integral& x) -> std::error_code {
-            x.value = (*b.address() ? 1u : 0u);
-            return {};
-          }));
+    return add_raw(
+        std::move(x),
+        xdr_writer::make_temporary<tmp_integral>(
+            [b](tmp_integral& x) -> std::error_code {
+              x.value = (*b.address() ? 1u : 0u);
+              return {};
+            }));
+  }
 }
 
 template<typename... X>
@@ -2276,48 +2330,56 @@ inline auto opt_cref<T, xdr_identity_t>::as(OtherSpec&& other_spec) const -> opt
 
 template<typename... X, typename T, typename Spec>
 auto operator&(xdr<xdr_reader::reader<X...>>&& x, opt_ref<T, Spec> s) {
-  using xdr_reader::make_decoder;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & std::move(s));
+  } else {
+    using xdr_reader::make_decoder;
 
-  return add_raw(
-      std::move(x),
-      make_decoder<temporary_with_spec<bool, xdr_bool_t>>(
-          [s](const temporary_with_spec<bool, xdr_bool_t>& b, auto& stream, auto callback) {
-            if (b.value) {
-              if (!s.ref.has_value()) s.ref.emplace();
-              async_read(
-                  stream,
-                  xdr<xdr_reader::reader<>>() & s.spec(*s.ref),
-                  std::move(callback));
-            } else {
-              s.ref.reset();
-              std::invoke(callback, std::error_code());
-            }
-          }));
+    return add_raw(
+        std::move(x),
+        make_decoder<temporary_with_spec<bool, xdr_bool_t>>(
+            [s](const temporary_with_spec<bool, xdr_bool_t>& b, auto& stream, auto callback) {
+              if (b.value) {
+                if (!s.ref.has_value()) s.ref.emplace();
+                async_read(
+                    stream,
+                    xdr<xdr_reader::reader<>>() & s.spec(*s.ref),
+                    std::move(callback));
+              } else {
+                s.ref.reset();
+                std::invoke(callback, std::error_code());
+              }
+            }));
+  }
 }
 
 template<typename... X, typename T, typename Spec>
 auto operator&(xdr<xdr_writer::writer<X...>>&& x, opt_cref<T, Spec> s) {
-  using xdr_writer::make_encoder;
-  using xdr_writer::constant_size_buffer_factory;
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & std::move(s));
+  } else {
+    using xdr_writer::make_encoder;
+    using xdr_writer::constant_size_buffer_factory;
 
-  return add_raw(
-      std::move(x),
-      make_encoder<std::uint32_t>(
-          [s](auto& stream, auto callback, std::uint32_t& temporary) {
-            temporary = boost::endian::native_to_big(s.ref.has_value() ? std::uint32_t(1u) : std::uint32_t(0u));
-            auto bool_writer = add_raw(xdr<xdr_writer::writer<>>(), constant_size_buffer_factory<4>(asio::buffer(&temporary, sizeof(temporary))));
-            if (s.ref.has_value()) {
-              async_write(
-                  stream,
-                  std::move(bool_writer) & s.spec(*s.ref),
-                  std::move(callback));
-            } else {
-              async_write(
-                  stream,
-                  std::move(bool_writer),
-                  std::move(callback));
-            }
-          }));
+    return add_raw(
+        std::move(x),
+        make_encoder<std::uint32_t>(
+            [s](auto& stream, auto callback, std::uint32_t& temporary) {
+              temporary = boost::endian::native_to_big(s.ref.has_value() ? std::uint32_t(1u) : std::uint32_t(0u));
+              auto bool_writer = add_raw(xdr<xdr_writer::writer<>>(), constant_size_buffer_factory<4>(asio::buffer(&temporary, sizeof(temporary))));
+              if (s.ref.has_value()) {
+                async_write(
+                    stream,
+                    std::move(bool_writer) & s.spec(*s.ref),
+                    std::move(callback));
+              } else {
+                async_write(
+                    stream,
+                    std::move(bool_writer),
+                    std::move(callback));
+              }
+            }));
+  }
 }
 
 template<typename... X, typename T, typename Spec>
@@ -3114,46 +3176,54 @@ inline void write_map_(Stream& stream, Iter b, Sentinel e, Callback callback, co
 
 template<typename... X, typename Collection, typename Spec>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, sequence_holder<Collection, Spec> c) {
-  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
-  using xdr_reader::make_decoder;
-  using std::begin;
-  using std::end;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & std::move(c));
+  } else {
+    using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+    using xdr_reader::make_decoder;
+    using std::begin;
+    using std::end;
 
-  return add_raw(
-      std::move(x),
-      make_decoder<tmp_integral>(
-          [c](tmp_integral len, auto& stream, auto callback) {
-            if (len.value > c.max_size()) {
-              std::invoke(callback, make_error_code(xdr_errc::decoding_error));
-              return;
-            }
+    return add_raw(
+        std::move(x),
+        make_decoder<tmp_integral>(
+            [c](tmp_integral len, auto& stream, auto callback) {
+              if (len.value > c.max_size()) {
+                std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+                return;
+              }
 
-            c.collection().resize(len.value);
-            read_sequence_(stream, begin(c.collection()), end(c.collection()), std::move(callback), c.spec());
-          }));
+              c.collection().resize(len.value);
+              read_sequence_(stream, begin(c.collection()), end(c.collection()), std::move(callback), c.spec());
+            }));
+  }
 }
 
 template<typename... X, typename Collection, typename Spec>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const_sequence_holder<Collection, Spec> c) {
-  using xdr_writer::make_encoder;
-  using xdr_writer::make_pre_processor;
-  using std::begin;
-  using std::end;
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & std::move(c));
+  } else {
+    using xdr_writer::make_encoder;
+    using xdr_writer::make_pre_processor;
+    using std::begin;
+    using std::end;
 
-  return add_raw(
-      add_raw(
-          std::move(x),
-          make_pre_processor(
-              [c]<typename... T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code {
-                std::error_code ec;
-                if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
-                return ec;
-              }))
-      & xdr_getset<std::remove_cvref_t<decltype(std::declval<const Collection&>().size())>>([c]() { return c.collection().size(); }).as(xdr_uint32),
-      make_encoder(
-          [c](auto& stream, auto callback) {
-            write_sequence_(stream, begin(c.collection()), end(c.collection()), std::move(callback), c.spec());
-          }));
+    return add_raw(
+        add_raw(
+            std::move(x),
+            make_pre_processor(
+                [c]<typename... T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code {
+                  std::error_code ec;
+                  if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
+                  return ec;
+                }))
+        & xdr_getset<std::remove_cvref_t<decltype(std::declval<const Collection&>().size())>>([c]() { return c.collection().size(); }).as(xdr_uint32),
+        make_encoder(
+            [c](auto& stream, auto callback) {
+              write_sequence_(stream, begin(c.collection()), end(c.collection()), std::move(callback), c.spec());
+            }));
+  }
 }
 
 template<typename... X, typename Collection, typename Spec>
@@ -3163,46 +3233,54 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, sequence_holder<Collect
 
 template<typename... X, typename Collection, typename Spec>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, set_holder<Collection, Spec> c) {
-  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
-  using xdr_reader::make_decoder;
-  using std::begin;
-  using std::end;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & std::move(c));
+  } else {
+    using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+    using xdr_reader::make_decoder;
+    using std::begin;
+    using std::end;
 
-  return add_raw(
-      std::move(x),
-      make_decoder<tmp_integral>(
-          [c](tmp_integral len, auto& stream, auto callback) {
-            if (len.value > c.max_size()) {
-              std::invoke(callback, make_error_code(xdr_errc::decoding_error));
-              return;
-            }
+    return add_raw(
+        std::move(x),
+        make_decoder<tmp_integral>(
+            [c](tmp_integral len, auto& stream, auto callback) {
+              if (len.value > c.max_size()) {
+                std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+                return;
+              }
 
-            c.collection().clear();
-            read_set_(len.value, stream, c.collection(), std::move(callback), c.spec());
-          }));
+              c.collection().clear();
+              read_set_(len.value, stream, c.collection(), std::move(callback), c.spec());
+            }));
+  }
 }
 
 template<typename... X, typename Collection, typename Spec>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const_set_holder<Collection, Spec> c) {
-  using xdr_writer::make_encoder;
-  using xdr_writer::make_pre_processor;
-  using std::begin;
-  using std::end;
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & std::move(c));
+  } else {
+    using xdr_writer::make_encoder;
+    using xdr_writer::make_pre_processor;
+    using std::begin;
+    using std::end;
 
-  return add_raw(
-      add_raw(
-          std::move(x),
-          make_pre_processor(
-              [c]<typename... T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code {
-                std::error_code ec;
-                if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
-                return ec;
-              }))
-      & xdr_getset<std::remove_cvref_t<decltype(std::declval<const Collection&>().size())>>([c]() { return c.collection().size(); }).as(xdr_uint32),
-      make_encoder(
-          [c](auto& stream, auto callback) {
-            write_set_(stream, c.collection(), std::move(callback), c.spec());
-          }));
+    return add_raw(
+        add_raw(
+            std::move(x),
+            make_pre_processor(
+                [c]<typename... T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code {
+                  std::error_code ec;
+                  if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
+                  return ec;
+                }))
+        & xdr_getset<std::remove_cvref_t<decltype(std::declval<const Collection&>().size())>>([c]() { return c.collection().size(); }).as(xdr_uint32),
+        make_encoder(
+            [c](auto& stream, auto callback) {
+              write_set_(stream, c.collection(), std::move(callback), c.spec());
+            }));
+  }
 }
 
 template<typename... X, typename Collection, typename Spec>
@@ -3212,46 +3290,54 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, set_holder<Collection, 
 
 template<typename... X, typename Collection, typename KeySpec, typename MappedSpec>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, map_holder<Collection, KeySpec, MappedSpec> c) {
-  using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
-  using xdr_reader::make_decoder;
-  using std::begin;
-  using std::end;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & std::move(c));
+  } else {
+    using tmp_integral = temporary_with_spec<std::uint32_t, typename int_spec_selector_<std::uint32_t>::type>;
+    using xdr_reader::make_decoder;
+    using std::begin;
+    using std::end;
 
-  return add_raw(
-      std::move(x),
-      make_decoder<tmp_integral>(
-          [c](tmp_integral len, auto& stream, auto callback) {
-            if (len.value > c.max_size()) {
-              std::invoke(callback, make_error_code(xdr_errc::decoding_error));
-              return;
-            }
+    return add_raw(
+        std::move(x),
+        make_decoder<tmp_integral>(
+            [c](tmp_integral len, auto& stream, auto callback) {
+              if (len.value > c.max_size()) {
+                std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+                return;
+              }
 
-            c.collection().clear();
-            read_map_(len.value, stream, c.collection(), std::move(callback), c.key_spec(), c.mapped_spec());
-          }));
+              c.collection().clear();
+              read_map_(len.value, stream, c.collection(), std::move(callback), c.key_spec(), c.mapped_spec());
+            }));
+  }
 }
 
 template<typename... X, typename Collection, typename KeySpec, typename MappedSpec>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const_map_holder<Collection, KeySpec, MappedSpec> c) {
-  using xdr_writer::make_encoder;
-  using xdr_writer::make_pre_processor;
-  using std::begin;
-  using std::end;
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & std::move(c));
+  } else {
+    using xdr_writer::make_encoder;
+    using xdr_writer::make_pre_processor;
+    using std::begin;
+    using std::end;
 
-  return add_raw(
-      add_raw(
-          std::move(x),
-          make_pre_processor(
-              [c]<typename... T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code {
-                std::error_code ec;
-                if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
-                return ec;
-              }))
-      & xdr_getset<std::remove_cvref_t<decltype(std::declval<const Collection&>().size())>>([c]() { return c.collection().size(); }).as(xdr_uint32),
-      make_encoder(
-          [c](auto& stream, auto callback) {
-            write_map_(stream, begin(c.collection()), end(c.collection()), std::move(callback), xdr_pair.of(c.key_spec(), c.mapped_spec()));
-          }));
+    return add_raw(
+        add_raw(
+            std::move(x),
+            make_pre_processor(
+                [c]<typename... T> ([[maybe_unused]] std::tuple<T...>& temporaries) -> std::error_code {
+                  std::error_code ec;
+                  if (c.collection().size() > c.max_size()) ec = make_error_code(xdr_errc::encoding_error);
+                  return ec;
+                }))
+        & xdr_getset<std::remove_cvref_t<decltype(std::declval<const Collection&>().size())>>([c]() { return c.collection().size(); }).as(xdr_uint32),
+        make_encoder(
+            [c](auto& stream, auto callback) {
+              write_map_(stream, begin(c.collection()), end(c.collection()), std::move(callback), xdr_pair.of(c.key_spec(), c.mapped_spec()));
+            }));
+  }
 }
 
 template<typename... X, typename Collection, typename KeySpec, typename MappedSpec>
@@ -3505,18 +3591,22 @@ inline auto constant_holder<T, xdr_identity_t>::as(Spec&& spec) && -> constant_h
 
 template<typename... X, typename T, typename Spec>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const constant_holder<T, Spec>& c) {
-  using xdr_reader::make_temporary;
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & c);
+  } else {
+    using xdr_reader::make_temporary;
 
-  return add_raw(
-      std::move(x),
-      make_temporary<temporary_with_spec<T, Spec>>(
-          [expected=c.value](const temporary_with_spec<T, Spec>& x) -> std::error_code {
-            if (x.value != expected)
-              return make_error_code(xdr_errc::decoding_error);
-            else
-              return std::error_code();
-          },
-          temporary_with_spec<T, Spec>(c.spec, c.value)));
+    return add_raw(
+        std::move(x),
+        make_temporary<temporary_with_spec<T, Spec>>(
+            [expected=c.value](const temporary_with_spec<T, Spec>& x) -> std::error_code {
+              if (x.value != expected)
+                return make_error_code(xdr_errc::decoding_error);
+              else
+                return std::error_code();
+            },
+            temporary_with_spec<T, Spec>(c.spec, c.value)));
+  }
 }
 
 template<typename... X, typename T, typename Spec>
@@ -3624,95 +3714,103 @@ inline constexpr auto apply_index_sequence_([[maybe_unused]] std::size_t idx, [[
 
 template<typename... X, typename... T, typename... Specs>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, const variant_holder<std::variant<T...>, Specs...>& v) {
-  using xdr_reader::make_decoder;
-
-  if constexpr(sizeof...(Specs) == 0) {
-    return add_raw(std::move(x),
-        make_decoder(
-            [v](const auto& temporary, auto& stream, auto callback) {
-              apply_index_sequence_(
-                  temporary.value,
-                  [&](auto integral_constant) -> void {
-                    v.value.template emplace<integral_constant()>(); // Default constructor.
-                    async_read(
-                        stream,
-                        xdr<xdr_reader::reader<>>() & std::get<integral_constant()>(v.value),
-                        std::move(callback));
-                  },
-                  [&]() -> void {
-                    std::invoke(callback, make_error_code(xdr_errc::decoding_error));
-                  },
-                  std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
-            },
-            temporary_with_spec<std::uint32_t, xdr_uint32_t>(xdr_uint32)));
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & v);
   } else {
-    return add_raw(std::move(x),
-        make_decoder(
-            [v](const auto& temporary, auto& stream, auto callback) {
-              apply_index_sequence_(
-                  temporary.value,
-                  [&](auto integral_constant) -> void {
-                    v.value.template emplace<integral_constant()>(); // Default constructor.
-                    auto& spec = std::get<integral_constant()>(v.specs);
-                    async_read(
-                        stream,
-                        xdr<xdr_reader::reader<>>() & spec(std::get<integral_constant()>(v.value)),
-                        std::move(callback));
-                  },
-                  [&]() -> void {
-                    std::invoke(callback, make_error_code(xdr_errc::decoding_error));
-                  },
-                  std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
-            },
-            temporary_with_spec<std::uint32_t, xdr_uint32_t>(xdr_uint32)));
+    using xdr_reader::make_decoder;
+
+    if constexpr(sizeof...(Specs) == 0) {
+      return add_raw(std::move(x),
+          make_decoder(
+              [v](const auto& temporary, auto& stream, auto callback) {
+                apply_index_sequence_(
+                    temporary.value,
+                    [&](auto integral_constant) -> void {
+                      v.value.template emplace<integral_constant()>(); // Default constructor.
+                      async_read(
+                          stream,
+                          xdr<xdr_reader::reader<>>() & std::get<integral_constant()>(v.value),
+                          std::move(callback));
+                    },
+                    [&]() -> void {
+                      std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+                    },
+                    std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
+              },
+              temporary_with_spec<std::uint32_t, xdr_uint32_t>(xdr_uint32)));
+    } else {
+      return add_raw(std::move(x),
+          make_decoder(
+              [v](const auto& temporary, auto& stream, auto callback) {
+                apply_index_sequence_(
+                    temporary.value,
+                    [&](auto integral_constant) -> void {
+                      v.value.template emplace<integral_constant()>(); // Default constructor.
+                      auto& spec = std::get<integral_constant()>(v.specs);
+                      async_read(
+                          stream,
+                          xdr<xdr_reader::reader<>>() & spec(std::get<integral_constant()>(v.value)),
+                          std::move(callback));
+                    },
+                    [&]() -> void {
+                      std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+                    },
+                    std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
+              },
+              temporary_with_spec<std::uint32_t, xdr_uint32_t>(xdr_uint32)));
+    }
   }
 }
 
 template<typename... X, typename... T, typename... Specs>
 inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, const variant_holder<const std::variant<T...>, Specs...>& v) {
-  using xdr_writer::make_encoder;
-
-  if constexpr(sizeof...(Specs) == 0) {
-    return add_raw(std::move(x) & xdr_getset<std::size_t>([v]() { return v.value.index(); }).as(xdr_uint32),
-        make_encoder(
-            [v](auto& stream, auto callback) {
-              if (v.value.valueless_by_exception()) [[unlikely]] {
-                std::invoke(callback, make_error_code(xdr_errc::encoding_error));
-                return;
-              }
-
-              std::visit(
-                  [&](const auto& value) -> void {
-                    async_write(
-                        stream,
-                        xdr<xdr_writer::writer<>>() & value,
-                        std::move(callback));
-                  },
-                  v.value);
-            }));
+  if constexpr(!xdr<xdr_writer::writer<X...>>::empty) {
+    return std::move(x) + (typename xdr<xdr_writer::writer<X...>>::empty_type() & v);
   } else {
-    return add_raw(std::move(x) & xdr_getset<std::size_t>([v]() { return v.value.index(); }).as(xdr_uint32),
-        make_encoder(
-            [v](auto& stream, auto callback) {
-              if (v.value.valueless_by_exception()) [[unlikely]] {
-                std::invoke(callback, make_error_code(xdr_errc::encoding_error));
-                return;
-              }
+    using xdr_writer::make_encoder;
 
-              apply_index_sequence_(
-                  v.value.index(),
-                  [&](auto integral_constant) -> void {
-                    auto& spec = std::get<integral_constant()>(v.specs);
-                    async_write(
-                        stream,
-                        xdr<xdr_writer::writer<>>() & spec(std::get<integral_constant()>(v.value)),
-                        std::move(callback));
-                  },
-                  [&]() -> void {
-                    std::invoke(callback, make_error_code(xdr_errc::encoding_error));
-                  },
-                  std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
-            }));
+    if constexpr(sizeof...(Specs) == 0) {
+      return add_raw(std::move(x) & xdr_getset<std::size_t>([v]() { return v.value.index(); }).as(xdr_uint32),
+          make_encoder(
+              [v](auto& stream, auto callback) {
+                if (v.value.valueless_by_exception()) [[unlikely]] {
+                  std::invoke(callback, make_error_code(xdr_errc::encoding_error));
+                  return;
+                }
+
+                std::visit(
+                    [&](const auto& value) -> void {
+                      async_write(
+                          stream,
+                          xdr<xdr_writer::writer<>>() & value,
+                          std::move(callback));
+                    },
+                    v.value);
+              }));
+    } else {
+      return add_raw(std::move(x) & xdr_getset<std::size_t>([v]() { return v.value.index(); }).as(xdr_uint32),
+          make_encoder(
+              [v](auto& stream, auto callback) {
+                if (v.value.valueless_by_exception()) [[unlikely]] {
+                  std::invoke(callback, make_error_code(xdr_errc::encoding_error));
+                  return;
+                }
+
+                apply_index_sequence_(
+                    v.value.index(),
+                    [&](auto integral_constant) -> void {
+                      auto& spec = std::get<integral_constant()>(v.specs);
+                      async_write(
+                          stream,
+                          xdr<xdr_writer::writer<>>() & spec(std::get<integral_constant()>(v.value)),
+                          std::move(callback));
+                    },
+                    [&]() -> void {
+                      std::invoke(callback, make_error_code(xdr_errc::encoding_error));
+                    },
+                    std::make_index_sequence<std::variant_size_v<std::variant<T...>>>());
+              }));
+    }
   }
 }
 
@@ -3861,16 +3959,20 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, manual_holder<Fn, Lead,
 
 template<typename... X, typename Fn, typename Lead, typename LeadSpec, typename Temporary>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, manual_holder<Fn, Lead, LeadSpec, Temporary> h) {
-  using xdr_reader::make_decoder;
-
-  if constexpr(std::is_void_v<Lead>) {
-    return add_raw(std::move(x), make_decoder<void, Temporary>(std::move(h.fn)));
+  if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
+    return std::move(x) & (typename xdr<xdr_reader::reader<X...>>::empty_type() & std::move(h));
   } else {
-    return add_raw(std::move(x), make_decoder<temporary_with_spec<Lead, LeadSpec>>(
-            [fn=std::move(h.fn)]<typename... Args>(temporary_with_spec<Lead, LeadSpec>& tmp, Args&&... args) mutable {
-              std::invoke(tmp.value, std::forward<Args>(args)...);
-            },
-            temporary_with_spec<Lead, LeadSpec>(std::move(h.lead_spec))));
+    using xdr_reader::make_decoder;
+
+    if constexpr(std::is_void_v<Lead>) {
+      return add_raw(std::move(x), make_decoder<void, Temporary>(std::move(h.fn)));
+    } else {
+      return add_raw(std::move(x), make_decoder<temporary_with_spec<Lead, LeadSpec>>(
+              [fn=std::move(h.fn)]<typename... Args>(temporary_with_spec<Lead, LeadSpec>& tmp, Args&&... args) mutable {
+                std::invoke(tmp.value, std::forward<Args>(args)...);
+              },
+              temporary_with_spec<Lead, LeadSpec>(std::move(h.lead_spec))));
+    }
   }
 }
 
