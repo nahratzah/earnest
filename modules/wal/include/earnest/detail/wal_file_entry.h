@@ -121,7 +121,7 @@ class wal_file_entry
   auto header_writer_() const;
 
   template<typename Stream, typename Callback>
-  auto read_records_(Stream& stream, Callback callback, std::unique_ptr<records_vector> records) -> void; // Has side-effects.
+  auto read_records_(Stream& stream, Callback callback, std::unique_ptr<variant_type> ptr) -> void; // Has side-effects.
   template<typename Stream, typename Callback>
   auto read_records_until_(Stream& stream, Callback callback, typename fd<executor_type>::offset_type end_offset, std::unique_ptr<records_vector> records) const -> void;
   template<typename CompletionToken>

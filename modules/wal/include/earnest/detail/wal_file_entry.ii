@@ -98,37 +98,33 @@ inline auto wal_file_entry<Executor, Allocator>::header_writer_() const {
 
 template<typename Executor, typename Allocator>
 template<typename Stream, typename Callback>
-auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback callback, std::unique_ptr<records_vector> records) -> void {
+auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback callback, std::unique_ptr<variant_type> ptr) -> void {
   link_offset_ = stream.position();
-  auto raw_records_ptr = records.get();
+  variant_type& variant_ref = *ptr;
   async_read(
       stream,
-      ::earnest::xdr_reader<>() & xdr_getset<variant_type>(
-          [records=raw_records_ptr](variant_type v) -> std::error_code {
-            try {
-              records->push_back(std::move(v));
-            } catch (const std::bad_alloc&) {
-              return make_error_code(wal_errc::memory_exhausted);
-            }
-            return std::error_code();
-          }).as(xdr_variant),
+      ::earnest::xdr_reader<>() & xdr_variant(variant_ref),
       completion_wrapper<void(std::error_code)>(
           std::move(callback),
-          [wf=this->shared_from_this(), &stream, records=std::move(records)](auto& h, std::error_code ec) mutable {
+          [wf=this->shared_from_this(), &stream, ptr=std::move(ptr)](auto h, std::error_code ec) mutable {
             wf->write_offset_ = stream.position();
 
-            if (ec) {
-              std::invoke(h, ec, std::move(*records));
+            const bool done = std::holds_alternative<std::monostate>(*ptr);
+            if (!ec && !done) {
+              if (wf->state_ == wal_file_entry_state::sealed) {
+                std::clog << "WAL: file " << wf->name << " is bad: record after seal\n";
+                ec = make_error_code(wal_errc::unrecoverable);
+              } else if (std::holds_alternative<wal_record_seal>(*ptr)) {
+                wf->state_ = wal_file_entry_state::sealed;
+              }
+            }
+
+            if (ec || done) {
+              std::invoke(h, ec);
               return;
             }
 
-            assert(!records->empty());
-            if (records->back().index() == 0) {
-              std::invoke(h, ec, std::move(*records));
-              return;
-            }
-
-            wf->read_records_(stream, std::move(h), std::move(records));
+            wf->read_records_(stream, std::move(h), std::move(ptr));
           }));
 }
 
@@ -231,7 +227,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
   using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
 
   if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
-  return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
+  return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, const dir& d, const std::filesystem::path& name, std::shared_ptr<wal_file_entry> wf) {
         asio::dispatch(
             wf->strand_,
@@ -256,7 +252,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
                   ex.post(
                       completion_wrapper<void()>(
                           std::move(completion_handler),
-                          [ec, alloc=wf->get_allocator()](auto h) { std::invoke(h, ec, records_vector(alloc)); }),
+                          [ec, alloc=wf->get_allocator()](auto h) { std::invoke(h, ec); }),
                       alloc);
                   return;
                 }
@@ -265,53 +261,30 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
 
               struct state {
                 pos_stream stream;
-                records_vector records;
               };
               std::unique_ptr<state> s = std::make_unique<state>(
                   state{
-                    .stream = pos_stream(wf->file),
-                    .records = records_vector(wf->get_allocator())
+                    .stream = pos_stream(wf->file)
                   });
               auto& stream = s->stream;
-              auto& state_records = s->records;
 
               async_read(
                   stream,
                   wf->header_reader_() & xdr_manual(
-                      [wf, &state_records](auto& stream, auto callback) {
+                      [wf](auto& stream, auto callback) {
                         wf->read_records_(
                             stream,
-                            [callback=std::move(callback), &state_records](std::error_code ec, records_vector records) mutable {
-                              state_records = std::move(records);
-                              std::invoke(callback, ec);
-                            },
-                            std::make_unique<records_vector>());
+                            std::move(callback),
+                            std::make_unique<variant_type>());
                       }),
                   completion_wrapper<void(std::error_code)>(
                       std::move(completion_handler),
                       [wf, state_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
-                        assert(wf->state_ == wal_file_entry_state::opening);
+                        assert(wf->state_ == wal_file_entry_state::opening || wf->state_ == wal_file_entry_state::sealed);
+                        assert(wf->write_offset_ == state_ptr->stream.position());
 
-                        wf->write_offset_ = state_ptr->stream.position();
-                        if (!ec) {
+                        if (!ec && wf->state_ == wal_file_entry_state::opening)
                           wf->state_ = wal_file_entry_state::ready;
-
-                          if (state_ptr->records.size() >= 2) {
-                            // If there is a sealing record, the wal file is sealed.
-                            if (std::holds_alternative<wal_record_seal>(state_ptr->records[state_ptr->records.size() - 2u]))
-                              wf->state_ = wal_file_entry_state::sealed;
-
-                            // If there are records after the sealing record, the file is wrong.
-                            auto other_seal = std::find_if(state_ptr->records.cbegin(), std::prev(state_ptr->records.cend(), 2u),
-                                [](const variant_type& r) -> bool {
-                                  return std::holds_alternative<wal_record_seal>(r);
-                                });
-                            if (other_seal != std::prev(state_ptr->records.end(), 2u)) [[unlikely]] {
-                              std::clog << "WAL unrecoverable error: " << wf->name << " has records after seal" << std::endl;
-                              ec = make_error_code(wal_errc::unrecoverable);
-                            }
-                          }
-                        }
 
                         if (ec) {
                           wf->state_ = wal_file_entry_state::uninitialized;
@@ -319,7 +292,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
                         }
 
                         if (!ec) wf->link_done_event_(ec);
-                        std::invoke(h, ec, std::move(state_ptr->records));
+                        std::invoke(h, ec);
                       }));
             });
       },

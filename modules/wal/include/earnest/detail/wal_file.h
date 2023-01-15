@@ -263,9 +263,9 @@ class wal_file
 
                       wf->entries.emplace_back(std::allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator()));
                       wf->entries.back()->async_open(wf->dir_, filename,
-                          completion_wrapper<void(std::error_code, typename entry_type::records_vector records)>(
+                          completion_wrapper<void(std::error_code)>(
                               ++barrier,
-                              [filename](auto handler, std::error_code ec, [[maybe_unused]] typename entry_type::records_vector records) {
+                              [filename](auto handler, std::error_code ec) {
                                 if (ec) [[unlikely]]
                                   std::clog << "WAL: error while opening WAL file '"sv << filename << "': "sv << ec << "\n";
                                 std::invoke(handler, ec);

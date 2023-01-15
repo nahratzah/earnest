@@ -44,7 +44,7 @@ TEST(read_empty_wal_file_entry) {
   auto f = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
   CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
   f->async_open(source_files, "empty",
-      [&f](std::error_code ec, [[maybe_unused]] auto records) {
+      [&f](std::error_code ec) {
         CHECK(ec);
         CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
       });
@@ -59,7 +59,7 @@ TEST(read_non_existant_wal_file_entry) {
   auto f = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
   CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
   f->async_open(source_files, "non_existant_file",
-      [&f](std::error_code ec, [[maybe_unused]] auto records) {
+      [&f](std::error_code ec) {
         CHECK(ec);
         CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
       });
@@ -74,12 +74,9 @@ TEST(read_wal_file_entry) {
   auto f = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
   CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
   f->async_open(source_files, "version_0",
-      [&f](std::error_code ec, auto records) {
+      [&f](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f->state());
-
-        CHECK_EQUAL(1u, records.size());
-        if (!records.empty()) CHECK_EQUAL(0u, records.back().index());
       });
   ioctx.run();
 
@@ -104,13 +101,9 @@ TEST(read_sealed_wal_file_entry) {
   auto f = std::make_shared<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
   CHECK_EQUAL(earnest::detail::wal_file_entry_state::uninitialized, f->state());
   f->async_open(source_files, "sealed_0",
-      [&f](std::error_code ec, auto records) {
+      [&f](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(earnest::detail::wal_file_entry_state::sealed, f->state());
-
-        CHECK_EQUAL(2u, records.size());
-        if (records.size() >= 1) CHECK_EQUAL(0u, records.back().index());
-        if (records.size() >= 2) CHECK_EQUAL(0u, std::prev(records.end())->index());
       });
   ioctx.run();
 
