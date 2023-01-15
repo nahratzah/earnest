@@ -1072,7 +1072,7 @@ inline auto async_read(
   detail::xdr_reader::extract_reader<xdr<detail::xdr_reader::reader<Factories...>>> er;
 
   return asio::async_result<std::decay_t<CompletionToken>, void(std::error_code)>::initiate(
-      [](auto completion_handler, AsioAsyncReadStream& stream, detail::xdr_reader::reader<Factories...>&& r) {
+      [](auto completion_handler, AsioAsyncReadStream& stream, detail::xdr_reader::reader<Factories...> r) {
         auto alloc = asio::get_associated_allocator(completion_handler);
         auto ex = asio::get_associated_executor(completion_handler, stream.get_executor());
 
@@ -1118,7 +1118,7 @@ inline auto async_write(
   detail::xdr_writer::extract_writer<xdr<detail::xdr_writer::writer<Factories...>>> ew;
 
   return asio::async_result<std::decay_t<CompletionToken>, void(std::error_code)>::initiate(
-      [](auto completion_handler, AsioAsyncWriteStream& stream, detail::xdr_writer::writer<Factories...>&& w) {
+      [](auto completion_handler, AsioAsyncWriteStream& stream, detail::xdr_writer::writer<Factories...> w) {
         auto alloc = asio::get_associated_allocator(completion_handler);
         auto ex = asio::get_associated_executor(completion_handler, stream.get_executor());
 
@@ -3960,7 +3960,7 @@ inline auto operator&(xdr<xdr_writer::writer<X...>>&& x, manual_holder<Fn, Lead,
 template<typename... X, typename Fn, typename Lead, typename LeadSpec, typename Temporary>
 inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, manual_holder<Fn, Lead, LeadSpec, Temporary> h) {
   if constexpr(!xdr<xdr_reader::reader<X...>>::empty) {
-    return std::move(x) & (typename xdr<xdr_reader::reader<X...>>::empty_type() & std::move(h));
+    return std::move(x) + (typename xdr<xdr_reader::reader<X...>>::empty_type() & std::move(h));
   } else {
     using xdr_reader::make_decoder;
 
