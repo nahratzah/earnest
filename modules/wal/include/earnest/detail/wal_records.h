@@ -243,4 +243,53 @@ inline auto operator&(::earnest::xdr_writer<X...>&& x, typename ::earnest::xdr_w
 }
 
 
+using wal_record_variant = std::variant<
+    std::monostate, // 0
+    wal_record_noop, // 1
+    wal_record_skip32, // 2
+    wal_record_skip64, // 3
+    wal_record_seal, // 4
+    wal_record_wal_archived, // 5
+    wal_record_reserved, // 6
+    wal_record_reserved, // 7
+    wal_record_reserved, // 8
+    wal_record_reserved, // 9
+    wal_record_reserved, // 10
+    wal_record_reserved, // 11
+    wal_record_reserved, // 12
+    wal_record_reserved, // 13
+    wal_record_reserved, // 14
+    wal_record_reserved, // 15
+    wal_record_reserved, // 16
+    wal_record_reserved, // 17
+    wal_record_reserved, // 18
+    wal_record_reserved, // 19
+    wal_record_reserved, // 20
+    wal_record_reserved, // 21
+    wal_record_reserved, // 22
+    wal_record_reserved, // 23
+    wal_record_reserved, // 24
+    wal_record_reserved, // 25
+    wal_record_reserved, // 26
+    wal_record_reserved, // 27
+    wal_record_reserved, // 28
+    wal_record_reserved, // 29
+    wal_record_reserved, // 30
+    wal_record_reserved, // 31
+    wal_record_create_file, // 32
+    wal_record_erase_file, // 33
+    wal_record_truncate_file, // 34
+    wal_record_modify_file32 // 35
+    >;
+
+// Indices 0..31 (inclusive) are reserved for bookkeeping of the WAL.
+inline constexpr auto wal_record_is_bookkeeping(std::size_t idx) noexcept -> bool {
+  return idx < 32;
+}
+
+inline auto wal_record_is_bookkeeping(const wal_record_variant& r) noexcept -> bool {
+  return wal_record_is_bookkeeping(r.index());
+}
+
+
 } /* namespace earnest::detail */
