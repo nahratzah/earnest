@@ -29,6 +29,7 @@
 
 #include <earnest/detail/wal_file_entry.h>
 #include <earnest/detail/completion_barrier.h>
+#include <earnest/detail/adjecent_find_last.h>
 #include <earnest/dir.h>
 
 namespace earnest::detail {
@@ -66,6 +67,7 @@ class wal_file
 
   wal_file(executor_type ex, allocator_type alloc = allocator_type())
   : entries(alloc),
+    old(alloc),
     strand_(ex),
     rollover_barrier_(ex, alloc)
   {
@@ -479,6 +481,16 @@ class wal_file
             }));
     assert(entries.back()->state() == wal_file_entry_state::ready);
 
+    // Find the most recent point where the sequence breaks.
+    auto sequence_break_iter = adjecent_find_last(entries.begin(), entries.end(),
+        [](const std::shared_ptr<entry_type>& x_ptr, const std::shared_ptr<entry_type>& y_ptr) -> bool {
+          return x_ptr->sequence + 1u != y_ptr->sequence;
+        });
+    if (sequence_break_iter != entries.end()) {
+      std::copy(std::make_move_iterator(entries.begin()), std::make_move_iterator(std::next(sequence_break_iter)), std::back_inserter(old));
+      entries.erase(entries.begin(), std::next(sequence_break_iter));
+    }
+
     this->active = entries.back();
     entries.pop_back();
 
@@ -528,7 +540,11 @@ class wal_file
   }
 
   public:
-  entries_list entries;
+  // `entries` holds all entries that lead up to `active`,
+  // and has contiguous sequence.
+  // `old` holds all entries that are not contiguous,
+  // or that are no longer relevant.
+  entries_list entries, old;
   std::shared_ptr<entry_type> active;
 
   private:
