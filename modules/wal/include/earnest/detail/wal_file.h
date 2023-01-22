@@ -20,16 +20,17 @@
 #include <utility>
 #include <vector>
 
-#include <asio/strand.hpp>
 #include <asio/associated_allocator.hpp>
 #include <asio/associated_executor.hpp>
 #include <asio/bind_allocator.hpp>
 #include <asio/bind_executor.hpp>
 #include <asio/executor_work_guard.hpp>
+#include <asio/strand.hpp>
 
-#include <earnest/detail/wal_file_entry.h>
-#include <earnest/detail/completion_barrier.h>
 #include <earnest/detail/adjecent_find_last.h>
+#include <earnest/detail/completion_barrier.h>
+#include <earnest/detail/completion_handler_fun.h>
+#include <earnest/detail/wal_file_entry.h>
 #include <earnest/dir.h>
 
 namespace earnest::detail {
