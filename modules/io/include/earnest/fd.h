@@ -4,6 +4,7 @@
 #ifndef WIN32
 # include <cerrno>
 # include <unistd.h>
+# include <sys/file.h>
 #endif
 
 #include <cstddef>
@@ -122,6 +123,86 @@ class fd {
     std::error_code ec;
     flush(data_only, ec);
     if (ec) throw std::system_error(ec, "earnest::fd::flush");
+  }
+
+  void flock(std::error_code& ec) {
+    ec.clear();
+    if (::flock(handle_, LOCK_EX))
+      ec.assign(errno, std::generic_category());
+  }
+
+  void flock() {
+    std::error_code ec;
+    flock(ec);
+    if (ec) throw std::system_error(ec, "earnest::fd::flock");
+  }
+
+  void flock_shared(std::error_code& ec) {
+    ec.clear();
+    if (::flock(handle_, LOCK_SH))
+      ec.assign(errno, std::generic_category());
+  }
+
+  void flock_shared() {
+    std::error_code ec;
+    flock_shared(ec);
+    if (ec) throw std::system_error(ec, "earnest::fd::flock_shared");
+  }
+
+  void funlock(std::error_code& ec) {
+    ec.clear();
+    if (::flock(handle_, LOCK_UN))
+      ec.assign(errno, std::generic_category());
+  }
+
+  void funlock() {
+    std::error_code ec;
+    funlock(ec);
+    if (ec) throw std::system_error(ec, "earnest::fd::funlock");
+  }
+
+  void funlock_shared(std::error_code& ec) {
+    ec.clear();
+    if (::flock(handle_, LOCK_UN))
+      ec.assign(errno, std::generic_category());
+  }
+
+  void funlock_shared() {
+    std::error_code ec;
+    funlock_shared(ec);
+    if (ec) throw std::system_error(ec, "earnest::fd::funlock_shared");
+  }
+
+  bool ftrylock(std::error_code& ec) {
+    ec.clear();
+    if (::flock(handle_, LOCK_EX|LOCK_NB)) {
+      if (errno != EWOULDBLOCK) ec.assign(errno, std::generic_category());
+      return false;
+    }
+    return true;
+  }
+
+  bool ftrylock() {
+    std::error_code ec;
+    bool success = funlock(ec);
+    if (ec) throw std::system_error(ec, "earnest::fd::ftrylock");
+    return success;
+  }
+
+  bool ftrylock_shared(std::error_code& ec) {
+    ec.clear();
+    if (::flock(handle_, LOCK_SH|LOCK_NB)) {
+      if (errno != EWOULDBLOCK) ec.assign(errno, std::generic_category());
+      return false;
+    }
+    return true;
+  }
+
+  bool ftrylock_shared() {
+    std::error_code ec;
+    bool success = funlock_shared(ec);
+    if (ec) throw std::system_error(ec, "earnest::fd::ftrylock_shared");
+    return success;
   }
 
   void flush(bool data_only, std::error_code& ec) {

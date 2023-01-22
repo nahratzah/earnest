@@ -245,6 +245,10 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
 
                     if (!ec) {
                       wf->file.open(d, name, fd<executor_type>::READ_WRITE, ec);
+                      if (!ec) {
+                        bool was_locked = wf->file.ftrylock(ec);
+                        if (!ec && !was_locked) ec = make_error_code(wal_errc::unable_to_lock);
+                      }
                       if (ec) wf->state_ = wal_file_entry_state::uninitialized;
                     }
 
@@ -324,6 +328,10 @@ inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, cons
 
                     if (!ec) {
                       wf->file.create(d, name, ec);
+                      if (!ec) {
+                        bool was_locked = wf->file.ftrylock(ec);
+                        if (!ec && !was_locked) ec = make_error_code(wal_errc::unable_to_lock);
+                      }
                       if (ec) wf->state_ = wal_file_entry_state::uninitialized;
                     }
 
