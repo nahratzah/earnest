@@ -1,9 +1,9 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <type_traits>
 #include <utility>
-#include <asio/buffer.hpp>
 
 #include <earnest/xdr.h>
 
@@ -43,3 +43,17 @@ inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<f
 
 
 } /* namespace earnest */
+
+namespace std {
+
+
+template<>
+struct hash<::earnest::file_id> {
+  auto operator()(const ::earnest::file_id& fid) const noexcept -> std::size_t {
+    std::hash<std::string_view> sv_hash;
+    return 10001u * sv_hash(fid.ns) + sv_hash(fid.filename);
+  }
+};
+
+
+} /* namespace std */

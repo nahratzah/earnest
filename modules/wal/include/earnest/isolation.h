@@ -1,5 +1,4 @@
-#ifndef EARNEST_ISOLATION_H
-#define EARNEST_ISOLATION_H
+#pragma once
 
 namespace earnest {
 
@@ -38,5 +37,3 @@ enum class isolation {
 
 
 } /* namespace earnest */
-
-#endif /* EARNEST_ISOLATION_H */

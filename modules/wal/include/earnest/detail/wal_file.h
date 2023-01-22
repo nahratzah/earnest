@@ -65,7 +65,7 @@ class wal_file
   using records_vector = typename entry_type::records_vector;
   using write_records_vector = typename entry_type::write_records_vector;
 
-  wal_file(executor_type ex, allocator_type alloc = allocator_type())
+  explicit wal_file(executor_type ex, allocator_type alloc = allocator_type())
   : entries(alloc),
     old(alloc),
     strand_(ex),
@@ -89,25 +89,18 @@ class wal_file
   auto async_append(Range&& records, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, std::shared_ptr<wal_file> wf, auto records) {
-          auto ex = asio::make_work_guard(handler, wf->get_executor());
 
-          wf->strand_.dispatch(
-              [ex, wf, handler=std::move(handler), records=std::move(records)]() mutable {
-                if (wf->active == nullptr) [[unlikely]] {
-                  auto alloc = asio::get_associated_allocator(handler);
-                  ex.get_executor().post(
-                      completion_wrapper<void()>(
-                          std::move(handler),
-                          [](auto handler) {
-                            std::invoke(handler, make_error_code(wal_errc::bad_state));
-                          }),
-                      alloc);
-                  return;
-                }
+        asio::dispatch(
+            completion_wrapper<void()>(
+                completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                [wf, records=std::move(records)](auto handler) mutable {
+                  if (wf->active == nullptr) [[unlikely]] {
+                    handler.dispatch(make_error_code(wal_errc::bad_state));
+                    return;
+                  }
 
-                wf->active->async_append(std::move(records), std::move(handler));
-              },
-              wf->get_allocator());
+                  wf->active->async_append(std::move(records), std::move(handler).inner_handler());
+                }));
         },
         token, this->shared_from_this(), write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()));
   }
@@ -118,78 +111,57 @@ class wal_file
         [](auto handler, std::shared_ptr<wal_file> wf) {
           auto ex = asio::make_work_guard(handler, wf->get_executor());
 
-          wf->strand_.dispatch(
-              [ex, wf, handler=std::move(handler)]() {
-                if (wf->active == nullptr) {
-                  auto alloc = asio::get_associated_allocator(handler);
-                  ex.get_executor().post(
-                      completion_wrapper<void()>(
-                          std::move(handler),
-                          [](auto handler) {
-                            std::invoke(handler, make_error_code(wal_errc::bad_state));
-                          }),
-                      alloc);
-                  return;
-                }
+          asio::dispatch(
+              completion_wrapper<void()>(
+                  completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                  [wf](auto handler) {
+                    if (wf->active == nullptr) {
+                      handler.post(make_error_code(wal_errc::bad_state));
+                      return;
+                    }
 
-                auto wrapped_handler = asio::bind_executor(
-                    wf->strand_,
-                    asio::bind_allocator(
-                        wf->get_allocator(),
-                        [ex, handler=std::move(handler)](std::error_code ec) mutable {
-                          auto alloc = asio::get_associated_allocator(handler);
-                          ex.get_executor().post(
-                              completion_wrapper<void()>(
-                                  std::move(handler),
-                                  [ec](auto handler) {
-                                    std::invoke(handler, ec);
-                                  }),
-                              alloc);
-                        }));
+                    fanout_barrier<executor_type, allocator_type> new_barrier(wf->get_executor(), wf->get_allocator());
+                    wf->rollover_barrier_.async_on_ready(
+                        completion_wrapper<void(std::error_code)>(
+                            std::move(handler),
+                            [wf, new_barrier](auto wrapped_handler, std::error_code ec) mutable {
+                              if (ec) [[unlikely]] {
+                                std::invoke(new_barrier, ec);
+                                std::invoke(wrapped_handler, ec);
+                                return;
+                              }
 
-                fanout_barrier<executor_type, allocator_type> new_barrier(wf->get_executor(), wf->get_allocator());
-                wf->rollover_barrier_.async_on_ready(
-                    completion_wrapper<void(std::error_code)>(
-                        std::move(wrapped_handler),
-                        [wf, new_barrier](auto wrapped_handler, std::error_code ec) mutable {
-                          if (ec) [[unlikely]] {
-                            std::invoke(new_barrier, ec);
-                            std::invoke(wrapped_handler, ec);
-                            return;
-                          }
+                              const auto new_sequence = wf->active->sequence + 1u;
+                              auto new_active = allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator());
+                              new_active->async_create(wf->dir_, filename_for_wal_(new_sequence), new_sequence,
+                                  completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type)>(
+                                      std::move(wrapped_handler),
+                                      [ wf, new_barrier=std::move(new_barrier),
+                                        new_active=std::move(new_active)
+                                      ](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) mutable {
+                                        if (!ec) [[likely]] { // Success!
+                                          assert(wf->active->sequence + 1u == new_active->sequence); // guaranteed by rollover-barrier.
+                                          const auto old_active = std::exchange(wf->active, new_active);
+                                          wf->entries.push_back(old_active);
+                                          std::invoke(new_barrier, std::error_code());
 
-                          const auto new_sequence = wf->active->sequence + 1u;
-                          auto new_active = allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator());
-                          new_active->async_create(wf->dir_, filename_for_wal_(new_sequence), new_sequence,
-                              completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type)>(
-                                  std::move(wrapped_handler),
-                                  [ wf, new_barrier=std::move(new_barrier),
-                                    new_active=std::move(new_active)
-                                  ](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) mutable {
-                                    if (!ec) [[likely]] { // Success!
-                                      assert(wf->active->sequence + 1u == new_active->sequence); // guaranteed by rollover-barrier.
-                                      const auto old_active = std::exchange(wf->active, new_active);
-                                      wf->entries.push_back(old_active);
-                                      std::invoke(new_barrier, std::error_code());
+                                          link_event.async_on_ready(std::move(handler));
+                                          old_active->async_seal(std::move(link_event));
+                                        } else { // Fail, remove the new file.
+                                          auto name = new_active->name;
+                                          std::error_code undo_ec;
+                                          wf->dir_.erase(name, undo_ec);
+                                          if (undo_ec)
+                                            std::clog << "WAL: rollover failed, and during recovery, the file erase failed (filename: " << name << ", error: " << undo_ec << "); further rollovers will be impossible\n";
+                                          std::invoke(new_barrier, undo_ec);
 
-                                      link_event.async_on_ready(std::move(handler));
-                                      old_active->async_seal(std::move(link_event));
-                                    } else { // Fail, remove the new file.
-                                      auto name = new_active->name;
-                                      std::error_code undo_ec;
-                                      wf->dir_.erase(name, undo_ec);
-                                      if (undo_ec)
-                                        std::clog << "WAL: rollover failed, and during recovery, the file erase failed (filename: " << name << ", error: " << undo_ec << "); further rollovers will be impossible\n";
-                                      std::invoke(new_barrier, undo_ec);
-
-                                      std::invoke(handler, ec);
-                                      return;
-                                    }
-                                  }));
-                        }));
-                wf->rollover_barrier_ = std::move(new_barrier);
-              },
-              wf->get_allocator());
+                                          std::invoke(handler, ec);
+                                          return;
+                                        }
+                                      }));
+                            }));
+                    wf->rollover_barrier_ = std::move(new_barrier);
+                  }));
         },
         token, this->shared_from_this());
   }
@@ -200,23 +172,9 @@ class wal_file
 
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto completion_handler, std::shared_ptr<wal_file> wf, dir d) {
-          auto ex = asio::make_work_guard(completion_handler, wf->get_executor());
-          auto wrapped_handler = asio::bind_executor(
-              wf->strand_,
-              asio::bind_allocator(
-                  wf->get_allocator(),
-                  [ex=std::move(ex), completion_handler=std::move(completion_handler)](std::error_code ec) {
-                    auto alloc = asio::get_associated_allocator(completion_handler);
-                    ex.get_executor().dispatch(
-                        [completion_handler=std::move(completion_handler), ec]() mutable {
-                          std::invoke(completion_handler, ec);
-                        },
-                        alloc);
-                  }));
-
-          wf->strand_.post(
+          asio::dispatch(
               completion_wrapper<void()>(
-                  std::move(wrapped_handler),
+                  completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
                   [wf, d=std::move(d)](auto handler) {
                     if (wf->dir_.is_open()) {
                       std::invoke(handler, make_error_code(wal_errc::bad_state));
@@ -274,8 +232,7 @@ class wal_file
                               }));
                     }
                     std::invoke(barrier, std::error_code());
-                  }),
-              wf->get_allocator());
+                  }));
         },
         token, this->shared_from_this(), std::move(d));
   }
@@ -286,23 +243,9 @@ class wal_file
 
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto completion_handler, std::shared_ptr<wal_file> wf, dir d) {
-          auto ex = asio::make_work_guard(completion_handler, wf->get_executor());
-          auto wrapped_handler = asio::bind_executor(
-              wf->strand_,
-              asio::bind_allocator(
-                  wf->get_allocator(),
-                  [ex=std::move(ex), completion_handler=std::move(completion_handler)](std::error_code ec) {
-                    auto alloc = asio::get_associated_allocator(completion_handler);
-                    ex.get_executor().dispatch(
-                        [completion_handler=std::move(completion_handler), ec]() mutable {
-                          std::invoke(completion_handler, ec);
-                        },
-                        alloc);
-                  }));
-
-          wf->strand_.post(
+          asio::dispatch(
               completion_wrapper<void()>(
-                  std::move(wrapped_handler),
+                  completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
                   [wf, d=std::move(d)](auto handler) {
                     if (wf->dir_.is_open()) {
                       std::invoke(handler, make_error_code(wal_errc::bad_state));
@@ -319,8 +262,7 @@ class wal_file
                               std::invoke(link_event, ec);
                               std::invoke(handler, ec);
                             }));;
-                  }),
-              wf->get_allocator());
+                  }));
         },
         token, this->shared_from_this(), std::move(d));
   }
@@ -329,31 +271,20 @@ class wal_file
   auto async_records(CompletionToken&& token) const {
     return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
         [](auto handler, std::shared_ptr<const wal_file> wf) {
-          auto ex = asio::make_work_guard(handler, wf->get_executor());
-          auto wrapped_handler = asio::bind_executor(
-              wf->get_executor(),
-              asio::bind_allocator(
-                  wf->get_allocator(),
-                  completion_wrapper<void(std::error_code, records_vector)>(
-                      std::move(handler),
-                      [ex](auto handler, std::error_code ec, records_vector records) {
-                        auto alloc = asio::get_associated_allocator(handler);
-                        ex.get_executor().post(
-                            [handler=std::move(handler), ec, records=std::move(records)]() mutable {
-                              std::invoke(handler, ec, std::move(records));
-                            },
-                            alloc);
-                      })));
+          asio::dispatch(
+              completion_wrapper<void()>(
+                  completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                  [wf](auto handler) {
+                    auto queue = std::queue<std::shared_ptr<const entry_type>, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>>(
+                        std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>(
+                            wf->entries.begin(), wf->entries.end(), wf->get_allocator()));
+                    queue.push(wf->active);
 
-          auto queue = std::queue<std::shared_ptr<const entry_type>, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>>(
-              std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>(
-                  wf->entries.begin(), wf->entries.end(), wf->get_allocator()));
-          queue.push(wf->active);
-
-          wf->async_records_iter_(
-              records_vector(wf->get_allocator()),
-              std::move(queue),
-              std::move(wrapped_handler));
+                    wf->async_records_iter_(
+                        records_vector(wf->get_allocator()),
+                        std::move(queue),
+                        std::move(handler).as_unbound_handler());
+                  }));
         },
         token, this->shared_from_this());
   }
