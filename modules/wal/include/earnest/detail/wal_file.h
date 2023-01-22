@@ -82,6 +82,7 @@ class wal_file
 
   auto get_executor() const -> executor_type { return strand_.get_inner_executor(); }
   auto get_allocator() const -> allocator_type { return entries.get_allocator(); }
+  auto get_dir() const -> const dir& { return dir_; }
 
   template<typename Range, typename CompletionToken>
 #if __cpp_concepts >= 201907L

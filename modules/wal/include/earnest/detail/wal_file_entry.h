@@ -49,8 +49,8 @@ class wal_file_entry
   using rebind_alloc = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
 
   public:
-  using variant_type = wal_record_variant;
-  using write_variant_type = record_write_type_t<wal_record_variant>;
+  using variant_type = wal_record_variant<Executor>;
+  using write_variant_type = record_write_type_t<variant_type>;
   using records_vector = std::vector<variant_type, rebind_alloc<variant_type>>;
   using write_records_vector = std::vector<write_variant_type, std::scoped_allocator_adaptor<rebind_alloc<write_variant_type>>>;
 

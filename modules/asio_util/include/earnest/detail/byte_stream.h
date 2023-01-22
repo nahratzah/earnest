@@ -51,6 +51,10 @@ class byte_stream {
     return data_.get_allocator();
   }
 
+  auto cdata() const noexcept -> const std::vector<std::byte, allocator_type>& {
+    return data_;
+  }
+
   auto data() const & noexcept -> const std::vector<std::byte, allocator_type>& {
     return data_;
   }

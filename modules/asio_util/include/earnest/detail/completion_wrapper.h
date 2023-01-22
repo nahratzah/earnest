@@ -8,7 +8,7 @@
 namespace earnest::detail {
 
 
-template<typename Derived, typename = void>
+template<typename Derived, typename Handler, typename = void>
 class completion_wrapper_allocator_aspect_ {
   protected:
   constexpr completion_wrapper_allocator_aspect_() noexcept = default;
@@ -19,8 +19,8 @@ class completion_wrapper_allocator_aspect_ {
   ~completion_wrapper_allocator_aspect_() noexcept = default;
 };
 
-template<typename Derived>
-class completion_wrapper_allocator_aspect_<Derived, std::void_t<typename Derived::handler_type::allocator_type>> {
+template<typename Derived, typename Handler>
+class completion_wrapper_allocator_aspect_<Derived, Handler, std::void_t<typename Handler::allocator_type>> {
   protected:
   constexpr completion_wrapper_allocator_aspect_() noexcept = default;
   constexpr completion_wrapper_allocator_aspect_(const completion_wrapper_allocator_aspect_&) noexcept = default;
@@ -30,7 +30,7 @@ class completion_wrapper_allocator_aspect_<Derived, std::void_t<typename Derived
   ~completion_wrapper_allocator_aspect_() noexcept = default;
 
   public:
-  using allocator_type = typename Derived::handler_type::allocator_type;
+  using allocator_type = typename Handler::allocator_type;
 
   auto get_allocator() const -> allocator_type {
     return static_cast<const Derived&>(*this).handler_.get_allocator();
@@ -38,7 +38,7 @@ class completion_wrapper_allocator_aspect_<Derived, std::void_t<typename Derived
 };
 
 
-template<typename Derived, typename = void>
+template<typename Derived, typename Handler, typename = void>
 class completion_wrapper_executor_aspect_ {
   protected:
   constexpr completion_wrapper_executor_aspect_() noexcept = default;
@@ -49,8 +49,8 @@ class completion_wrapper_executor_aspect_ {
   ~completion_wrapper_executor_aspect_() noexcept = default;
 };
 
-template<typename Derived>
-class completion_wrapper_executor_aspect_<Derived, std::void_t<typename Derived::handler_type::executor_type>> {
+template<typename Derived, typename Handler>
+class completion_wrapper_executor_aspect_<Derived, Handler, std::void_t<typename Handler::executor_type>> {
   protected:
   constexpr completion_wrapper_executor_aspect_() noexcept = default;
   constexpr completion_wrapper_executor_aspect_(const completion_wrapper_executor_aspect_&) noexcept = default;
@@ -60,7 +60,7 @@ class completion_wrapper_executor_aspect_<Derived, std::void_t<typename Derived:
   ~completion_wrapper_executor_aspect_() noexcept = default;
 
   public:
-  using executor_type = typename Derived::handler_type::executor_type;
+  using executor_type = typename Handler::executor_type;
 
   auto get_executor() const -> executor_type {
     return static_cast<const Derived&>(*this).handler_.get_executor();
@@ -72,16 +72,16 @@ template<typename Handler, typename Signature, typename Adapter> class completio
 
 template<typename Handler, typename... Args, typename Adapter>
 class completion_wrapper_t<Handler, void(Args...), Adapter>
-: public completion_wrapper_allocator_aspect_<completion_wrapper_t<Handler, void(Args...), Adapter>>,
-  public completion_wrapper_executor_aspect_<completion_wrapper_t<Handler, void(Args...), Adapter>>
+: public completion_wrapper_allocator_aspect_<completion_wrapper_t<Handler, void(Args...), Adapter>, Handler>,
+  public completion_wrapper_executor_aspect_<completion_wrapper_t<Handler, void(Args...), Adapter>, Handler>
 {
   static_assert(
       std::is_invocable_v<std::add_lvalue_reference_t<Adapter>, std::add_rvalue_reference_t<Handler>, Args...> ||
       std::is_invocable_v<std::add_lvalue_reference_t<Adapter>, std::add_lvalue_reference_t<Handler>, Args...>,
       "adapter must be invokable with (Handler, Args...)");
 
-  template<typename, typename> friend class ::earnest::detail::completion_wrapper_allocator_aspect_;
-  template<typename, typename> friend class ::earnest::detail::completion_wrapper_executor_aspect_;
+  template<typename, typename, typename> friend class ::earnest::detail::completion_wrapper_allocator_aspect_;
+  template<typename, typename, typename> friend class ::earnest::detail::completion_wrapper_executor_aspect_;
 
   public:
   using handler_type = Handler;

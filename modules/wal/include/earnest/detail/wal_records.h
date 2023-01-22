@@ -4,6 +4,7 @@
 
 #include <earnest/file_id.h>
 #include <earnest/xdr.h>
+#include <earnest/fd.h>
 
 namespace earnest::detail {
 
@@ -212,11 +213,13 @@ inline auto operator&(::earnest::xdr<X>&& x, typename ::earnest::xdr<X>::templat
 }
 
 
+template<typename Executor, typename Reactor = aio::reactor>
 struct wal_record_modify_file32 {
   file_id file;
   std::uint64_t file_offset;
   std::uint64_t wal_offset;
   std::uint32_t wal_len;
+  std::shared_ptr<const fd<Executor, Reactor>> wal_file;
 
   auto operator<=>(const wal_record_modify_file32& y) const noexcept = default;
 };
@@ -227,10 +230,10 @@ struct wal_record_modify_file_write32 {
   std::vector<std::byte> data;
 };
 
-template<> struct record_write_type_<wal_record_modify_file32> { using type = wal_record_modify_file_write32; };
+template<typename Executor, typename Reactor> struct record_write_type_<wal_record_modify_file32<Executor, Reactor>> { using type = wal_record_modify_file_write32; };
 
-template<typename... X>
-inline auto operator&(::earnest::xdr_reader<X...>&& x, typename ::earnest::xdr_reader<X...>::template typed_function_arg<wal_record_modify_file32> r) {
+template<typename... X, typename Executor, typename Reactor>
+inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_modify_file32<Executor, Reactor>& r) {
   return std::move(x)
       & r.file
       & xdr_uint64(r.file_offset)
@@ -253,6 +256,7 @@ inline auto operator&(::earnest::xdr_writer<X...>&& x, typename ::earnest::xdr_w
 }
 
 
+template<typename Executor, typename Reactor = aio::reactor>
 using wal_record_variant = std::variant<
     wal_record_end_of_records, // 0
     wal_record_noop, // 1
@@ -289,7 +293,7 @@ using wal_record_variant = std::variant<
     wal_record_create_file, // 32
     wal_record_erase_file, // 33
     wal_record_truncate_file, // 34
-    wal_record_modify_file32 // 35
+    wal_record_modify_file32<Executor, Reactor> // 35
     >;
 
 // Indices 0..31 (inclusive) are reserved for bookkeeping of the WAL.
@@ -297,7 +301,8 @@ inline constexpr auto wal_record_is_bookkeeping(std::size_t idx) noexcept -> boo
   return idx < 32;
 }
 
-inline auto wal_record_is_bookkeeping(const wal_record_variant& r) noexcept -> bool {
+template<typename Executor, typename Reactor>
+inline auto wal_record_is_bookkeeping(const wal_record_variant<Executor, Reactor>& r) noexcept -> bool {
   return wal_record_is_bookkeeping(r.index());
 }
 
