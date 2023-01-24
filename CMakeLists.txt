@@ -38,34 +38,34 @@ find_package (instrumentation 1.0 REQUIRED)
 find_package (monsoon_cache 0.5 REQUIRED)
 find_package (objpipe 0.3 REQUIRED)
 
-add_library (earnest
-  src/detail/wal.cc
+add_library (earnest INTERFACE
+  # src/detail/wal.cc
 )
-target_include_directories (earnest PUBLIC
+target_include_directories (earnest INTERFACE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_include_directories (earnest PUBLIC ${Boost_INCLUDE_DIR})
-target_link_libraries (earnest PUBLIC
+target_include_directories (earnest INTERFACE ${Boost_INCLUDE_DIR})
+target_link_libraries (earnest INTERFACE
   instrumentation
   monsoon_cache
   cycle_ptr
   ${Boost_CONTAINER_LIBRARY}
   ${Boost_SYSTEM_LIBRARY}
 )
-target_link_libraries (earnest PRIVATE
-  objpipe
-  ${Boost_FILESYSTEM_LIBRARY}
-)
+# target_link_libraries (earnest PRIVATE
+#   objpipe
+#   ${Boost_FILESYSTEM_LIBRARY}
+# )
 set_property (TARGET earnest PROPERTY VERSION ${EARNEST_VERSION})
-target_compile_features (earnest PUBLIC cxx_std_20)
+target_compile_features (earnest INTERFACE cxx_std_20)
 set_target_properties (earnest PROPERTIES CXX_EXTENSIONS OFF)
 
-target_include_directories(earnest PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/modules/asio/asio/include)
-target_link_libraries(earnest PUBLIC asio asio_util io wal)
+target_include_directories(earnest INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/modules/asio/asio/include)
+target_link_libraries(earnest INTERFACE asio asio_util io wal)
 
 find_package (Threads REQUIRED)
 if(CMAKE_USE_PTHREADS_INIT)
-  target_link_libraries(earnest PUBLIC ${CMAKE_THREAD_LIBS_INIT})
+  target_link_libraries(earnest INTERFACE ${CMAKE_THREAD_LIBS_INIT})
 endif()
 
 install (TARGETS earnest DESTINATION lib)
