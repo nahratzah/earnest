@@ -7,34 +7,37 @@ mark_as_advanced(WAL_VERSION_MAJOR)
 mark_as_advanced(WAL_VERSION_MINOR)
 mark_as_advanced(WAL_VERSION)
 
-add_library(wal SHARED)
+add_library(wal INTERFACE)
 set_property(TARGET wal PROPERTY VERSION ${WAL_VERSION})
-target_compile_features(wal PUBLIC cxx_std_20)
+target_compile_features(wal INTERFACE cxx_std_20)
 target_sources(wal
-    PUBLIC
+    INTERFACE
     FILE_SET HEADERS
     BASE_DIRS include
     FILES
     include/earnest/detail/replacement_map.h
-    include/earnest/detail/replacement_map.ii
     include/earnest/detail/wal_file_entry.h
     include/earnest/detail/wal_file_entry.ii
     include/earnest/detail/wal_flusher.h
     include/earnest/detail/wal_records.h
     include/earnest/file_id.h
     include/earnest/wal_error.h)
-target_sources(wal PRIVATE
-    src/replacement_map.cc)
 
 find_package(Boost REQUIRED)
-target_include_directories(wal PUBLIC ${Boost_INCLUDE_DIR})
-target_link_libraries(wal PUBLIC asio asio_util xdr io)
+target_include_directories(wal INTERFACE ${Boost_INCLUDE_DIR})
+target_link_libraries(wal INTERFACE asio asio_util xdr io)
 
 find_package(UnitTest++)
 if (UnitTest++_FOUND)
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wal_file_entry_test_tmpdir")
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wal_file_test_tmpdir")
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/file_db_test_tmpdir")
+
+  add_executable(replacement_map_test)
+  target_include_directories(replacement_map_test PRIVATE ${UTPP_INCLUDE_DIRS})
+  target_link_libraries(replacement_map_test PUBLIC wal io UnitTest++)
+  target_sources(replacement_map_test PRIVATE tests/replacement_map.cc)
+  add_test(NAME replacement_map COMMAND replacement_map_test)
 
   add_executable(wal_file_entry_test)
   target_include_directories(wal_file_entry_test PRIVATE ${UTPP_INCLUDE_DIRS})

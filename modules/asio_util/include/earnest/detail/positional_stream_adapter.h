@@ -39,14 +39,14 @@ class positional_stream_adapter {
   using executor_type = typename next_layer_type::executor_type;
 
   template<typename Arg>
-  explicit positional_stream_adapter(Arg& a)
-  : next_layer_(a)
+  explicit positional_stream_adapter(Arg&& a)
+  : next_layer_(std::forward<Arg>(a))
   {}
 
   template<typename Arg>
-  positional_stream_adapter(Arg& a, offset_type pos)
+  positional_stream_adapter(Arg&& a, offset_type pos)
   : pos_(pos),
-    next_layer_(a)
+    next_layer_(std::forward<Arg>(a))
   {}
 
   positional_stream_adapter(positional_stream_adapter&&) = default;

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <functional>
+#include <iosfwd>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -39,6 +41,13 @@ inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<f
   return std::move(x)
       & xdr_bytes(fid.ns)
       & xdr_bytes(fid.filename);
+}
+
+template<typename CharT, typename Traits>
+inline auto operator<<(std::basic_ostream<CharT, Traits>& out, const file_id& fid) -> std::basic_ostream<CharT, Traits>& {
+  using namespace std::string_view_literals;
+
+  return out << "file_id{ns=\""sv << fid.ns << "\", filename=\""sv << fid.filename << "\"}"sv;
 }
 
 

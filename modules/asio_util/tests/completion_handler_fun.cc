@@ -47,6 +47,6 @@ TEST(has_correct_bindings) {
   CHECK(asio::get_associated_allocator(chf) == mock_allocator<std::byte>(17));
 }
 
-int main(int argc, char** argv) {
+int main() {
   return UnitTest::RunAllTests();
 }

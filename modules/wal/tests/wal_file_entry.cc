@@ -88,10 +88,15 @@ TEST(read_wal_file_entry) {
   REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f->state());
 
   ioctx.restart();
+  std::size_t record_count = 0;
   f->async_records(
-      [](std::error_code ec, auto records) {
+      [&]([[maybe_unused]] const auto& record) {
+        ++record_count;
+        return std::error_code();
+      },
+      [&](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
-        CHECK_EQUAL(0u, records.size());
+        CHECK_EQUAL(0u, record_count);
       });
   ioctx.run();
 }
@@ -115,8 +120,13 @@ TEST(read_sealed_wal_file_entry) {
   REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::sealed, f->state());
 
   ioctx.restart();
+  std::vector<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::variant_type> records;
   f->async_records(
-      [](std::error_code ec, auto records) {
+      [&records](auto v) {
+        records.push_back(std::move(v));
+        return std::error_code();
+      },
+      [&records](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(1u, records.size());
         if (!records.empty())
@@ -158,8 +168,13 @@ TEST(write_wal_file_entry) {
   REQUIRE CHECK_EQUAL(earnest::detail::wal_file_entry_state::ready, f->state());
 
   ioctx.restart();
+  std::vector<earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::variant_type> records;
   f->async_records(
-      [](std::error_code ec, auto records) {
+      [&records](auto v) {
+        records.push_back(std::move(v));
+        return std::error_code();
+      },
+      [&records](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
         CHECK_EQUAL(0u, records.size());
       });

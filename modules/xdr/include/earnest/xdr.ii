@@ -1477,7 +1477,7 @@ auto operator&(xdr<xdr_reader::reader<X...>>&& x, getset_impl<Fn, T, Spec> gs) {
     return add_raw(
         std::move(x),
         make_temporary(
-            [setter=std::move(gs.fn)](const temporary_with_spec<T, Spec>& v) -> std::error_code {
+            [setter=std::move(gs.fn)](const temporary_with_spec<T, Spec>& v) mutable -> std::error_code {
               std::invoke(setter, v.value);
               return {};
             },
@@ -1495,7 +1495,7 @@ auto operator&(xdr<xdr_writer::writer<X...>>&& x, getset_impl<Fn, T, Spec> gs) {
     return add_raw(
         std::move(x),
         make_temporary(
-            [getter=std::move(gs.fn)](temporary_with_spec<T, Spec>& v) -> std::error_code {
+            [getter=std::move(gs.fn)](temporary_with_spec<T, Spec>& v) mutable -> std::error_code {
               v.value = std::invoke(getter);
               return {};
             },

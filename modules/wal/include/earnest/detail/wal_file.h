@@ -65,6 +65,7 @@ class wal_file
   using write_variant_type = typename entry_type::write_variant_type;
   using records_vector = typename entry_type::records_vector;
   using write_records_vector = typename entry_type::write_records_vector;
+  using fd_type = typename entry_type::fd_type;
 
   explicit wal_file(executor_type ex, allocator_type alloc = allocator_type())
   : entries(alloc),
@@ -269,49 +270,71 @@ class wal_file
         token, this->shared_from_this(), std::move(d));
   }
 
-  template<typename CompletionToken>
-  auto async_records(CompletionToken&& token) const {
-    return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
-        [](auto handler, std::shared_ptr<const wal_file> wf) {
+  template<typename Acceptor, typename CompletionToken>
+  auto async_records(Acceptor&& acceptor, CompletionToken&& token) const {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<const wal_file> wf, auto acceptor) {
           asio::dispatch(
               completion_wrapper<void()>(
                   completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
-                  [wf](auto handler) {
+                  [wf, acceptor=std::move(acceptor)](auto handler) mutable {
                     auto queue = std::queue<std::shared_ptr<const entry_type>, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>>(
                         std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>(
                             wf->entries.begin(), wf->entries.end(), wf->get_allocator()));
                     queue.push(wf->active);
 
                     wf->async_records_iter_(
-                        records_vector(wf->get_allocator()),
+                        std::move(acceptor),
                         std::move(queue),
                         std::move(handler).as_unbound_handler());
+                  }));
+        },
+        token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
+  }
+
+  template<typename CompletionToken>
+  [[deprecated]]
+  auto async_records(CompletionToken&& token) const {
+    return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
+        [](auto handler, std::shared_ptr<const wal_file> wf) {
+          auto records_ptr = std::make_unique<records_vector>(wf->get_allocator());
+          auto& records_ref = *records_ptr;
+
+          wf->async_records(
+              [&records_ref](auto v) {
+                records_ref.push_back(std::move(v));
+                return std::error_code();
+              },
+              completion_wrapper<void(std::error_code)>(
+                  std::move(handler),
+                  [records_ptr=std::move(records_ptr)](auto handler, std::error_code ec) {
+                    std::invoke(handler, ec, *records_ptr);
                   }));
         },
         token, this->shared_from_this());
   }
 
   private:
-  template<typename CompletionHandler>
-  static auto async_records_iter_(records_vector&& result, std::queue<std::shared_ptr<const entry_type>, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>>&& files, CompletionHandler&& handler) -> void {
+  template<typename Acceptor, typename CompletionHandler>
+  static auto async_records_iter_(Acceptor&& acceptor, std::queue<std::shared_ptr<const entry_type>, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>>&& files, CompletionHandler&& handler) -> void {
     if (files.empty()) {
-      std::invoke(handler, std::error_code(), std::move(result));
+      std::invoke(handler, std::error_code());
       return;
     }
 
     auto current = std::move(files.front());
     files.pop();
     current->async_records(
-        completion_wrapper<void(std::error_code, records_vector)>(
+        acceptor,
+        completion_wrapper<void(std::error_code)>(
             std::move(handler),
-            [files=std::move(files), result=std::move(result)](auto handler, std::error_code ec, records_vector records) mutable {
+            [files=std::move(files), acceptor](auto handler, std::error_code ec) mutable {
               if (ec) [[unlikely]] {
-                std::invoke(handler, ec, std::move(result));
+                std::invoke(handler, ec);
                 return;
               }
 
-              result.insert(result.end(), std::make_move_iterator(records.begin()), std::make_move_iterator(records.end()));
-              async_records_iter_(std::move(result), std::move(files), std::move(handler));
+              async_records_iter_(std::move(acceptor), std::move(files), std::move(handler));
             }));
   }
 

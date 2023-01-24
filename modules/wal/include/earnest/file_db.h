@@ -1,14 +1,19 @@
 #pragma once
 
+#include <iostream>
+#include <iterator>
 #include <memory>
 #include <string>
-#include <vector>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include <earnest/detail/completion_handler_fun.h>
 #include <earnest/detail/completion_wrapper.h>
 #include <earnest/detail/namespace_map.h>
+#include <earnest/detail/positional_stream_adapter.h>
+#include <earnest/detail/replacement_map.h>
+#include <earnest/detail/replacement_map_reader.h>
 #include <earnest/detail/wal_file.h>
 #include <earnest/detail/wal_records.h>
 #include <earnest/file_db_error.h>
@@ -156,95 +161,169 @@ class file_db
   private:
   template<typename Handler>
   auto recover_namespaces_(Handler&& handler) {
-    using wal_record_modify_file32 = std::variant_alternative<35, variant_type>;
-    using wal_record_create_file = detail::wal_record_create_file;
-    using wal_record_erase_file = detail::wal_record_erase_file;
-    using wal_record_truncate_file = detail::wal_record_truncate_file;
-
     assert(strand_.running_in_this_thread());
     assert(wal != nullptr);
 
-#if 0
-    fdb->files.emplace(
-        file_id(std::string(), namespaces_filename),
-        file{ .fd{fdb->get_executor()}, .exists_logically{true} });
-#endif
+    struct state_t {
+      explicit state_t(executor_type ex, rebind_alloc<std::byte> alloc)
+      : replacements(std::move(alloc)),
+        actual_file(std::move(ex))
+      {}
+
+      detail::replacement_map<typename wal_type::fd_type, rebind_alloc<std::byte>> replacements;
+      fd<executor_type> actual_file;
+      bool exists = false;
+      std::uint64_t file_size = 0;
+    };
+
+    auto state_ptr = std::make_unique<state_t>(get_executor(), get_allocator());
+    auto& state_ref = *state_ptr;
+    {
+      std::error_code open_ec;
+      state_ptr->actual_file.open(wal->get_dir(), namespaces_filename, open_mode::READ_ONLY, open_ec);
+      if (open_ec == make_error_code(std::errc::no_such_file_or_directory)) {
+        state_ptr->exists = false;
+      } else if (open_ec) {
+        std::invoke(handler, open_ec);
+        return;
+      } else {
+        state_ptr->exists = true;
+        state_ptr->file_size = state_ptr->actual_file.size();
+      }
+    }
 
     wal->async_records(
-        completion_wrapper<void(std::error_code, typename wal_type::records_vector)>(
+        [&state_ref]<typename E, typename R>(const detail::wal_record_variant<E, R>& record) {
+          auto ec = std::visit(
+              [ &state_ref,
+                ns_file_id=file_id("", namespaces_filename)
+              ](const auto& record) {
+                using record_type = std::remove_cvref_t<decltype(record)>;
+
+                if constexpr(std::is_same_v<record_type, detail::wal_record_create_file>) {
+                  if (record.file == ns_file_id) {
+                    state_ref.exists = true;
+                    state_ref.file_size = 0;
+                    state_ref.replacements.clear();
+                  }
+                } else if constexpr(std::is_same_v<record_type, detail::wal_record_erase_file>) {
+                  if (record.file == ns_file_id) {
+                    state_ref.exists = false;
+                    state_ref.file_size = 0;
+                    state_ref.replacements.clear();
+                  }
+                } else if constexpr(std::is_same_v<record_type, detail::wal_record_truncate_file>) {
+                  if (record.file == ns_file_id) {
+                    if (!state_ref.exists) {
+                      std::clog << "File-DB: namespaces file was truncated, but logically doesn't exist\n";
+                      return make_error_code(file_db_errc::unrecoverable);
+                    }
+                    state_ref.file_size = record.new_size;
+                    state_ref.replacements.truncate(record.new_size);
+                  }
+                } else if constexpr(std::is_same_v<record_type, detail::wal_record_modify_file32<E, R>>) {
+                  if (record.file == ns_file_id) {
+                    if (!state_ref.exists) {
+                      std::clog << "File-DB: namespaces file was written to, but logically doesn't exist\n";
+                      return make_error_code(file_db_errc::unrecoverable);
+                    }
+                    state_ref.replacements.insert(record);
+                  }
+                }
+                return std::error_code();
+              },
+              record);
+          return ec;
+        },
+        completion_wrapper<void(std::error_code)>(
             std::forward<Handler>(handler),
-            [fdb=this->shared_from_this()](auto handler, std::error_code ec, typename wal_type::records_vector records) {
+            [ fdb=this->shared_from_this(),
+              state_ptr=std::move(state_ptr)
+            ](auto handler, std::error_code ec) {
               assert(fdb->strand_.running_in_this_thread());
 
-              if (ec) {
+              if (!ec && !state_ptr->exists) {
+                std::clog << "File-DB: namespace file does not exist\n";
+                ec = make_error_code(file_db_errc::unrecoverable);
+              }
+              if (ec) [[unlikely]] {
                 std::invoke(handler, ec);
                 return;
               }
 
-              file namespaces_file{ .fd{fdb->get_executor()}, .exists_logically{true} };
-              {
-                std::error_code open_ec;
-                namespaces_file.fd.open(fdb->wal->get_dir(), namespaces_filename, open_mode::READ_WRITE, open_ec);
-                if (open_ec == make_error_code(std::errc::no_such_file_or_directory)) {
-                  namespaces_file.exists_logically = false;
-                } else if (open_ec) {
-                  std::invoke(handler, open_ec);
-                  return;
-                } else {
-                  namespaces_file.file_size = namespaces_file.fd.size();
-                }
-              }
+              if (!state_ptr->exists) state_ptr->actual_file.close();
 
-              std::vector<wal_record_modify_file32, rebind_alloc<wal_record_modify_file32>> overwrites(fdb->get_allocator());
+              using reader_type = detail::replacement_map_reader<
+                  fd_type,
+                  typename wal_type::fd_type,
+                  rebind_alloc<std::byte>>;
+              auto reader_ptr = std::make_unique<detail::positional_stream_adapter<reader_type>>(reader_type(std::move(state_ptr->actual_file), std::move(state_ptr->replacements), state_ptr->file_size));
+              auto& reader_ref = *reader_ptr;
+              auto namespaces_map_ptr = std::make_unique<detail::namespace_map<>>();
+              auto& namespaces_map_ref = *namespaces_map_ptr;
+              async_read(
+                  reader_ref,
+                  xdr_reader<>() & namespaces_map_ref,
+                  completion_wrapper<void(std::error_code)>(
+                      std::move(handler),
+                      [ reader_ptr=std::move(reader_ptr),
+                        namespaces_map_ptr=std::move(namespaces_map_ptr),
+                        fdb
+                      ](auto handler, std::error_code ec) mutable {
+                        assert(fdb->strand_.running_in_this_thread());
 
-              for (const auto& record : records) {
-                std::error_code visit_ec = std::visit(
-                    [&](const auto& record) {
-                      using record_type = std::remove_cvref_t<decltype(record)>;
-
-                      if constexpr(std::is_same_v<record_type, wal_record_create_file>) {
-                        if (record.file == file_id("", namespaces_filename)) {
-                          namespaces_file.exists_logically = true;
-                          namespaces_file.file_size = 0;
+                        if (ec) {
+                          std::invoke(handler, ec);
+                          return;
                         }
-                      } else if constexpr(std::is_same_v<record_type, wal_record_erase_file>) {
-                        if (record.file == file_id("", namespaces_filename)) {
-                          namespaces_file.exists_logically = false;
-                          namespaces_file.file_size = 0;
-                          overwrites.clear();
-                        }
-                      } else if constexpr(std::is_same_v<record_type, wal_record_truncate_file>) {
-                        if (record.file == file_id("", namespaces_filename)) {
-                          if (!namespaces_file.exists_logically) {
-                            std::clog << "File-DB: namespaces file was truncated, but logically doesn't exist\n";
-                            return make_error_code(file_db_errc::unrecoverable);
-                          }
-                          namespaces_file.file_size = record.new_size;
-                        }
-                      } else if constexpr(std::is_same_v<record_type, wal_record_modify_file32>) {
-                        if (record.file == file_id("", namespaces_filename)) {
-                          if (!namespaces_file.exists_logically) {
-                            std::clog << "File-DB: namespaces file was written to, but logically doesn't exist\n";
-                            return make_error_code(file_db_errc::unrecoverable);
-                          }
-                          overwrites.push_back(record);
-                        }
-                      }
-                      return std::error_code();
-                    },
-                    record);
-                if (visit_ec) {
-                  std::invoke(handler, visit_ec);
-                  return;
-                }
-              }
 
-              fdb->files.emplace(
-                  file_id("", namespaces_filename),
-                  std::move(namespaces_file));
+                        reader_ptr.reset();
+                        try {
+                          std::transform(
+                              namespaces_map_ptr->namespaces.begin(), namespaces_map_ptr->namespaces.end(),
+                              std::inserter(fdb->namespaces, fdb->namespaces.end()),
+                              [](const std::pair<const std::string, std::string>& ns_entry) {
+                                return std::make_pair(ns_entry.first, ns{ .d{ns_entry.second} });
+                              });
+                          std::transform(
+                              namespaces_map_ptr->files.begin(), namespaces_map_ptr->files.end(),
+                              std::inserter(fdb->files, fdb->files.end()),
+                              [fdb](const file_id& id) {
+                                auto result = std::make_pair(
+                                    id,
+                                    file{
+                                      .fd{fdb->get_executor()},
+                                      .exists_logically=true,
+                                    });
 
-              // XXX use the overwrites
-              std::invoke(handler, std::error_code());
+                                if (id.ns.empty()) {
+                                  try {
+                                    result.second.fd.open(fdb->wal->get_dir(), id.filename, open_mode::READ_WRITE);
+                                  } catch (const std::system_error& ex) {
+                                    // Recovery will deal with it.
+                                  }
+                                } else {
+                                  const auto ns_iter = fdb->namespaces.find(id.ns);
+                                  if (ns_iter == fdb->namespaces.end())
+                                    throw std::system_error(std::make_error_code(std::errc::no_such_file_or_directory));
+                                  try {
+                                    result.second.fd.open(ns_iter->second.d, id.filename, open_mode::READ_WRITE);
+                                  } catch (const std::system_error& ex) {
+                                    // Recovery will deal with it.
+                                  }
+                                }
+
+                                if (result.second.fd.is_open())
+                                  result.second.file_size = result.second.fd.size();
+                                return result;
+                              });
+                        } catch (const std::system_error& ex) {
+                          std::invoke(handler, ex.code());
+                          return;
+                        }
+
+                        std::invoke(handler, std::error_code());
+                      }));
             }));
   }
 

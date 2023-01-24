@@ -53,6 +53,7 @@ class wal_file_entry
   using write_variant_type = record_write_type_t<variant_type>;
   using records_vector = std::vector<variant_type, rebind_alloc<variant_type>>;
   using write_records_vector = std::vector<write_variant_type, std::scoped_allocator_adaptor<rebind_alloc<write_variant_type>>>;
+  using fd_type = fd<executor_type>;
 
   wal_file_entry(const executor_type& ex, allocator_type alloc);
 
@@ -71,8 +72,12 @@ class wal_file_entry
 
   template<typename Stream, typename Callback>
   auto read_records_(Stream& stream, Callback callback, std::unique_ptr<variant_type> ptr) -> void; // Has side-effects.
-  template<typename Stream, typename Callback>
-  auto read_records_until_(Stream& stream, Callback callback, typename fd<executor_type>::offset_type end_offset, std::unique_ptr<records_vector> records) const -> void;
+                                                                                                    //
+  template<typename Stream, typename Acceptor, typename Callback>
+  auto read_records_until_(Stream& stream, Acceptor&& acceptor, Callback callback, typename fd_type::offset_type end_offset) const -> void;
+
+  auto decorate_(variant_type& v) const -> void;
+
   template<typename CompletionToken>
   auto write_records_to_buffer_(write_records_vector&& records, CompletionToken&& token) const;
   template<typename State>
@@ -99,11 +104,16 @@ class wal_file_entry
   template<typename CompletionToken>
   auto async_discard_all(CompletionToken&& token);
 
-  auto write_offset() const noexcept -> typename fd<executor_type>::offset_type;
-  auto link_offset() const noexcept -> typename fd<executor_type>::offset_type;
+  auto write_offset() const noexcept -> typename fd_type::offset_type;
+  auto link_offset() const noexcept -> typename fd_type::offset_type;
   auto has_unlinked_data() const -> bool;
 
-  template<typename CompletionToken> auto async_records(CompletionToken&& token) const;
+  template<typename Acceptor, typename CompletionToken>
+  auto async_records(Acceptor&& acceptor, CompletionToken&& token) const;
+
+  template<typename CompletionToken>
+  [[deprecated]]
+  auto async_records(CompletionToken&& token) const;
 
   private:
   template<typename CompletionToken, typename OnSpaceAssigned>
@@ -111,35 +121,35 @@ class wal_file_entry
 
   template<typename CompletionToken, typename Barrier, typename Fanout>
   auto append_bytes_at_(
-      typename fd<executor_type>::offset_type write_offset,
+      typename fd_type::offset_type write_offset,
       std::vector<std::byte, rebind_alloc<std::byte>>&& bytes,
       CompletionToken&& token,
       Barrier&& barrier, Fanout&& f);
 
   template<typename CompletionToken>
   auto write_skip_record_(
-      typename fd<executor_type>::offset_type write_offset,
+      typename fd_type::offset_type write_offset,
       std::size_t bytes, CompletionToken&& token);
 
   template<typename CompletionToken>
   auto write_link_(
-      typename fd<executor_type>::offset_type write_offset,
+      typename fd_type::offset_type write_offset,
       std::array<std::byte, 4> bytes, CompletionToken&& token);
 
   public:
   std::filesystem::path name;
-  fd<executor_type> file;
+  fd_type file;
   std::uint_fast32_t version;
   std::uint_fast64_t sequence;
 
   private:
   allocator_type alloc_;
-  typename fd<executor_type>::offset_type write_offset_;
-  typename fd<executor_type>::offset_type link_offset_;
+  typename fd_type::offset_type write_offset_;
+  typename fd_type::offset_type link_offset_;
   asio::strand<executor_type> strand_;
   wal_file_entry_state state_ = wal_file_entry_state::uninitialized;
   link_done_event_type link_done_event_;
-  wal_flusher<fd<executor_type>&, allocator_type> wal_flusher_;
+  wal_flusher<fd_type&, allocator_type> wal_flusher_;
 
   // Seal barrier becomes ready when:
   // 1. all pending writes have their space allocated.

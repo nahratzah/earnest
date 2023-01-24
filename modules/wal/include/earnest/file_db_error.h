@@ -8,7 +8,7 @@ namespace earnest {
 
 
 enum class file_db_errc {
-  unrecoverable
+  unrecoverable,
 };
 
 auto file_db_category() -> const std::error_category& {

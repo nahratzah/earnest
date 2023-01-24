@@ -130,50 +130,52 @@ auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback
 }
 
 template<typename Executor, typename Allocator>
-template<typename Stream, typename Callback>
-auto wal_file_entry<Executor, Allocator>::read_records_until_(Stream& stream, Callback callback, typename fd<executor_type>::offset_type end_offset, std::unique_ptr<records_vector> records) const -> void {
+template<typename Stream, typename Acceptor, typename Callback>
+#if 0
+requires requires(Acceptor acceptor, typename wal_file_entry<Executor, Allocator>::variant_type v) {
+  { std::invoke(acceptor, std::move(v)) } -> std::convertible_to<std::error_code>;
+}
+#endif
+auto wal_file_entry<Executor, Allocator>::read_records_until_(Stream& stream, Acceptor&& acceptor, Callback callback, typename fd_type::offset_type end_offset) const -> void {
   if (stream.position() >= end_offset) {
     std::error_code ec;
     if (stream.position() > end_offset) [[unlikely]]
       ec = make_error_code(wal_errc::bad_read);
 
-    auto ex = asio::get_associated_executor(callback, get_executor());
-    ex.post(
-        [ec, records=std::move(records), callback=std::move(callback)]() mutable {
-          std::invoke(callback, ec, *records);
-        },
-        get_allocator());
+    std::invoke(callback, ec);
     return;
   }
 
-  auto raw_records_ptr = records.get();
   async_read(
       stream,
       ::earnest::xdr_reader<>() & xdr_getset<variant_type>(
-          [records=raw_records_ptr](variant_type v) -> std::error_code {
-            try {
-              records->push_back(std::move(v));
-            } catch (const std::bad_alloc&) {
-              return make_error_code(wal_errc::memory_exhausted);
-            }
-            return std::error_code();
+          [this, acceptor](variant_type v) mutable {
+            this->decorate_(v);
+            return std::invoke(acceptor, std::move(v));
           }).as(xdr_variant),
       completion_wrapper<void(std::error_code)>(
           std::move(callback),
-          [ wf=this->shared_from_this(), &stream, end_offset,
-            records=std::move(records)
-          ](auto& h, std::error_code ec) mutable {
+          [wf=this->shared_from_this(), &stream, end_offset, acceptor](auto& h, std::error_code ec) mutable {
             // We should not end up in a scenario where a record goes over the end-offset.
             if (stream.position() > end_offset) [[unlikely]]
               ec = make_error_code(wal_errc::bad_read);
 
             if (ec || stream.position() == end_offset) { // Done reading.
-              std::invoke(h, ec, std::move(*records));
+              std::invoke(h, ec);
               return;
             }
 
-            wf->read_records_until_(stream, std::move(h), end_offset, std::move(records));
+            wf->read_records_until_(stream, std::move(acceptor), std::move(h), end_offset);
           }));
+}
+
+template<typename Executor, typename Allocator>
+inline auto wal_file_entry<Executor, Allocator>::decorate_(variant_type& v) const -> void {
+  if (std::holds_alternative<wal_record_modify_file32<executor_type>>(v)) {
+    std::get<wal_record_modify_file32<executor_type>>(v).wal_file = std::shared_ptr<const fd_type>(
+        this->shared_from_this(),
+        &this->file);
+  }
 }
 
 template<typename Executor, typename Allocator>
@@ -225,7 +227,7 @@ inline auto wal_file_entry<Executor, Allocator>::write_records_to_buffer_iter_(s
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token) {
-  using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
+  using pos_stream = positional_stream_adapter<fd_type&>; // XXX replace with buffered positional stream
 
   if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
@@ -244,7 +246,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
                     }
 
                     if (!ec) {
-                      wf->file.open(d, name, fd<executor_type>::READ_WRITE, ec);
+                      wf->file.open(d, name, fd_type::READ_WRITE, ec);
                       if (!ec) {
                         bool was_locked = wf->file.ftrylock(ec);
                         if (!ec && !was_locked) ec = make_error_code(wal_errc::unable_to_lock);
@@ -302,7 +304,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const 
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token) {
-  using pos_stream = positional_stream_adapter<fd<executor_type>&>; // XXX replace with buffered positional stream
+  using pos_stream = positional_stream_adapter<fd_type&>; // XXX replace with buffered positional stream
 
   if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
   return asio::async_initiate<CompletionToken, void(std::error_code, link_done_event_type)>(
@@ -524,12 +526,12 @@ inline auto wal_file_entry<Executor, Allocator>::async_discard_all(CompletionTok
 }
 
 template<typename Executor, typename Allocator>
-inline auto wal_file_entry<Executor, Allocator>::write_offset() const noexcept -> typename fd<executor_type>::offset_type {
+inline auto wal_file_entry<Executor, Allocator>::write_offset() const noexcept -> typename fd_type::offset_type {
   return write_offset_;
 }
 
 template<typename Executor, typename Allocator>
-inline auto wal_file_entry<Executor, Allocator>::link_offset() const noexcept -> typename fd<executor_type>::offset_type {
+inline auto wal_file_entry<Executor, Allocator>::link_offset() const noexcept -> typename fd_type::offset_type {
   return link_offset_;
 }
 
@@ -539,19 +541,19 @@ inline auto wal_file_entry<Executor, Allocator>::has_unlinked_data() const -> bo
 }
 
 template<typename Executor, typename Allocator>
-template<typename CompletionToken>
-inline auto wal_file_entry<Executor, Allocator>::async_records(CompletionToken&& token) const {
-  using pos_stream = positional_stream_adapter<const fd<executor_type>&>;
+template<typename Acceptor, typename CompletionToken>
+inline auto wal_file_entry<Executor, Allocator>::async_records(Acceptor&& acceptor, CompletionToken&& token) const {
+  using pos_stream = positional_stream_adapter<const fd_type&>; // XXX add buffer
 
-  return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
-      [](auto completion_handler, std::shared_ptr<const wal_file_entry> wf) {
+  return asio::async_initiate<CompletionToken, void(std::error_code)>(
+      [](auto completion_handler, std::shared_ptr<const wal_file_entry> wf, std::remove_cvref_t<Acceptor> acceptor) {
         asio::dispatch(
             completion_wrapper<void()>(
                 completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
-                [wf](auto completion_handler) {
+                [wf, acceptor=std::move(acceptor)](auto completion_handler) mutable {
                   // If we are not in the correct state, refuse the request.
                   if (wf->state_ != wal_file_entry_state::ready && wf->state_ != wal_file_entry_state::sealing && wf->state_ != wal_file_entry_state::sealed) [[unlikely]] {
-                    completion_handler.post(make_error_code(wal_errc::bad_state), records_vector(wf->get_allocator()));
+                    completion_handler.post(make_error_code(wal_errc::bad_state));
                     return;
                   }
 
@@ -561,21 +563,40 @@ inline auto wal_file_entry<Executor, Allocator>::async_records(CompletionToken&&
 
                   wf->read_records_until_(
                       stream,
-                      completion_wrapper<void(std::error_code, records_vector)>(
-                          std::move(completion_handler),
-                          [stream_ptr=std::move(s)](auto& completion_handler, std::error_code ec, records_vector records) mutable {
-                            stream_ptr.reset();
-
-                            if (!ec && std::any_of(records.begin(), records.end(),
-                                    [](const auto& variant) -> bool {
-                                      return std::holds_alternative<wal_record_end_of_records>(variant);
-                                    }))
-                              ec = make_error_code(wal_errc::bad_read);
-
-                            std::invoke(completion_handler, ec, std::move(records));
+                      [acceptor=std::move(acceptor)](variant_type v) mutable -> std::error_code {
+                        if (std::holds_alternative<wal_record_end_of_records>(v))
+                          return make_error_code(wal_errc::bad_read);
+                        return std::invoke(acceptor, std::move(v));
+                      },
+                      completion_wrapper<void(std::error_code)>(
+                          std::move(completion_handler).as_unbound_handler(),
+                          [stream_ptr=std::move(s)](auto& completion_handler, std::error_code ec) mutable {
+                            stream_ptr.reset(); // Not really needed, but silences compiler warning.
+                            std::invoke(completion_handler, ec);
                           }),
-                      wf->link_offset_,
-                      std::make_unique<records_vector>());
+                      wf->link_offset_);
+                }));
+      },
+      token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
+}
+
+template<typename Executor, typename Allocator>
+template<typename CompletionToken>
+inline auto wal_file_entry<Executor, Allocator>::async_records(CompletionToken&& token) const {
+  return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
+      [](auto completion_handler, std::shared_ptr<const wal_file_entry> wf) {
+        auto records_ptr = std::make_unique<records_vector>(wf->get_allocator());
+        auto& records_ref = *records_ptr;
+
+        wf->async_records(
+            [&records_ref](variant_type v) -> std::error_code {
+              records_ref.emplace_back(std::move(v));
+              return {};
+            },
+            completion_wrapper<void(std::error_code)>(
+                std::move(completion_handler),
+                [wf, records_ptr=std::move(records_ptr)](auto handler, std::error_code ec) {
+                  std::invoke(handler, ec, *records_ptr);
                 }));
       },
       token, this->shared_from_this());
@@ -648,7 +669,7 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::
 template<typename Executor, typename Allocator>
 template<typename CompletionToken, typename Barrier, typename Fanout>
 inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
-    typename fd<executor_type>::offset_type write_offset,
+    typename fd_type::offset_type write_offset,
     std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, Barrier&& barrier, Fanout&& f) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, auto write_offset, std::vector<std::byte, rebind_alloc<std::byte>> bytes, Barrier&& barrier, Fanout&& f, std::shared_ptr<wal_file_entry> wf) {
@@ -690,7 +711,7 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::write_skip_record_(
-    typename fd<executor_type>::offset_type write_offset,
+    typename fd_type::offset_type write_offset,
     std::size_t bytes, CompletionToken&& token) {
   if (bytes == 0) {
     auto skip_record = std::array<std::byte, 4>{ std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01} };
@@ -700,7 +721,7 @@ inline auto wal_file_entry<Executor, Allocator>::write_skip_record_(
   assert(bytes >= 4u);
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, auto write_offset, std::size_t bytes, std::shared_ptr<wal_file_entry> wf) {
-        using pos_stream = positional_stream_adapter<fd<executor_type>&>;
+        using pos_stream = positional_stream_adapter<fd_type&>;
 
         std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf->file, write_offset);
         auto& stream = *s;
@@ -737,11 +758,11 @@ inline auto wal_file_entry<Executor, Allocator>::write_skip_record_(
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::write_link_(
-    typename fd<executor_type>::offset_type write_offset,
+    typename fd_type::offset_type write_offset,
     std::array<std::byte, 4> bytes, CompletionToken&& token) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [write_offset, bytes](auto completion_handler, std::shared_ptr<wal_file_entry> wf) {
-        using pos_stream = positional_stream_adapter<fd<executor_type>&>;
+        using pos_stream = positional_stream_adapter<fd_type&>;
 
         wf->wal_flusher_.async_flush(true,
             completion_wrapper<void(std::error_code)>(

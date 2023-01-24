@@ -210,8 +210,13 @@ TEST(write) {
   CHECK(append_callback_was_called);
   CHECK(w->entries.empty());
 
+  std::vector<wal_file_t::variant_type> records;
   w->async_records(
-      [](std::error_code ec, const auto& records) {
+      [&records](auto v) {
+        records.push_back(std::move(v));
+        return std::error_code();
+      },
+      [&records](std::error_code ec) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
         auto expected = std::initializer_list<wal_file_t::variant_type>{
@@ -219,7 +224,7 @@ TEST(write) {
         };
         CHECK(std::equal(
                 expected.begin(), expected.end(),
-                records.begin(), records.end()));
+                records.cbegin(), records.cend()));
       });
   ioctx.run();
 }
@@ -275,8 +280,13 @@ TEST(rollover) {
   CHECK_EQUAL(1u, w->active->sequence);
   CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
 
+  std::vector<wal_file_t::variant_type> records;
   w->async_records(
-      [](std::error_code ec, const auto& records) {
+      [&records](auto v) {
+        records.push_back(v);
+        return std::error_code();
+      },
+      [&records](std::error_code ec) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
         auto expected = std::initializer_list<wal_file_t::variant_type>{
@@ -286,7 +296,7 @@ TEST(rollover) {
         };
         CHECK(std::is_permutation(
                 expected.begin(), expected.end(),
-                records.begin(), records.end()));
+                records.cbegin(), records.cend()));
       });
   ioctx.run();
 
