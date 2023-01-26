@@ -245,6 +245,51 @@ class file_db
     | std::forward<CompletionToken>(token);
   }
 
+  template<typename CompletionToken>
+  auto async_open(dir d, CompletionToken&& token) {
+    using ::earnest::detail::completion_handler_fun;
+    using ::earnest::detail::completion_wrapper;
+
+    return asio::deferred.values(this->shared_from_this(), std::move(d))
+    | asio::deferred(
+        [](std::shared_ptr<file_db> fdb, dir d) {
+          return async_initiate<decltype(asio::deferred), void(std::error_code, std::shared_ptr<file_db>)>(
+              [](auto handler, std::shared_ptr<file_db> fdb, dir d) {
+                fdb->strand_.dispatch(
+                    completion_wrapper<void()>(
+                        completion_handler_fun(std::move(handler), fdb->get_executor(), fdb->strand_, fdb->get_allocator()),
+                        [fdb, d=std::move(d)](auto handler) mutable {
+                          assert(fdb->strand_.running_in_this_thread());
+
+                          if (fdb->wal != nullptr) {
+                            std::invoke(handler, make_error_code(wal_errc::bad_state), std::move(fdb));
+                            return;
+                          }
+
+                          fdb->wal = std::allocate_shared<wal_type>(fdb->get_allocator(), fdb->get_executor(), fdb->get_allocator());
+                          fdb->wal->async_open(
+                              std::move(d),
+                              completion_wrapper<void(std::error_code)>(
+                                  std::move(handler),
+                                  [fdb](auto handler, std::error_code ec) mutable {
+                                    std::invoke(handler, ec, std::move(fdb));
+                                  }));
+                        }),
+                    fdb->get_allocator());
+              },
+              asio::deferred, std::move(fdb), std::move(d));
+        })
+    | asio::bind_executor(
+        strand_,
+        asio::deferred(
+            [](std::error_code ec, std::shared_ptr<file_db> fdb) {
+              return asio::deferred.when(!ec)
+                  .then(fdb->recover_namespaces_op_())
+                  .otherwise(asio::deferred.values(ec));
+            }))
+    | std::forward<CompletionToken>(token);
+  }
+
   private:
   template<typename Signature, typename Handler>
   auto wrap_handler_with_reset_(Handler&& handler) {
@@ -343,6 +388,18 @@ class file_db
                         fdb->get_allocator(),
                         open_mode::READ_ONLY);
                     auto& state_ref = *state_ptr;
+
+                    // Ensure no-one else writes to the namespaces file while we read it.
+                    try {
+                      if (state_ref.actual_file.is_open()) {
+                        if (!state_ref.actual_file.ftrylock_shared())
+                          throw std::system_error(make_error_code(file_db_errc::lock_failure), "file is locked");
+                      }
+                    } catch (const std::system_error& ex) {
+                      std::clog << "File-DB: unable to lock namespaces file (" << ex.what() << ")\n";
+                      std::invoke(handler, ex.code(), std::move(state_ptr));
+                      return;
+                    }
 
                     fdb->wal->async_records(
                         [&state_ref](const auto& record) -> std::error_code {

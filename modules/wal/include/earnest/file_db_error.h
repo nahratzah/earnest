@@ -9,6 +9,7 @@ namespace earnest {
 
 enum class file_db_errc {
   unrecoverable,
+  lock_failure,
 };
 
 auto file_db_category() -> const std::error_category& {
@@ -30,6 +31,8 @@ auto file_db_category() -> const std::error_category& {
           return "unrecognized condition"s;
         case file_db_errc::unrecoverable:
           return "File-DB is unrecoverable"s;
+        case file_db_errc::lock_failure:
+          return "File-DB unable to lock"s;
       }
     }
   };
