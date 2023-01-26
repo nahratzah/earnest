@@ -68,7 +68,7 @@ class fd {
     using other = fd<OtherExecutor, Reactor>;
   };
 
-  explicit fd(const executor_type& ex)
+  explicit fd(const executor_type& ex) noexcept(std::is_nothrow_copy_constructible_v<executor_type>)
   : ex_(ex)
   {}
 

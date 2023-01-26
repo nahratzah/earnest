@@ -49,6 +49,8 @@ class positional_stream_adapter {
     next_layer_(std::forward<Arg>(a))
   {}
 
+  positional_stream_adapter(const positional_stream_adapter&) = delete;
+  positional_stream_adapter& operator=(const positional_stream_adapter&) = delete;
   positional_stream_adapter(positional_stream_adapter&&) = default;
   positional_stream_adapter& operator=(positional_stream_adapter&&) = default;
 

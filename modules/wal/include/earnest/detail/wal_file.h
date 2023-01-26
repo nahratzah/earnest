@@ -22,6 +22,7 @@
 
 #include <asio/associated_allocator.hpp>
 #include <asio/associated_executor.hpp>
+#include <asio/async_result.hpp>
 #include <asio/bind_allocator.hpp>
 #include <asio/bind_executor.hpp>
 #include <asio/executor_work_guard.hpp>
