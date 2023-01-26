@@ -119,12 +119,6 @@ class fd {
   explicit operator bool() const noexcept { return is_open(); }
   auto operator!() const noexcept -> bool { return !is_open(); }
 
-  void flush(bool data_only = false) {
-    std::error_code ec;
-    flush(data_only, ec);
-    if (ec) throw std::system_error(ec, "earnest::fd::flush");
-  }
-
   void flock(std::error_code& ec) {
     ec.clear();
     if (::flock(handle_, LOCK_EX))
@@ -184,7 +178,7 @@ class fd {
 
   bool ftrylock() {
     std::error_code ec;
-    bool success = funlock(ec);
+    bool success = ftrylock(ec);
     if (ec) throw std::system_error(ec, "earnest::fd::ftrylock");
     return success;
   }
@@ -200,9 +194,15 @@ class fd {
 
   bool ftrylock_shared() {
     std::error_code ec;
-    bool success = funlock_shared(ec);
+    bool success = ftrylock_shared(ec);
     if (ec) throw std::system_error(ec, "earnest::fd::ftrylock_shared");
     return success;
+  }
+
+  void flush(bool data_only = false) {
+    std::error_code ec;
+    flush(data_only, ec);
+    if (ec) throw std::system_error(ec, "earnest::fd::flush");
   }
 
   void flush(bool data_only, std::error_code& ec) {
