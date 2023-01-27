@@ -234,6 +234,8 @@ TEST(rollover) {
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
   using ::earnest::detail::wal_record_seal;
+  using ::earnest::detail::wal_record_rollover_intent;
+  using ::earnest::detail::wal_record_rollover_ready;
 
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("rollover");
 
@@ -293,6 +295,9 @@ TEST(rollover) {
           wal_record_seal{}, // There is a single seal in the list, because of the rollover.
           wal_record_skip32{ .bytes = 4 }, wal_record_skip32{ .bytes = 8 },
           wal_record_skip32{ .bytes = 12 }, wal_record_skip32{ .bytes = 16 },
+          // Records introduced by the rollover call.
+          wal_record_rollover_intent{ .filename = "0000000000000001.wal" },
+          wal_record_rollover_ready{ .filename = "0000000000000001.wal" },
         };
         CHECK(std::is_permutation(
                 expected.begin(), expected.end(),
@@ -442,6 +447,105 @@ TEST(open_with_gaps) {
               return entry->state() == expected_state;
             }));
   }
+}
+
+TEST(can_recover_from_interrupted_rollover) {
+  using wal_file_t = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>;
+  const earnest::dir testdir = ensure_dir_exists_and_is_empty("can_recover_from_interrupted_rollover");
+
+  { // Preparation stage.
+    using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+    asio::io_context ioctx;
+    auto f0 = std::make_shared<wal_file_entry_t>(ioctx.get_executor(), std::allocator<std::byte>());
+    auto f1 = std::make_shared<wal_file_entry_t>(ioctx.get_executor(), std::allocator<std::byte>());
+    f0->async_create(testdir, "0000000000000000.wal", 0,
+        [f0](std::error_code ec, auto link_event) {
+          REQUIRE CHECK_EQUAL(std::error_code(), ec);
+          std::invoke(link_event, std::error_code());
+
+          f0->async_append(std::initializer_list<wal_file_t::write_variant_type>{
+                earnest::detail::wal_record_rollover_intent{ .filename="0000000000000001.wal" },
+                earnest::detail::wal_record_noop{}
+              },
+              [](std::error_code ec) {
+                REQUIRE CHECK_EQUAL(std::error_code(), ec);
+              });
+        });
+    f1->async_create(testdir, "0000000000000001.wal", 1,
+        [](std::error_code ec, auto link_event) {
+          REQUIRE CHECK_EQUAL(std::error_code(), ec);
+          std::invoke(link_event, std::error_code());
+        });
+    ioctx.run();
+    f1->file.truncate(28);
+  }
+
+  /*
+   * Test: recovering from a interrupted wal.
+   */
+  asio::io_context ioctx;
+  auto w = std::make_shared<wal_file_t>(ioctx.get_executor(), std::allocator<std::byte>());
+  w->async_open(testdir,
+      [](std::error_code ec) {
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+      });
+  ioctx.run();
+
+  /*
+   * Validation.
+   * The incomplete file (0000000000000001.wal) is removed during recovery.
+   */
+  CHECK_EQUAL("0000000000000000.wal", w->active->name);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
+  CHECK_EQUAL(0u, w->entries.size());
+
+  auto wdir = w->get_dir();
+  CHECK_EQUAL(0u, std::count_if(wdir.begin(), wdir.end(), [](const auto& entry) { return entry.path() == "0000000000000001.wal"; }));
+}
+
+TEST(bad_files_are_unrecoverable_if_they_were_marked_ready) {
+  using wal_file_t = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>;
+  const earnest::dir testdir = ensure_dir_exists_and_is_empty("can_recover_from_interrupted_rollover");
+
+  { // Preparation stage.
+    using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+    asio::io_context ioctx;
+    auto f0 = std::make_shared<wal_file_entry_t>(ioctx.get_executor(), std::allocator<std::byte>());
+    auto f1 = std::make_shared<wal_file_entry_t>(ioctx.get_executor(), std::allocator<std::byte>());
+    f0->async_create(testdir, "0000000000000000.wal", 0,
+        [f0](std::error_code ec, auto link_event) {
+          REQUIRE CHECK_EQUAL(std::error_code(), ec);
+          std::invoke(link_event, std::error_code());
+
+          f0->async_append(std::initializer_list<wal_file_t::write_variant_type>{
+                earnest::detail::wal_record_rollover_intent{ .filename="0000000000000001.wal" },
+                earnest::detail::wal_record_noop{},
+                earnest::detail::wal_record_rollover_ready{ .filename="0000000000000001.wal" },
+              },
+              [](std::error_code ec) {
+                REQUIRE CHECK_EQUAL(std::error_code(), ec);
+              });
+        });
+    f1->async_create(testdir, "0000000000000001.wal", 1,
+        [](std::error_code ec, auto link_event) {
+          REQUIRE CHECK_EQUAL(std::error_code(), ec);
+          std::invoke(link_event, std::error_code());
+        });
+    ioctx.run();
+    f1->file.truncate(28);
+  }
+
+  /*
+   * Test: recovering from a interrupted wal.
+   */
+  asio::io_context ioctx;
+  auto w = std::make_shared<wal_file_t>(ioctx.get_executor(), std::allocator<std::byte>());
+  w->async_open(testdir,
+      [](std::error_code ec) {
+        // Validation
+        REQUIRE CHECK_EQUAL(make_error_code(earnest::wal_errc::unrecoverable), ec);
+      });
+  ioctx.run();
 }
 
 int main(int argc, char** argv) {

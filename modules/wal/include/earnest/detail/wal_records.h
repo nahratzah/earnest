@@ -173,6 +173,34 @@ inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<w
 }
 
 
+// Declare intent of writing the next wal-file.
+struct wal_record_rollover_intent {
+  std::string filename;
+
+  auto operator<=>(const wal_record_rollover_intent& y) const noexcept = default;
+};
+template<> struct record_write_type_<wal_record_rollover_intent> { using type = wal_record_rollover_intent; };
+
+template<typename X>
+inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<wal_record_rollover_intent> r) {
+  return std::move(x) & xdr_bytes(r.filename);
+}
+
+
+// Declare that the next wal-file was successfully created.
+struct wal_record_rollover_ready {
+  std::string filename;
+
+  auto operator<=>(const wal_record_rollover_ready& y) const noexcept = default;
+};
+template<> struct record_write_type_<wal_record_rollover_ready> { using type = wal_record_rollover_ready; };
+
+template<typename X>
+inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<wal_record_rollover_ready> r) {
+  return std::move(x) & xdr_bytes(r.filename);
+}
+
+
 struct wal_record_create_file {
   file_id file;
 
@@ -264,8 +292,8 @@ using wal_record_variant = std::variant<
     wal_record_skip64, // 3
     wal_record_seal, // 4
     wal_record_wal_archived, // 5
-    wal_record_reserved, // 6
-    wal_record_reserved, // 7
+    wal_record_rollover_intent, // 6
+    wal_record_rollover_ready, // 7
     wal_record_reserved, // 8
     wal_record_reserved, // 9
     wal_record_reserved, // 10

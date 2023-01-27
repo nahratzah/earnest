@@ -17,6 +17,8 @@
 #include <sstream>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -132,10 +134,11 @@ class wal_file
                       return;
                     }
 
+                    auto bad_wal_files = std::allocate_shared<std::unordered_set<std::filesystem::path, fs_path_hash>>(wf->get_allocator());
                     auto barrier = make_completion_barrier(
                         completion_wrapper<void(std::error_code)>(
                             std::move(handler),
-                            [wf](auto handler, std::error_code ec) {
+                            [wf, bad_wal_files](auto handler, std::error_code ec) {
                               // We want to do some initial verification:
                               // - the entries should be ordered by their sequence
                               // - the entries should have unique sequence numbers
@@ -161,7 +164,7 @@ class wal_file
                                 return;
                               }
 
-                              wf->recover_(std::move(handler));
+                              wf->deal_with_bad_wal_files_(std::move(handler), std::move(*bad_wal_files));
                             }),
                             wf->strand_);
 
@@ -172,14 +175,19 @@ class wal_file
                         continue;
                       std::filesystem::path filename = dir_entry.path();
 
-                      wf->entries.emplace_back(std::allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator()));
-                      wf->entries.back()->async_open(wf->dir_, filename,
+                      auto new_entry = std::allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator());
+                      new_entry->async_open(wf->dir_, filename,
                           completion_wrapper<void(std::error_code)>(
                               ++barrier,
-                              [filename](auto handler, std::error_code ec) {
-                                if (ec) [[unlikely]]
+                              [wf, new_entry, filename, bad_wal_files](auto handler, std::error_code ec) {
+                                assert(wf->strand_.running_in_this_thread());
+                                if (ec) [[unlikely]] {
                                   std::clog << "WAL: error while opening WAL file '"sv << filename << "': "sv << ec << "\n";
-                                std::invoke(handler, ec);
+                                  bad_wal_files->insert(filename);
+                                } else {
+                                  wf->entries.emplace_back(new_entry);
+                                }
+                                std::invoke(handler, std::error_code());
                               }));
                     }
                     std::invoke(barrier, std::error_code());
@@ -293,7 +301,99 @@ class wal_file
   }
 
   template<typename CompletionHandler>
-  auto recover_(CompletionHandler&& handler) {
+  auto deal_with_bad_wal_files_(CompletionHandler&& handler, std::unordered_set<std::filesystem::path, fs_path_hash> bad_wal_files) -> void {
+    struct update_t {
+      bool intent_declared = false;
+      bool ready = false;
+    };
+    using update_map = std::unordered_map<std::filesystem::path, update_t, fs_path_hash>;
+
+    if (bad_wal_files.empty()) {
+      recover_(std::forward<CompletionHandler>(handler));
+      return;
+    }
+
+    const auto wal_data = std::allocate_shared<update_map>(get_allocator());
+    auto barrier = make_completion_barrier(
+        completion_wrapper<void(std::error_code)>(
+            std::forward<CompletionHandler>(handler),
+            [wal_data, wf=this->shared_from_this(), bad_wal_files=std::move(bad_wal_files)](auto handler, std::error_code ec) mutable {
+              if (ec) {
+                std::invoke(handler, ec);
+                return;
+              }
+
+              bool fail = false;
+              bool erase_fail = false;
+              for (const auto& pair : *wal_data) {
+                auto iter = bad_wal_files.find(pair.first);
+                if (iter == bad_wal_files.end()) continue;
+
+                if (pair.second.ready) {
+                  std::clog << "WAL: unrecoverable error: " << pair.first << " should be ready, but failed at reading it\n";
+                  fail = true;
+                } else if (pair.second.intent_declared) {
+                  std::clog << "WAL: erasing unused invalid WAL file " << pair.first << "\n";
+                  try {
+                    wf->dir_.erase(pair.first);
+                  } catch (const std::system_error& ex) {
+                    std::clog << "WAL: unable to erase invalid WAL file " << pair.first << ": " << ex.what() << "\n";
+                    erase_fail = true;
+                    continue;
+                  }
+                  bad_wal_files.erase(iter);
+                }
+              }
+              for (const auto& entry : bad_wal_files) { // Log any files not accounted for.
+                std::clog << "WAL: no record of creation for bad WAL file " << entry << "\n";
+                fail = true;
+              }
+              if (fail) {
+                std::invoke(handler, make_error_code(wal_errc::unrecoverable));
+                return;
+              }
+              if (erase_fail) { // erase errors are recoverable (with a little help from a human).
+                std::invoke(handler, make_error_code(wal_errc::recovery_failure));
+                return;
+              }
+
+              wf->recover_(std::move(handler));
+            }),
+        strand_);
+
+    assert(active == nullptr); // Won't be filled in until recover_() has run.
+    assert(old.empty()); // Won't be filled in yet.
+    for (const std::shared_ptr<entry_type>& entry : entries) {
+      auto local_wal_data = std::allocate_shared<update_map>(get_allocator());
+      entry->async_records(
+          [local_wal_data](const auto& record) -> std::error_code {
+            if (std::holds_alternative<wal_record_rollover_intent>(record)) {
+              (*local_wal_data)[std::get<wal_record_rollover_intent>(record).filename].intent_declared = true;
+            } else if (std::holds_alternative<wal_record_rollover_ready>(record)) {
+              (*local_wal_data)[std::get<wal_record_rollover_ready>(record).filename].ready = true;
+            }
+            return {};
+          },
+          completion_wrapper<void(std::error_code)>(
+              ++barrier,
+              [wal_data, local_wal_data](auto handler, std::error_code ec) {
+                std::for_each(local_wal_data->begin(), local_wal_data->end(),
+                    [&wal_data](const auto& pair) {
+                      auto& dst = (*wal_data)[pair.first];
+                      if (pair.second.intent_declared)
+                        dst.intent_declared = true;
+                      if (pair.second.ready)
+                        dst.ready = true;
+                    });
+                std::invoke(handler, ec);
+              }));
+    }
+
+    std::invoke(barrier, std::error_code());
+  }
+
+  template<typename CompletionHandler>
+  auto recover_(CompletionHandler&& handler) -> void {
     if (this->entries.empty()) [[unlikely]] {
       std::invoke(handler, make_error_code(wal_errc::no_data_files));
       return;
@@ -478,14 +578,39 @@ class wal_file
         strand_,
         asio::deferred(
             [](std::error_code ec, std::shared_ptr<wal_file> wf, fanout_barrier<executor_type, allocator_type> new_barrier) {
+              auto new_filename = filename_for_wal_(wf->active->sequence + 1u);
+              return asio::deferred.when(!ec)
+                  .then(
+                      wf->async_append(
+                          std::initializer_list<write_variant_type>{
+                            wal_record_rollover_intent{ .filename=new_filename.generic_string() },
+                          },
+                          asio::append(asio::deferred, wf, new_barrier, new_filename)))
+                  .otherwise(asio::deferred.values(ec, wf, new_barrier, new_filename));
+            }))
+    | asio::bind_executor(
+        strand_,
+        asio::deferred(
+            [](std::error_code ec, std::shared_ptr<wal_file> wf, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
               assert(wf->strand_.running_in_this_thread());
 
               const auto new_sequence = wf->active->sequence + 1u;
               auto new_active = allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator());
               return asio::deferred.when(!ec)
-                  .then(new_active->async_create(wf->dir_, filename_for_wal_(new_sequence), new_sequence, asio::append(asio::deferred, new_active, new_barrier)))
-                  .otherwise(asio::deferred.values(ec, typename entry_type::link_done_event_type(new_active->get_executor(), new_active->get_allocator()), new_active, new_barrier));
-            }));
+                  .then(new_active->async_create(wf->dir_, new_filename, new_sequence, asio::append(asio::deferred, wf, new_active, new_barrier, new_filename)))
+                  .otherwise(asio::deferred.values(ec, typename entry_type::link_done_event_type(new_active->get_executor(), new_active->get_allocator()), wf, new_active, new_barrier, new_filename));
+            }))
+    | asio::deferred(
+        [](std::error_code ec, typename entry_type::link_done_event_type link_event, std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
+          return asio::deferred.when(!ec)
+              .then(
+                  wf->async_append(
+                      std::initializer_list<write_variant_type>{
+                        wal_record_rollover_ready{ .filename=new_filename.generic_string() },
+                      },
+                      asio::append(asio::deferred, link_event, new_active, new_barrier)))
+              .otherwise(asio::deferred.values(ec, link_event, new_active, new_barrier));
+        });
   }
 
   auto rollover_install_new_entry_op_(typename entry_type::link_done_event_type link_event, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier) {
