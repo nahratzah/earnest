@@ -10,6 +10,8 @@
 #include <asio/async_result.hpp>
 #include <asio/executor_work_guard.hpp>
 
+#include <earnest/detail/completion_handler_fun.h>
+
 namespace earnest::detail {
 
 
@@ -20,7 +22,9 @@ class fanout_barrier {
   using allocator_type = Allocator;
 
   private:
-  class impl {
+  class impl
+  : public std::enable_shared_from_this<impl>
+  {
     public:
     using function_type = std::function<void(std::error_code)>;
 
@@ -61,32 +65,23 @@ class fanout_barrier {
     template<typename CompletionToken>
     auto async_on_ready(CompletionToken&& token) {
       return asio::async_initiate<CompletionToken, void(std::error_code)>(
-          [this](auto completion_handler) {
-            std::unique_lock lck{mtx_};
-            if (await_ == 0) { // Already completed, so we'll just post the callback immediately.
+          [](auto completion_handler, std::shared_ptr<impl> self) {
+            std::unique_lock lck{self->mtx_};
+            if (self->await_ == 0) { // Already completed, so we'll just post the callback immediately.
               lck.unlock();
-              auto ex = asio::get_associated_executor(completion_handler, get_executor());
+              auto ex = asio::get_associated_executor(completion_handler, self->get_executor());
               auto alloc = asio::get_associated_allocator(completion_handler);
               ex.post(
-                  [completion_handler=std::move(completion_handler), ec=ec_]() mutable {
+                  [completion_handler=std::move(completion_handler), ec=self->ec_]() mutable {
                     std::invoke(completion_handler, ec);
                   },
                   std::move(alloc));
               return;
             }
 
-            auto ex = asio::make_work_guard(completion_handler, get_executor());
-            queued_.emplace_back(
-                [ex=std::move(ex), completion_handler=std::move(completion_handler)](std::error_code ec) mutable {
-                  auto alloc = asio::get_associated_allocator(completion_handler);
-                  ex.get_executor().dispatch(
-                      [completion_handler=std::move(completion_handler), ec]() mutable {
-                        std::invoke(completion_handler, ec);
-                      },
-                      alloc);
-                });
+            self->queued_.emplace_back(completion_handler_fun(std::move(completion_handler), self->get_executor()));
           },
-          token);
+          token, this->shared_from_this());
     }
 
     auto inc(std::size_t n = 1) -> void {

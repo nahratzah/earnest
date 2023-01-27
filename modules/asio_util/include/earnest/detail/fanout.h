@@ -40,7 +40,9 @@ class fanout<Executor, void(Args...), Alloc> {
   private:
   ///\brief Implementation.
   ///\details This is a separate type, so we can use pointer-to-impl approach.
-  class impl {
+  class impl
+  : public std::enable_shared_from_this<impl>
+  {
     private:
     using function_type = std::function<void(std::shared_ptr<const std::tuple<Args...>>)>;
 
@@ -75,20 +77,20 @@ class fanout<Executor, void(Args...), Alloc> {
     }
 
     template<typename CompletionToken>
-    auto async_on_ready(CompletionToken&& token) -> typename asio::async_result<std::decay_t<CompletionToken>, void(Args...)>::return_type {
+    auto async_on_ready(CompletionToken&& token) {
       return asio::async_initiate<CompletionToken, void(Args...)>(
-          [this](auto completion_handler) {
-            std::lock_guard<std::mutex> lck(mtx_);
-            auto ex = asio::get_associated_executor(completion_handler, get_executor());
-            if (args_) {
+          [](auto completion_handler, std::shared_ptr<impl> self) {
+            std::lock_guard<std::mutex> lck(self->mtx_);
+            auto ex = asio::get_associated_executor(completion_handler, self->get_executor());
+            if (self->args_) {
               auto alloc = asio::get_associated_allocator(completion_handler);
               ex.post(
-                  [h=std::move(completion_handler), args=args_]() mutable {
+                  [h=std::move(completion_handler), args=self->args_]() mutable {
                     std::apply(h, *args);
                   },
                   alloc);
             } else {
-              queued_.emplace_back(
+              self->queued_.emplace_back(
                   [h=std::move(completion_handler), ex=asio::make_work_guard(ex)](std::shared_ptr<const std::tuple<Args...>> args) mutable {
                     auto alloc = asio::get_associated_allocator(h);
                     ex.get_executor().dispatch(
@@ -99,7 +101,7 @@ class fanout<Executor, void(Args...), Alloc> {
                   });
             }
           },
-          token);
+          token, this->shared_from_this());
     }
 
     auto operator()(Args... args) {
@@ -157,7 +159,7 @@ class fanout<Executor, void(Args...), Alloc> {
   ///The completion token will be completed when the fanout completes.
   ///A fanout can have multiple completion tokens.
   template<typename CompletionToken>
-  auto async_on_ready(CompletionToken&& token) -> typename asio::async_result<std::decay_t<CompletionToken>, void(Args...)>::return_type {
+  auto async_on_ready(CompletionToken&& token) {
     return impl_->async_on_ready(std::forward<CompletionToken>(token));
   }
 

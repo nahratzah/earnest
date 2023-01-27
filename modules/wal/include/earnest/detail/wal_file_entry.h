@@ -72,7 +72,7 @@ class wal_file_entry
 
   template<typename Stream, typename Callback>
   auto read_records_(Stream& stream, Callback callback, std::unique_ptr<variant_type> ptr) -> void; // Has side-effects.
-                                                                                                    //
+
   template<typename Stream, typename Acceptor, typename Callback>
   auto read_records_until_(Stream& stream, Acceptor&& acceptor, Callback callback, typename fd_type::offset_type end_offset) const -> void;
 
