@@ -18,6 +18,7 @@
 
 #include <earnest/detail/completion_handler_fun.h>
 #include <earnest/detail/completion_wrapper.h>
+#include <earnest/detail/deferred_on_executor.h>
 #include <earnest/detail/namespace_map.h>
 #include <earnest/detail/positional_stream_adapter.h>
 #include <earnest/detail/replacement_map.h>
@@ -199,35 +200,20 @@ class file_db
     using ::earnest::detail::completion_handler_fun;
     using ::earnest::detail::completion_wrapper;
 
-    return asio::deferred.values(this->shared_from_this(), std::move(d))
-    | asio::deferred(
+    return detail::deferred_on_executor<void(std::error_code, std::shared_ptr<file_db>)>(
         [](std::shared_ptr<file_db> fdb, dir d) {
-          return async_initiate<decltype(asio::deferred), void(std::error_code, std::shared_ptr<file_db>)>(
-              [](auto handler, std::shared_ptr<file_db> fdb, dir d) {
-                fdb->strand_.dispatch(
-                    completion_wrapper<void()>(
-                        completion_handler_fun(std::move(handler), fdb->get_executor(), fdb->strand_, fdb->get_allocator()),
-                        [fdb, d=std::move(d)](auto handler) mutable {
-                          assert(fdb->strand_.running_in_this_thread());
+          assert(fdb->strand_.running_in_this_thread());
 
-                          if (fdb->wal != nullptr) {
-                            std::invoke(handler, make_error_code(wal_errc::bad_state), std::move(fdb));
-                            return;
-                          }
-
-                          fdb->wal = std::allocate_shared<wal_type>(fdb->get_allocator(), fdb->get_executor(), fdb->get_allocator());
-                          fdb->wal->async_create(
-                              std::move(d),
-                              completion_wrapper<void(std::error_code)>(
-                                  std::move(handler),
-                                  [fdb](auto handler, std::error_code ec) mutable {
-                                    std::invoke(handler, ec, std::move(fdb));
-                                  }));
-                        }),
-                    fdb->get_allocator());
-              },
-              asio::deferred, std::move(fdb), std::move(d));
-        })
+          const bool wal_is_nil = (fdb->wal == nullptr);
+          if (wal_is_nil) fdb->wal = std::allocate_shared<wal_type>(fdb->get_allocator(), fdb->get_executor(), fdb->get_allocator());
+          return asio::deferred.when(wal_is_nil)
+              .then(
+                  fdb->wal->async_create(
+                      std::move(d),
+                      asio::append(asio::deferred, fdb)))
+              .otherwise(asio::deferred.values(make_error_code(wal_errc::bad_state), fdb));
+        },
+        strand_, this->shared_from_this(), std::move(d))
     | asio::deferred(
         [](std::error_code ec, std::shared_ptr<file_db> fdb) {
           return asio::deferred.when(!ec)
@@ -242,6 +228,7 @@ class file_db
                   .then(fdb->recover_namespaces_op_())
                   .otherwise(asio::deferred.values(ec));
             }))
+    | undo_on_fail_op_()
     | std::forward<CompletionToken>(token);
   }
 
@@ -250,35 +237,20 @@ class file_db
     using ::earnest::detail::completion_handler_fun;
     using ::earnest::detail::completion_wrapper;
 
-    return asio::deferred.values(this->shared_from_this(), std::move(d))
-    | asio::deferred(
+    return detail::deferred_on_executor<void(std::error_code, std::shared_ptr<file_db>)>(
         [](std::shared_ptr<file_db> fdb, dir d) {
-          return async_initiate<decltype(asio::deferred), void(std::error_code, std::shared_ptr<file_db>)>(
-              [](auto handler, std::shared_ptr<file_db> fdb, dir d) {
-                fdb->strand_.dispatch(
-                    completion_wrapper<void()>(
-                        completion_handler_fun(std::move(handler), fdb->get_executor(), fdb->strand_, fdb->get_allocator()),
-                        [fdb, d=std::move(d)](auto handler) mutable {
-                          assert(fdb->strand_.running_in_this_thread());
+          assert(fdb->strand_.running_in_this_thread());
 
-                          if (fdb->wal != nullptr) {
-                            std::invoke(handler, make_error_code(wal_errc::bad_state), std::move(fdb));
-                            return;
-                          }
-
-                          fdb->wal = std::allocate_shared<wal_type>(fdb->get_allocator(), fdb->get_executor(), fdb->get_allocator());
-                          fdb->wal->async_open(
-                              std::move(d),
-                              completion_wrapper<void(std::error_code)>(
-                                  std::move(handler),
-                                  [fdb](auto handler, std::error_code ec) mutable {
-                                    std::invoke(handler, ec, std::move(fdb));
-                                  }));
-                        }),
-                    fdb->get_allocator());
-              },
-              asio::deferred, std::move(fdb), std::move(d));
-        })
+          const bool wal_is_nil = (fdb->wal == nullptr);
+          if (wal_is_nil) fdb->wal = std::allocate_shared<wal_type>(fdb->get_allocator(), fdb->get_executor(), fdb->get_allocator());
+          return asio::deferred.when(wal_is_nil)
+              .then(
+                  fdb->wal->async_open(
+                      std::move(d),
+                      asio::append(asio::deferred, fdb)))
+              .otherwise(asio::deferred.values(make_error_code(wal_errc::bad_state), fdb));
+        },
+        strand_, this->shared_from_this(), std::move(d))
     | asio::bind_executor(
         strand_,
         asio::deferred(
@@ -287,29 +259,25 @@ class file_db
                   .then(fdb->recover_namespaces_op_())
                   .otherwise(asio::deferred.values(ec));
             }))
+    | undo_on_fail_op_()
     | std::forward<CompletionToken>(token);
   }
 
   private:
-  template<typename Signature, typename Handler>
-  auto wrap_handler_with_reset_(Handler&& handler) {
-    using ::earnest::detail::completion_handler_fun;
-    using ::earnest::detail::completion_wrapper;
-
-    return completion_wrapper<Signature>(
-        completion_handler_fun(
-            std::forward<Handler>(handler),
-            get_executor(),
-            strand_,
-            get_allocator()),
-        [fdb=this->shared_from_this()]<typename... Args>(auto handler, std::error_code ec, Args&&... args) {
-          assert(fdb->strand_.running_in_this_thread());
-          if (ec) {
-            fdb->wal.reset();
-            fdb->namespaces.clear();
-            fdb->files.clear();
-          }
-          std::invoke(handler, ec, std::forward<Args>(args)...);
+  auto undo_on_fail_op_() {
+    return asio::deferred(
+        [fdb=this->shared_from_this()](std::error_code ec) {
+          return asio::deferred.when(!ec)
+              .then(asio::deferred.values(ec))
+              .otherwise(
+                  detail::deferred_on_executor<void(std::error_code)>(
+                      [fdb, ec]() {
+                        fdb->wal.reset();
+                        fdb->namespaces.clear();
+                        fdb->files.clear();
+                        return asio::deferred.values(ec);
+                      },
+                      fdb->strand_));
         });
   }
 
