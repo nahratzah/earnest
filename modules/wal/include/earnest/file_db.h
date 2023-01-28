@@ -399,16 +399,11 @@ class file_db
 
     auto state_ptr = std::make_unique<state_t>(
         reader_type(std::move(state.actual_file), std::move(state.replacements), std::move(state.file_size)));
-
-    return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::unique_ptr<state_t>)>(
-        [](auto handler, std::unique_ptr<state_t> state_ptr) {
-          auto& state_ref = *state_ptr;
-          async_read(
-              state_ref.stream,
-              xdr_reader<>() & state_ref.ns_map,
-              asio::append(std::move(handler), std::move(state_ptr)));
-        },
-        asio::deferred, std::move(state_ptr))
+    auto& state_ref = *state_ptr;
+    return async_read(
+        state_ref.stream,
+        xdr_reader<>() & state_ref.ns_map,
+        asio::append(asio::deferred, std::move(state_ptr)))
     | asio::deferred(
         [](std::error_code ec, std::unique_ptr<state_t> state_ptr) {
           return asio::deferred.values(ec, std::move(state_ptr->ns_map));

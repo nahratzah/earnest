@@ -1099,7 +1099,7 @@ inline auto async_read(
             });
       },
       std::forward<CompletionToken>(token),
-      stream, er(std::move(r)));
+      std::ref(stream), er(std::move(r)));
 }
 
 template<typename AsioAsyncReadStream, typename... Factories>
@@ -1155,7 +1155,7 @@ inline auto async_write(
         }
       },
       std::forward<CompletionToken>(token),
-      stream, ew(std::move(w)));
+      std::ref(stream), ew(std::move(w)));
 }
 
 template<typename AsioAsyncWriteStream, typename... Factories>
