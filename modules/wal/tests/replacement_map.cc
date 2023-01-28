@@ -7,7 +7,7 @@
 #include <asio/io_context.hpp>
 
 TEST(replacement_map_create) {
-  using replacement_map = earnest::detail::replacement_map<byte_positional_stream<asio::io_context::executor_type>>;
+  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
 
   replacement_map map;
 
@@ -16,8 +16,8 @@ TEST(replacement_map_create) {
 }
 
 TEST(replacement_map_insert) {
-  using wal_file = byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
+  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
 
   asio::io_context ioctx;
   const auto wal = std::make_shared<const wal_file>(ioctx.get_executor());
@@ -34,8 +34,8 @@ TEST(replacement_map_insert) {
 }
 
 TEST(replacement_map_insert_maintains_order) {
-  using wal_file = byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
+  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
 
   asio::io_context ioctx;
   const auto wal1 = std::make_shared<const wal_file>(ioctx.get_executor());
@@ -70,8 +70,8 @@ TEST(replacement_map_insert_maintains_order) {
 }
 
 TEST(replacement_map_insert_replacement) {
-  using wal_file = byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
+  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
 
   asio::io_context ioctx;
   const auto wal1 = std::make_shared<const wal_file>(ioctx.get_executor());
@@ -97,8 +97,8 @@ TEST(replacement_map_insert_replacement) {
 }
 
 TEST(replacement_map_insert_big_replacement) {
-  using wal_file = byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
+  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
 
   asio::io_context ioctx;
   const auto wal1 = std::make_shared<const wal_file>(ioctx.get_executor());
@@ -124,8 +124,8 @@ TEST(replacement_map_insert_big_replacement) {
 }
 
 TEST(replacement_map_insert_small_replacement) {
-  using wal_file = byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
+  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
 
   asio::io_context ioctx;
   const auto wal1 = std::make_shared<const wal_file>(ioctx.get_executor());

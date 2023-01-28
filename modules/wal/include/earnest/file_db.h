@@ -4,8 +4,10 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -19,6 +21,7 @@
 #include <earnest/detail/completion_handler_fun.h>
 #include <earnest/detail/completion_wrapper.h>
 #include <earnest/detail/deferred_on_executor.h>
+#include <earnest/detail/file_recover_state.h>
 #include <earnest/detail/namespace_map.h>
 #include <earnest/detail/positional_stream_adapter.h>
 #include <earnest/detail/replacement_map.h>
@@ -27,6 +30,7 @@
 #include <earnest/detail/wal_records.h>
 #include <earnest/file_db_error.h>
 #include <earnest/file_id.h>
+#include <earnest/isolation.h>
 
 namespace earnest {
 
@@ -61,125 +65,6 @@ class file_db
   struct file {
     fd_type fd;
     bool exists_logically = false;
-    std::uint64_t file_size = 0;
-  };
-
-  struct file_recover_state {
-    file_recover_state(executor_type ex, file_id id, rebind_alloc<std::byte> alloc)
-    : replacements(std::move(alloc)),
-      actual_file(std::move(ex)),
-      id(std::move(id))
-    {}
-
-    file_recover_state(executor_type ex, file_id id, const dir& d, rebind_alloc<std::byte> alloc, open_mode m = open_mode::READ_WRITE)
-    : file_recover_state(std::move(ex), std::move(id), std::move(alloc))
-    {
-      std::error_code ec;
-      actual_file.open(d, id.filename, m, ec);
-      if (ec == make_error_code(std::errc::no_such_file_or_directory)) {
-        // skip
-      } else if (ec) {
-        throw std::system_error(ec, "file_db::file_recover_state::open");
-      } else {
-        file_size = actual_file.size();
-      }
-    }
-
-    auto apply(const detail::wal_record_create_file& record) -> std::error_code {
-      if (record.file != id) return {};
-
-      if (exists.value_or(false) != false) [[unlikely]] {
-        log() << "file was double-created\n";
-        return make_error_code(file_db_errc::unrecoverable);
-      }
-
-      exists = true;
-      file_size = 0;
-      replacements.clear();
-      return {};
-    }
-
-    auto apply(const detail::wal_record_erase_file& record) -> std::error_code {
-      if (record.file != id) return {};
-
-      if (exists.value_or(true) != true) [[unlikely]] {
-        log() << "file was double-erased\n";
-        return make_error_code(file_db_errc::unrecoverable);
-      }
-
-      exists = false;
-      file_size = 0;
-      replacements.clear();
-      return {};
-    }
-
-    auto apply(const detail::wal_record_truncate_file& record) -> std::error_code {
-      if (record.file != id) return {};
-
-      if (!exists.has_value()) exists = true;
-      if (!exists.value()) [[unlikely]] {
-        log() << "file doesn't exist, but has logs of file truncation\n";
-        return make_error_code(file_db_errc::unrecoverable);
-      }
-
-      file_size = record.new_size;
-      replacements.truncate(record.new_size);
-      return {};
-    }
-
-    template<typename E, typename R>
-    auto apply(const detail::wal_record_modify_file32<E, R>& record) -> std::error_code {
-      if (record.file != id) return {};
-
-      if (!exists.has_value()) exists = true;
-      if (!exists.value()) [[unlikely]] {
-        log() << "file doesn't exist, but has logs of written data\n";
-        return make_error_code(file_db_errc::unrecoverable);
-      }
-
-      if (record.file_offset + record.wal_len < record.file_offset) [[unlikely]] { // overflow
-        log() << "overflow in WAL write record\n";
-        return make_error_code(file_db_errc::unrecoverable);
-      } else if (record.file_offset + record.wal_len > file_size) [[unlikely]] { // out-of-bound write
-        log() << "write record extends past end of file\n";
-        return make_error_code(file_db_errc::unrecoverable);
-      }
-
-      replacements.insert(record);
-      return {};
-    }
-
-    template<typename E, typename R>
-    auto apply(const detail::wal_record_variant<E, R>& record) -> std::error_code {
-      return std::visit(
-          [this](const auto& record) -> std::error_code {
-            using record_type = std::remove_cvref_t<decltype(record)>;
-
-            if constexpr(std::disjunction_v<
-                std::is_same<record_type, detail::wal_record_create_file>,
-                std::is_same<record_type, detail::wal_record_erase_file>,
-                std::is_same<record_type, detail::wal_record_truncate_file>,
-                std::is_same<record_type, detail::wal_record_modify_file32<E, R>>>) {
-              return this->apply(record);
-            } else {
-              return {};
-            }
-          },
-          record);
-    }
-
-    private:
-    auto log() const -> std::ostream& {
-      using namespace std::string_view_literals;
-
-      return std::clog << "File-DB "sv << id.ns << "/"sv << id.filename << ": "sv;
-    }
-
-    public:
-    detail::replacement_map<typename wal_type::fd_type, rebind_alloc<std::byte>> replacements;
-    fd_type actual_file;
-    file_id id;
-    std::optional<bool> exists = std::nullopt;
     std::uint64_t file_size = 0;
   };
 
@@ -263,6 +148,32 @@ class file_db
     | std::forward<CompletionToken>(token);
   }
 
+  template<typename Acceptor, typename CompletionToken>
+  auto async_records(Acceptor&& acceptor, CompletionToken&& token) const {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<const file_db> fdb, auto acceptor) {
+          asio::dispatch(
+              completion_handler_fun(
+                  completion_wrapper<void()>(
+                      std::move(handler),
+                      [fdb, acceptor=std::move(acceptor)](auto handler) mutable -> void {
+                        if (fdb->wal == nullptr) [[unlikely]] {
+                          std::invoke(handler, make_error_code(wal_errc::bad_state));
+                          return;
+                        }
+
+                        fdb->wal->async_records(
+                            [acceptor=std::move(acceptor)](variant_type v) mutable -> std::error_code {
+                              if (wal_record_is_bookkeeping(v)) return {};
+                              return std::invoke(acceptor, make_wal_record_no_bookeeping(std::move(v)));
+                            },
+                            std::move(handler));
+                      }),
+                  fdb->get_executor()));
+        },
+        token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
+  }
+
   private:
   auto undo_on_fail_op_() {
     return asio::deferred(
@@ -340,7 +251,7 @@ class file_db
     using ::earnest::detail::completion_handler_fun;
     using ::earnest::detail::completion_wrapper;
 
-    return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::unique_ptr<file_recover_state>)>(
+    return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::unique_ptr<detail::file_recover_state<typename wal_type::fd_type, allocator_type>>)>(
         [](auto handler, std::shared_ptr<file_db> fdb) {
           asio::dispatch(
               completion_wrapper<void()>(
@@ -349,12 +260,12 @@ class file_db
                     assert(fdb->strand_.running_in_this_thread());
                     assert(fdb->wal != nullptr);
 
-                    auto state_ptr = std::make_unique<file_recover_state>(
+                    auto state_ptr = std::make_unique<detail::file_recover_state<typename wal_type::fd_type, allocator_type>>(
                         fdb->get_executor(),
-                        file_id("", namespaces_filename),
                         fdb->wal->get_dir(),
-                        fdb->get_allocator(),
-                        open_mode::READ_ONLY);
+                        namespaces_filename,
+                        open_mode::READ_ONLY,
+                        fdb->get_allocator());
                     auto& state_ref = *state_ptr;
 
                     // Ensure no-one else writes to the namespaces file while we read it.
@@ -369,7 +280,7 @@ class file_db
                       return;
                     }
 
-                    fdb->wal->async_records(
+                    fdb->async_records(
                         [&state_ref](const auto& record) -> std::error_code {
                           return state_ref.apply(record);
                         },
@@ -379,7 +290,7 @@ class file_db
         asio::deferred, this->shared_from_this());
   }
 
-  auto read_namespaces_op_(file_recover_state state) {
+  auto read_namespaces_op_(detail::file_recover_state<typename wal_type::fd_type, allocator_type> state) {
     using ::earnest::detail::namespace_map;
     using ::earnest::detail::positional_stream_adapter;
     using ::earnest::detail::replacement_map_reader;
@@ -418,7 +329,7 @@ class file_db
     | asio::bind_executor(
         this->strand_,
         asio::deferred(
-            [](std::error_code ec, std::unique_ptr<file_recover_state> state_ptr, std::shared_ptr<file_db> fdb) {
+            [](std::error_code ec, std::unique_ptr<detail::file_recover_state<typename wal_type::fd_type, allocator_type>> state_ptr, std::shared_ptr<file_db> fdb) {
               assert(fdb->strand_.running_in_this_thread());
 
               if (!ec) {

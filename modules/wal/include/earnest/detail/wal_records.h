@@ -1,5 +1,6 @@
 #pragma once
 
+#include <type_traits>
 #include <variant>
 
 #include <earnest/file_id.h>
@@ -25,13 +26,14 @@ struct record_write_type_<std::tuple<T...>> {
 };
 
 
+template<std::size_t Idx>
 struct wal_record_reserved {
   auto operator<=>(const wal_record_reserved& y) const noexcept = default;
 };
-template<> struct record_write_type_<wal_record_reserved> { using type = wal_record_reserved; };
+template<std::size_t Idx> struct record_write_type_<wal_record_reserved<Idx>> { using type = wal_record_reserved<Idx>; };
 
-template<typename X>
-inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_reserved& noop) -> xdr<X>&& {
+template<typename X, std::size_t Idx>
+inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_reserved<Idx>& noop) -> xdr<X>&& {
   throw std::logic_error("bug: shouldn't be serializing/deserializing reserved elements");
   return std::move(x);
 }
@@ -294,30 +296,30 @@ using wal_record_variant = std::variant<
     wal_record_wal_archived, // 5
     wal_record_rollover_intent, // 6
     wal_record_rollover_ready, // 7
-    wal_record_reserved, // 8
-    wal_record_reserved, // 9
-    wal_record_reserved, // 10
-    wal_record_reserved, // 11
-    wal_record_reserved, // 12
-    wal_record_reserved, // 13
-    wal_record_reserved, // 14
-    wal_record_reserved, // 15
-    wal_record_reserved, // 16
-    wal_record_reserved, // 17
-    wal_record_reserved, // 18
-    wal_record_reserved, // 19
-    wal_record_reserved, // 20
-    wal_record_reserved, // 21
-    wal_record_reserved, // 22
-    wal_record_reserved, // 23
-    wal_record_reserved, // 24
-    wal_record_reserved, // 25
-    wal_record_reserved, // 26
-    wal_record_reserved, // 27
-    wal_record_reserved, // 28
-    wal_record_reserved, // 29
-    wal_record_reserved, // 30
-    wal_record_reserved, // 31
+    wal_record_reserved<8>,
+    wal_record_reserved<9>,
+    wal_record_reserved<10>,
+    wal_record_reserved<11>,
+    wal_record_reserved<12>,
+    wal_record_reserved<13>,
+    wal_record_reserved<14>,
+    wal_record_reserved<15>,
+    wal_record_reserved<16>,
+    wal_record_reserved<17>,
+    wal_record_reserved<18>,
+    wal_record_reserved<19>,
+    wal_record_reserved<20>,
+    wal_record_reserved<21>,
+    wal_record_reserved<22>,
+    wal_record_reserved<23>,
+    wal_record_reserved<24>,
+    wal_record_reserved<25>,
+    wal_record_reserved<26>,
+    wal_record_reserved<27>,
+    wal_record_reserved<28>,
+    wal_record_reserved<29>,
+    wal_record_reserved<30>,
+    wal_record_reserved<31>,
     wal_record_create_file, // 32
     wal_record_erase_file, // 33
     wal_record_truncate_file, // 34
@@ -332,6 +334,105 @@ inline constexpr auto wal_record_is_bookkeeping(std::size_t idx) noexcept -> boo
 template<typename Executor, typename Reactor>
 inline auto wal_record_is_bookkeeping(const wal_record_variant<Executor, Reactor>& r) noexcept -> bool {
   return wal_record_is_bookkeeping(r.index());
+}
+
+
+namespace record_support_ {
+
+
+template<bool Include, typename T> struct filtered_type;
+
+template<typename Variant, typename T> struct prepend_variant_type;
+template<typename... VT, typename T>
+struct prepend_variant_type<std::variant<VT...>, T> {
+  using type = std::variant<T, VT...>;
+};
+
+
+template<typename... FilteredType> struct filter;
+
+template<>
+struct filter<> {
+  using type = std::variant<>;
+};
+
+template<typename FilteredType, typename... Tail>
+struct filter<filtered_type<false, FilteredType>, Tail...> {
+  using type = typename filter<Tail...>::type;
+};
+
+template<typename FilteredType, typename... Tail>
+struct filter<filtered_type<true, FilteredType>, Tail...> {
+  using type = typename prepend_variant_type<typename filter<Tail...>::type, FilteredType>::type;
+};
+
+
+template<typename... Functors>
+struct overrides_t
+: public Functors...
+{
+  overrides_t(Functors... functors)
+  : Functors(std::move(functors))...
+  {}
+
+  using Functors::operator()...;
+};
+
+template<typename... Functors>
+auto overrides(Functors&&... functors) -> overrides_t<std::remove_cvref_t<Functors>...> {
+  return overrides_t<std::remove_cvref_t<Functors>...>(std::forward<Functors>(functors)...);
+}
+
+
+template<typename FilteredType, typename Result> struct converter;
+
+template<typename FilteredType, typename Result>
+struct converter<filtered_type<true, FilteredType>, Result> {
+  auto operator()(const FilteredType& t) -> Result {
+    return t;
+  }
+
+  auto operator()(FilteredType&& t) -> Result {
+    return std::move(t);
+  }
+};
+
+template<typename FilteredType, typename Result>
+struct converter<filtered_type<false, FilteredType>, Result> {
+  auto operator()([[maybe_unused]] const FilteredType& t) -> Result {
+    throw std::logic_error("type is excluded from non-bookkeeping wal-records");
+  }
+};
+
+
+template<typename Variant, typename Indices = std::make_index_sequence<std::variant_size_v<Variant>>>
+struct without_bookkeeping_variant;
+
+template<typename Variant, size_t... Idx>
+struct without_bookkeeping_variant<Variant, std::index_sequence<Idx...>>
+: filter<filtered_type<!wal_record_is_bookkeeping(Idx), std::variant_alternative_t<Idx, Variant>>...>
+{
+  public:
+  template<typename R>
+  static auto convert(R&& r) -> typename without_bookkeeping_variant::type {
+    return std::visit(
+        overrides(
+            converter<filtered_type<!wal_record_is_bookkeeping(Idx), std::variant_alternative_t<Idx, Variant>>, typename without_bookkeeping_variant::type>()...
+        ),
+        std::forward<R>(r));
+  }
+};
+
+
+} /* namespace earnest::detail::record_support_ */
+
+
+template<typename WalRecordVariant>
+using wal_record_no_bookkeeping = typename record_support_::without_bookkeeping_variant<WalRecordVariant>::type;
+
+template<typename WalRecordVariant>
+auto make_wal_record_no_bookeeping(WalRecordVariant&& v) -> wal_record_no_bookkeeping<std::remove_cvref_t<WalRecordVariant>> {
+  return record_support_::without_bookkeeping_variant<std::remove_cvref_t<WalRecordVariant>>::convert(std::forward<WalRecordVariant>(v));
 }
 
 

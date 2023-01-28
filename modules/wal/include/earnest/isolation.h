@@ -1,5 +1,7 @@
 #pragma once
 
+#include <iosfwd>
+
 namespace earnest {
 
 
@@ -34,6 +36,23 @@ enum class isolation {
    */
   serializable
 };
+
+
+template<typename Char, typename Traits>
+auto operator<<(std::basic_ostream<Char, Traits>& out, isolation i) -> std::basic_ostream<Char, Traits>& {
+  switch (i) {
+    case isolation::read_commited:
+      out << "read-committed";
+      break;
+    case isolation::repeatable_read:
+      out << "repeatable-read";
+      break;
+    case isolation::serializable:
+      out << "serializable";
+      break;
+  }
+  return out;
+}
 
 
 } /* namespace earnest */

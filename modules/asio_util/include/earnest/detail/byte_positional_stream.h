@@ -15,6 +15,9 @@
 #include <asio/error.hpp>
 #include <asio/post.hpp>
 
+namespace earnest::detail {
+
+
 template<typename Executor, typename Allocator = std::allocator<std::byte>>
 class byte_positional_stream {
   template<typename OtherExecutor, typename OtherAllocator> friend class byte_positional_stream;
@@ -181,3 +184,6 @@ class byte_positional_stream {
   Executor ex_;
   std::vector<std::byte, allocator_type> data_;
 };
+
+
+} /* namespace earnest::detail */
