@@ -18,7 +18,7 @@ enum class wal_errc {
   unrecoverable
 };
 
-auto earnest_category() -> const std::error_category& {
+inline auto earnest_category() -> const std::error_category& {
   class category_impl
   : public std::error_category
   {
@@ -59,7 +59,7 @@ auto earnest_category() -> const std::error_category& {
   return impl;
 }
 
-auto make_error_code(wal_errc e) -> std::error_code {
+inline auto make_error_code(wal_errc e) -> std::error_code {
   return std::error_code(static_cast<int>(e), earnest_category());
 }
 

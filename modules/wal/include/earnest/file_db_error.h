@@ -12,7 +12,7 @@ enum class file_db_errc {
   lock_failure,
 };
 
-auto file_db_category() -> const std::error_category& {
+inline auto file_db_category() -> const std::error_category& {
   class category_impl
   : public std::error_category
   {
@@ -41,7 +41,7 @@ auto file_db_category() -> const std::error_category& {
   return impl;
 }
 
-auto make_error_code(file_db_errc e) -> std::error_code {
+inline auto make_error_code(file_db_errc e) -> std::error_code {
   return std::error_code(static_cast<int>(e), file_db_category());
 }
 

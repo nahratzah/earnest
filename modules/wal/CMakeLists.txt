@@ -48,12 +48,24 @@ if (UnitTest++_FOUND)
   add_executable(wal_file_test)
   target_include_directories(wal_file_test PRIVATE ${UTPP_INCLUDE_DIRS})
   target_link_libraries(wal_file_test PUBLIC wal io UnitTest++)
-  target_sources(wal_file_test PRIVATE tests/wal_file.cc)
+  target_sources(wal_file_test PRIVATE
+      tests/wal_file.cc
+      tests/wal_file_create_wal.cc
+      tests/wal_file_reread_wal.cc
+      tests/wal_file_recovery.cc
+      tests/wal_file_write.cc
+      tests/wal_file_rollover.cc
+      tests/wal_file_open_with_gaps.cc
+      tests/wal_file_can_recover_from_interrupted_rollover.cc
+      tests/wal_file_bad_files_are_unrecoverable_if_they_were_marked_ready.cc)
   add_test(NAME wal_file COMMAND wal_file_test "${CMAKE_CURRENT_BINARY_DIR}/wal_file_test_tmpdir")
 
   add_executable(file_db_test)
   target_include_directories(file_db_test PRIVATE ${UTPP_INCLUDE_DIRS})
   target_link_libraries(file_db_test PUBLIC wal io UnitTest++)
-  target_sources(file_db_test PRIVATE tests/file_db.cc)
+  target_sources(file_db_test PRIVATE
+      tests/file_db.cc
+      tests/file_db_create_file_db.cc
+      tests/file_db_open_file_db.cc)
   add_test(NAME file_db COMMAND file_db_test "${CMAKE_CURRENT_BINARY_DIR}/file_db_test_tmpdir")
 endif ()
