@@ -1,3 +1,6 @@
+#pragma once
+
+#include <filesystem>
 #include <earnest/dir.h>
 
 extern earnest::dir write_dir;

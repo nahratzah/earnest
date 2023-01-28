@@ -1,7 +1,8 @@
-#include <earnest/file_db.h>
-
 #include "file_db.h"
 #include "UnitTest++/UnitTest++.h"
+
+#include <iostream>
+#include <earnest/dir.h>
 
 earnest::dir write_dir;
 
