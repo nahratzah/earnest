@@ -54,8 +54,8 @@ TEST(can_recover_from_interrupted_rollover) {
    * Validation.
    * The incomplete file (0000000000000001.wal) is removed during recovery.
    */
-  CHECK_EQUAL("0000000000000000.wal", w->active->name);
-  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
+  CHECK_EQUAL("0000000000000000.wal", w->active->file->name);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->file->state());
   CHECK_EQUAL(0u, w->entries.size());
 
   auto wdir = w->get_dir();

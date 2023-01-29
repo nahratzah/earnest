@@ -395,19 +395,14 @@ template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_append(write_records_vector records, CompletionToken&& token) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, write_records_vector&& records, std::shared_ptr<wal_file_entry> wf, auto on_space_assigned) {
-        auto wrapped_handler = completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator());
-
         wf->write_records_to_buffer_(std::move(records),
-            asio::bind_executor(
-                wf->strand_,
-                asio::bind_allocator(
-                    wf->get_allocator(),
-                    [ wf,
-                      completion_handler=std::move(wrapped_handler),
-                      on_space_assigned=std::move(on_space_assigned)
-                    ](std::error_code ec, auto byte_vector) mutable {
-                      wf->append_bytes_(std::move(byte_vector), std::move(completion_handler), std::move(on_space_assigned), ec);
-                    })));
+            completion_wrapper<void(std::error_code, std::vector<std::byte, rebind_alloc<std::byte>>)>(
+                completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                [ wf,
+                  on_space_assigned=std::move(on_space_assigned)
+                ](auto handler, std::error_code ec, auto byte_vector) mutable {
+                  wf->append_bytes_(std::move(byte_vector), std::move(handler).as_unbound_handler(), std::move(on_space_assigned), ec);
+                }));
       },
       token,
       write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()),
@@ -674,37 +669,31 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
     std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, Barrier&& barrier, Fanout&& f) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, auto write_offset, std::vector<std::byte, rebind_alloc<std::byte>> bytes, Barrier&& barrier, Fanout&& f, std::shared_ptr<wal_file_entry> wf) {
-        auto ex = asio::make_work_guard(completion_handler, wf->get_executor());
-
         auto bytes_buf = asio::buffer(bytes);
         asio::async_write_at(
             wf->file,
             write_offset,
             bytes_buf + 4u,
-            [ wf, write_offset, ex,
-              completion_handler=std::move(completion_handler),
-              bytes=std::move(bytes),
-              barrier=std::forward<Barrier>(barrier),
-              f=std::forward<Fanout>(f)
-            ](std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-              if (ec) {
-                wf->write_skip_record_(write_offset, bytes.size() - 4u,
-                    std::move(barrier));
+            completion_wrapper<void(std::error_code, std::size_t)>(
+                completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                [ wf, write_offset,
+                  bytes=std::move(bytes),
+                  barrier=std::forward<Barrier>(barrier),
+                  f=std::forward<Fanout>(f)
+                ](auto completion_handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                  if (ec) {
+                    wf->write_skip_record_(write_offset, bytes.size() - 4u,
+                        std::move(barrier));
 
-                // Complete the callback, since we know the error-code of its failure.
-                auto alloc = asio::get_associated_allocator(completion_handler);
-                ex.get_executor().dispatch(
-                    [h=std::move(completion_handler), ec]() mutable {
-                      std::invoke(h, ec);
-                    },
-                    std::move(alloc));
-              } else {
-                f.async_on_ready(std::move(completion_handler));
-                wf->write_link_(write_offset,
-                    std::array<std::byte, 4>{ bytes[0], bytes[1], bytes[2], bytes[3] },
-                    std::move(barrier));
-              }
-            });
+                    // Complete the callback, since we know the error-code of its failure.
+                    std::invoke(completion_handler, ec);
+                  } else {
+                    f.async_on_ready(std::move(completion_handler).as_unbound_handler());
+                    wf->write_link_(write_offset,
+                        std::array<std::byte, 4>{ bytes[0], bytes[1], bytes[2], bytes[3] },
+                        std::move(barrier));
+                  }
+                }));
       },
       token, write_offset, std::move(bytes), std::forward<Barrier>(barrier), std::forward<Fanout>(f), this->shared_from_this());
 }

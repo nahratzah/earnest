@@ -42,8 +42,8 @@ TEST(recovery) {
   /*
    * Validation.
    */
-  CHECK_EQUAL("0000000000000004.wal", w->active->name);
-  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
+  CHECK_EQUAL("0000000000000004.wal", w->active->file->name);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->file->state());
   REQUIRE CHECK_EQUAL(4u, w->entries.size());
 
   const std::array<std::uint64_t, 4> expected_indices{ 0, 1, 2, 3 };
@@ -51,7 +51,7 @@ TEST(recovery) {
           w->entries.begin(), w->entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
-            return entry->sequence == expected_index;
+            return entry->file->sequence == expected_index;
           }));
 
   const std::array<std::string_view, 4> expected_names{
@@ -64,7 +64,7 @@ TEST(recovery) {
           w->entries.begin(), w->entries.end(),
           expected_names.begin(), expected_names.end(),
           [](const auto& entry, std::string_view expected_name) -> bool {
-            return entry->name == expected_name;
+            return entry->file->name == expected_name;
           }));
 
   const std::array<::earnest::detail::wal_file_entry_state, 4> expected_states{
@@ -77,6 +77,6 @@ TEST(recovery) {
           w->entries.begin(), w->entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
-            return entry->state() == expected_state;
+            return entry->file->state() == expected_state;
           }));
 }

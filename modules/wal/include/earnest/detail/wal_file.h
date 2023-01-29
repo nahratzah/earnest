@@ -11,6 +11,7 @@
 #include <iostream>
 #include <iterator>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <ranges>
 #include <scoped_allocator>
@@ -65,14 +66,159 @@ class wal_file
   using rebind_alloc = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
 
   using entry_type = wal_file_entry<executor_type, allocator_type>;
-  using entries_list = std::vector<std::shared_ptr<entry_type>, rebind_alloc<std::shared_ptr<entry_type>>>;
+
+  class entry
+  : public std::enable_shared_from_this<entry>
+  {
+    public:
+    using nb_variant_type = wal_record_no_bookkeeping<typename entry_type::variant_type>;
+
+    private:
+    using cached_records = std::vector<nb_variant_type, typename std::allocator_traits<typename entry_type::allocator_type>::template rebind_alloc<nb_variant_type>>;
+    using cache_impl = fanout<typename entry_type::executor_type, void(std::error_code, std::shared_ptr<const cached_records>), typename entry_type::allocator_type>;
+
+    public:
+    explicit entry(std::shared_ptr<entry_type> file)
+    : file(std::move(file))
+    {}
+
+    template<typename Range, typename CompletionToken>
+    auto async_append(Range&& records, CompletionToken&& token) {
+      return asio::async_initiate<CompletionToken, void(std::error_code)>(
+          [](auto handler, std::shared_ptr<entry> self, typename entry_type::write_records_vector records) {
+            self->file->async_append(
+                std::move(records),
+                completion_wrapper<void(std::error_code)>(
+                    std::move(handler),
+                    [self](auto handler, std::error_code ec) {
+                      if (!ec) self->on_change_();
+                      std::invoke(handler, ec);
+                    }));
+          },
+          token, this->shared_from_this(), typename entry_type::write_records_vector(std::ranges::begin(records), std::ranges::end(records), file->get_allocator()));
+    }
+
+    template<typename Acceptor, typename CompletionToken>
+    auto async_records(Acceptor&& acceptor, CompletionToken&& token) const {
+      return asio::async_initiate<CompletionToken, void(std::error_code)>(
+          [](auto handler, std::shared_ptr<const entry> self, auto acceptor) {
+            self->completion_event_op_()
+            | asio::deferred(
+                [acceptor=std::move(acceptor)](std::error_code ec, std::shared_ptr<const cached_records> records) mutable {
+                  for (auto iter = records->begin(), end = records->end(); !ec && iter != end; ++iter)
+                    ec = std::invoke(acceptor, *iter);
+                  return asio::deferred.values(ec);
+                })
+            | completion_handler_fun(std::move(handler), self->file->get_executor());
+          },
+          token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
+    }
+
+    template<typename CompletionToken>
+    auto async_seal(CompletionToken&& token) {
+      return file->async_seal(std::forward<CompletionToken>(token));
+    }
+
+    private:
+    auto on_change_() -> void {
+      std::scoped_lock lck{ mtx_ };
+      cache_.reset();
+    }
+
+    auto completion_event_op_() const {
+      std::scoped_lock lck{ mtx_ };
+      if (cache_ == nullptr) [[unlikely]] {
+        auto new_cache = std::allocate_shared<cache_impl>(file->get_allocator(), file->get_executor(), file->get_allocator());
+        auto new_records = std::allocate_shared<cached_records>(file->get_allocator(), file->get_allocator());
+        file->async_records(
+            [new_records](typename entry_type::variant_type v) -> std::error_code {
+              if (wal_record_is_bookkeeping(v)) return {};
+              new_records->push_back(make_wal_record_no_bookkeeping(std::move(v)));
+              return {};
+            },
+            detail::completion_wrapper<void(std::error_code)>(
+                *new_cache,
+                [new_records](auto new_cache, std::error_code ec) mutable {
+                  std::invoke(new_cache, ec, std::move(new_records));
+                }));
+
+        cache_ = std::move(new_cache);
+      }
+      return cache_->async_on_ready(asio::deferred);
+    }
+
+    public:
+    std::shared_ptr<entry_type> file;
+    std::size_t locks = 0;
+
+    private:
+    mutable std::mutex mtx_;
+    mutable std::shared_ptr<cache_impl> cache_;
+  };
+
+  using entries_list = std::vector<std::shared_ptr<entry>, rebind_alloc<std::shared_ptr<entry>>>;
+  using old_list = std::vector<std::shared_ptr<entry_type>, rebind_alloc<std::shared_ptr<entry_type>>>;
 
   public:
   using variant_type = typename entry_type::variant_type;
   using write_variant_type = typename entry_type::write_variant_type;
+  using record_type = typename entry::nb_variant_type;
   using records_vector = typename entry_type::records_vector;
   using write_records_vector = typename entry_type::write_records_vector;
   using fd_type = typename entry_type::fd_type;
+
+  class tx_lock {
+    public:
+    tx_lock() = default;
+
+    tx_lock(std::shared_ptr<const wal_file> wf, std::shared_ptr<entry> entry)
+    : entry_(std::move(entry)),
+      wf_(std::move(wf))
+    {
+      assert(wf_->strand_.running_in_this_thread());
+      ++entry_->locks;
+    }
+
+    tx_lock(const tx_lock&) = delete;
+
+    tx_lock(tx_lock&& y) noexcept
+    : entry_(std::move(y.entry_)),
+      wf_(std::move(y.wf_))
+    {}
+
+    auto operator=(const tx_lock&) = delete;
+
+    auto operator=(tx_lock&& y) -> tx_lock& {
+      if (this != &y) [[likely]] {
+        if (entry_ != nullptr) {
+          wf_->strand_.dispatch(
+              [entry=this->entry_]() {
+                assert(entry->locks > 0);
+                --entry->locks;
+              },
+              wf_->get_allocator());
+        }
+
+        entry_ = std::move(y.entry_);
+        wf_ = std::move(y.wf_);
+      }
+      return *this;
+    }
+
+    ~tx_lock() {
+      if (entry_ != nullptr) {
+        wf_->strand_.dispatch(
+            [entry=this->entry_]() {
+              --entry->locks;
+            },
+            wf_->get_allocator());
+      }
+    }
+
+    private:
+    std::shared_ptr<entry> entry_;
+    std::shared_ptr<const wal_file> wf_;
+  };
 
   explicit wal_file(executor_type ex, allocator_type alloc = allocator_type())
   : entries(alloc),
@@ -145,16 +291,16 @@ class wal_file
                               if (!ec) [[likely]] {
                                 std::sort(
                                     wf->entries.begin(), wf->entries.end(),
-                                    [](const std::shared_ptr<entry_type>& x, const std::shared_ptr<entry_type>& y) {
-                                      return x->sequence < y->sequence;
+                                    [](const std::shared_ptr<entry>& x, const std::shared_ptr<entry>& y) {
+                                      return x->file->sequence < y->file->sequence;
                                     });
                                 const auto same_sequence_iter = std::adjacent_find(
                                     wf->entries.begin(), wf->entries.end(),
-                                    [](const std::shared_ptr<entry_type>& x, const std::shared_ptr<entry_type>& y) -> bool {
-                                      return x->sequence == y->sequence;
+                                    [](const std::shared_ptr<entry>& x, const std::shared_ptr<entry>& y) -> bool {
+                                      return x->file->sequence == y->file->sequence;
                                     });
                                 if (same_sequence_iter != wf->entries.end()) [[unlikely]] {
-                                  std::clog << "WAL: unrecoverable error: files " << (*same_sequence_iter)->name << " and " << (*std::next(same_sequence_iter))->name << " have the same sequence number " << (*same_sequence_iter)->sequence << std::endl;
+                                  std::clog << "WAL: unrecoverable error: files " << (*same_sequence_iter)->file->name << " and " << (*std::next(same_sequence_iter))->file->name << " have the same sequence number " << (*same_sequence_iter)->file->sequence << std::endl;
                                   ec = make_error_code(wal_errc::unrecoverable);
                                 }
                               }
@@ -185,7 +331,7 @@ class wal_file
                                   std::clog << "WAL: error while opening WAL file '"sv << filename << "': "sv << ec << "\n";
                                   bad_wal_files->insert(filename);
                                 } else {
-                                  wf->entries.emplace_back(new_entry);
+                                  wf->entries.emplace_back(std::allocate_shared<entry>(wf->get_allocator(), new_entry));
                                 }
                                 std::invoke(handler, std::error_code());
                               }));
@@ -217,7 +363,7 @@ class wal_file
                         completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
                             std::move(handler),
                             [wf, new_active](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_event) {
-                              wf->active = new_active;
+                              wf->active = std::allocate_shared<entry>(wf->get_allocator(), new_active);
                               std::invoke(link_event, ec);
                               std::invoke(handler, ec);
                             }));;
@@ -227,6 +373,34 @@ class wal_file
   }
 
   template<typename Acceptor, typename CompletionToken>
+  requires std::invocable<Acceptor, record_type>
+  auto async_tx(Acceptor&& acceptor, CompletionToken&& token) const {
+    return asio::async_initiate<CompletionToken, void(std::error_code, tx_lock)>(
+        [](auto handler, std::shared_ptr<const wal_file> wf, auto acceptor) {
+          asio::dispatch(
+              completion_wrapper<void()>(
+                  completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                  [wf, acceptor=std::move(acceptor)](auto handler) mutable {
+                    auto queue = std::queue<std::shared_ptr<const entry>, std::deque<std::shared_ptr<const entry>, rebind_alloc<std::shared_ptr<const entry>>>>(
+                        std::deque<std::shared_ptr<const entry>, rebind_alloc<std::shared_ptr<const entry>>>(
+                            wf->entries.begin(), wf->entries.end(), wf->get_allocator()));
+                    queue.push(wf->active);
+
+                    wf->async_records_iter_(
+                        std::move(acceptor),
+                        std::move(queue),
+                        completion_wrapper<void(std::error_code)>(
+                            std::move(handler).as_unbound_handler(),
+                            [lck=tx_lock(wf, wf->active)](auto handler, std::error_code ec) mutable {
+                              std::invoke(handler, ec, std::move(lck));
+                            }));
+                  }));
+        },
+        token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
+  }
+
+  template<typename Acceptor, typename CompletionToken>
+  requires std::invocable<Acceptor, record_type>
   auto async_records(Acceptor&& acceptor, CompletionToken&& token) const {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, std::shared_ptr<const wal_file> wf, auto acceptor) {
@@ -234,8 +408,8 @@ class wal_file
               completion_wrapper<void()>(
                   completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
                   [wf, acceptor=std::move(acceptor)](auto handler) mutable {
-                    auto queue = std::queue<std::shared_ptr<const entry_type>, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>>(
-                        std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>(
+                    auto queue = std::queue<std::shared_ptr<const entry>, std::deque<std::shared_ptr<const entry>, rebind_alloc<std::shared_ptr<const entry>>>>(
+                        std::deque<std::shared_ptr<const entry>, rebind_alloc<std::shared_ptr<const entry>>>(
                             wf->entries.begin(), wf->entries.end(), wf->get_allocator()));
                     queue.push(wf->active);
 
@@ -248,31 +422,31 @@ class wal_file
         token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
   }
 
-  template<typename CompletionToken>
-  [[deprecated]]
-  auto async_records(CompletionToken&& token) const {
-    return asio::async_initiate<CompletionToken, void(std::error_code, records_vector)>(
-        [](auto handler, std::shared_ptr<const wal_file> wf) {
-          auto records_ptr = std::make_unique<records_vector>(wf->get_allocator());
-          auto& records_ref = *records_ptr;
+  template<typename Acceptor, typename CompletionToken>
+  auto async_records_raw(Acceptor&& acceptor, CompletionToken&& token) const {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<const wal_file> wf, auto acceptor) {
+          asio::dispatch(
+              completion_wrapper<void()>(
+                  completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                  [wf, acceptor=std::move(acceptor)](auto handler) mutable {
+                    auto queue = std::queue<std::shared_ptr<const entry>, std::deque<std::shared_ptr<const entry>, rebind_alloc<std::shared_ptr<const entry>>>>(
+                        std::deque<std::shared_ptr<const entry>, rebind_alloc<std::shared_ptr<const entry>>>(
+                            wf->entries.begin(), wf->entries.end(), wf->get_allocator()));
+                    queue.push(wf->active);
 
-          wf->async_records(
-              [&records_ref](auto v) {
-                records_ref.push_back(std::move(v));
-                return std::error_code();
-              },
-              completion_wrapper<void(std::error_code)>(
-                  std::move(handler),
-                  [records_ptr=std::move(records_ptr)](auto handler, std::error_code ec) {
-                    std::invoke(handler, ec, *records_ptr);
+                    wf->async_records_raw_iter_(
+                        std::move(acceptor),
+                        std::move(queue),
+                        std::move(handler).as_unbound_handler());
                   }));
         },
-        token, this->shared_from_this());
+        token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
   }
 
   private:
   template<typename Acceptor, typename CompletionHandler>
-  static auto async_records_iter_(Acceptor&& acceptor, std::queue<std::shared_ptr<const entry_type>, std::deque<std::shared_ptr<const entry_type>, rebind_alloc<std::shared_ptr<const entry_type>>>>&& files, CompletionHandler&& handler) -> void {
+  static auto async_records_iter_(Acceptor&& acceptor, std::queue<std::shared_ptr<const entry>, std::deque<std::shared_ptr<const entry>, rebind_alloc<std::shared_ptr<const entry>>>>&& files, CompletionHandler&& handler) -> void {
     if (files.empty()) {
       std::invoke(handler, std::error_code());
       return;
@@ -291,6 +465,29 @@ class wal_file
               }
 
               async_records_iter_(std::move(acceptor), std::move(files), std::move(handler));
+            }));
+  }
+
+  template<typename Acceptor, typename CompletionHandler>
+  static auto async_records_raw_iter_(Acceptor&& acceptor, std::queue<std::shared_ptr<const entry>, std::deque<std::shared_ptr<const entry>, rebind_alloc<std::shared_ptr<const entry>>>>&& files, CompletionHandler&& handler) -> void {
+    if (files.empty()) {
+      std::invoke(handler, std::error_code());
+      return;
+    }
+
+    auto current = std::move(files.front());
+    files.pop();
+    current->file->async_records(
+        acceptor,
+        completion_wrapper<void(std::error_code)>(
+            std::move(handler),
+            [files=std::move(files), acceptor](auto handler, std::error_code ec) mutable {
+              if (ec) [[unlikely]] {
+                std::invoke(handler, ec);
+                return;
+              }
+
+              async_records_raw_iter_(std::move(acceptor), std::move(files), std::move(handler));
             }));
   }
 
@@ -363,9 +560,9 @@ class wal_file
 
     assert(active == nullptr); // Won't be filled in until recover_() has run.
     assert(old.empty()); // Won't be filled in yet.
-    for (const std::shared_ptr<entry_type>& entry : entries) {
+    for (const std::shared_ptr<entry>& entry : entries) {
       auto local_wal_data = std::allocate_shared<update_map>(get_allocator());
-      entry->async_records(
+      entry->file->async_records(
           [local_wal_data](const auto& record) -> std::error_code {
             if (std::holds_alternative<wal_record_rollover_intent>(record)) {
               (*local_wal_data)[std::get<wal_record_rollover_intent>(record).filename].intent_declared = true;
@@ -452,9 +649,9 @@ class wal_file
       // and we cannot know if all preceding writes made it into the unsealed-entry.
       // So we must discard those files.
       std::for_each(std::next(unsealed_entry), this->entries.end(),
-          [&discard_barrier](const std::shared_ptr<entry_type>& e) {
-            std::clog << "WAL: discarding never-confirmed entries in " << e->name << "\n";
-            e->async_discard_all(++discard_barrier);
+          [&discard_barrier](const std::shared_ptr<entry>& e) {
+            std::clog << "WAL: discarding never-confirmed entries in " << e->file->name << "\n";
+            e->file->async_discard_all(++discard_barrier);
           });
       std::invoke(discard_barrier, std::error_code());
     }
@@ -464,9 +661,11 @@ class wal_file
 
   template<typename CompletionHandler>
   auto create_initial_unsealed_(CompletionHandler&& handler) -> void {
-    const auto new_sequence = entries.back()->sequence + 1u;
-    entries.emplace_back(std::allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator()));
-    entries.back()->async_create(dir_, filename_for_wal_(new_sequence), new_sequence,
+    const auto new_sequence = entries.back()->file->sequence + 1u;
+    entries.emplace_back(
+        std::allocate_shared<entry>(get_allocator(),
+            std::allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator())));
+    entries.back()->file->async_create(dir_, filename_for_wal_(new_sequence), new_sequence,
         completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type)>(
             std::forward<CompletionHandler>(handler),
             [](auto handler, std::error_code ec, typename entry_type::link_done_event_type link_done) {
@@ -480,18 +679,21 @@ class wal_file
   auto update_bookkeeping_(CompletionHandler&& handler) {
     assert(!entries.empty());
     assert(std::all_of(entries.begin(), std::prev(entries.end()),
-            [](const std::shared_ptr<entry_type>& e) {
-              return e->state() == wal_file_entry_state::sealed;
+            [](const std::shared_ptr<entry>& e) {
+              return e->file->state() == wal_file_entry_state::sealed;
             }));
-    assert(entries.back()->state() == wal_file_entry_state::ready);
+    assert(entries.back()->file->state() == wal_file_entry_state::ready);
 
     // Find the most recent point where the sequence breaks.
     auto sequence_break_iter = adjecent_find_last(entries.begin(), entries.end(),
-        [](const std::shared_ptr<entry_type>& x_ptr, const std::shared_ptr<entry_type>& y_ptr) -> bool {
-          return x_ptr->sequence + 1u != y_ptr->sequence;
+        [](const std::shared_ptr<entry>& x_ptr, const std::shared_ptr<entry>& y_ptr) -> bool {
+          return x_ptr->file->sequence + 1u != y_ptr->file->sequence;
         });
     if (sequence_break_iter != entries.end()) {
-      std::copy(std::make_move_iterator(entries.begin()), std::make_move_iterator(std::next(sequence_break_iter)), std::back_inserter(old));
+      std::transform(entries.begin(), std::next(sequence_break_iter), std::back_inserter(old),
+          [](const std::shared_ptr<entry>& e) -> std::shared_ptr<entry_type> {
+            return e->file;
+          });
       entries.erase(entries.begin(), std::next(sequence_break_iter));
     }
 
@@ -504,8 +706,8 @@ class wal_file
   auto find_first_unsealed_() -> typename entries_list::iterator {
     return std::find_if(
         this->entries.begin(), this->entries.end(),
-        [](const std::shared_ptr<entry_type>& e) {
-          return e->state() != wal_file_entry_state::sealed;
+        [](const std::shared_ptr<entry>& e) {
+          return e->file->state() != wal_file_entry_state::sealed;
         });
   }
 
@@ -523,7 +725,7 @@ class wal_file
     for (typename entries_list::iterator next_iter = std::next(iter);
          next_iter != entries.end();
          iter = std::exchange(next_iter, std::next(next_iter))) {
-      for (auto missing_sequence = (*iter)->sequence + 1u; missing_sequence < (*next_iter)->sequence; ++missing_sequence) {
+      for (auto missing_sequence = (*iter)->file->sequence + 1u; missing_sequence < (*next_iter)->file->sequence; ++missing_sequence) {
         const auto new_elem = std::allocate_shared<entry_type>(get_allocator(), get_executor(), get_allocator());
         new_elem->async_create(dir_, filename_for_wal_(missing_sequence), missing_sequence,
             completion_wrapper<void(std::error_code, typename entry_type::link_done_event_type link_event)>(
@@ -535,7 +737,8 @@ class wal_file
                   else
                     new_elem->async_seal(std::move(handler));
                 }));
-        auto inserted_iter = entries.insert(next_iter, std::move(new_elem)); // Invalidates iter, next_iter.
+        auto inserted_iter = entries.insert(next_iter,
+            std::allocate_shared<entry>(get_allocator(), std::move(new_elem))); // Invalidates iter, next_iter.
         next_iter = std::next(inserted_iter);
       }
     }
@@ -578,7 +781,9 @@ class wal_file
         strand_,
         asio::deferred(
             [](std::error_code ec, std::shared_ptr<wal_file> wf, fanout_barrier<executor_type, allocator_type> new_barrier) {
-              auto new_filename = filename_for_wal_(wf->active->sequence + 1u);
+              assert(wf->strand_.running_in_this_thread());
+
+              auto new_filename = filename_for_wal_(wf->active->file->sequence + 1u);
               return asio::deferred.when(!ec)
                   .then(
                       wf->async_append(
@@ -588,18 +793,21 @@ class wal_file
                           asio::append(asio::deferred, wf, new_barrier, new_filename)))
                   .otherwise(asio::deferred.values(ec, wf, new_barrier, new_filename));
             }))
-    | asio::bind_executor(
-        strand_,
-        asio::deferred(
-            [](std::error_code ec, std::shared_ptr<wal_file> wf, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
-              assert(wf->strand_.running_in_this_thread());
+    | asio::deferred(
+        [](std::error_code ec, std::shared_ptr<wal_file> wf, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
+          auto new_active = allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator());
+          return asio::deferred.when(!ec)
+              .then(
+                  deferred_on_executor<void(std::error_code, typename entry_type::link_done_event_type, std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type>, fanout_barrier<executor_type, allocator_type>, std::filesystem::path)>(
+                      [](std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
+                        assert(wf->strand_.running_in_this_thread());
 
-              const auto new_sequence = wf->active->sequence + 1u;
-              auto new_active = allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator());
-              return asio::deferred.when(!ec)
-                  .then(new_active->async_create(wf->dir_, new_filename, new_sequence, asio::append(asio::deferred, wf, new_active, new_barrier, new_filename)))
-                  .otherwise(asio::deferred.values(ec, typename entry_type::link_done_event_type(new_active->get_executor(), new_active->get_allocator()), wf, new_active, new_barrier, new_filename));
-            }))
+                        const auto new_sequence = wf->active->file->sequence + 1u;
+                        return new_active->async_create(wf->dir_, new_filename, new_sequence, asio::append(asio::deferred, wf, new_active, new_barrier, new_filename));
+                      },
+                      wf->strand_, wf, new_active, new_barrier, new_filename))
+              .otherwise(asio::deferred.values(ec, typename entry_type::link_done_event_type(new_active->get_executor(), new_active->get_allocator()), wf, new_active, new_barrier, new_filename));
+        })
     | asio::deferred(
         [](std::error_code ec, typename entry_type::link_done_event_type link_event, std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
           return asio::deferred.when(!ec)
@@ -617,9 +825,10 @@ class wal_file
     return deferred_on_executor<void(std::error_code)>(
         [](std::shared_ptr<wal_file> wf, typename entry_type::link_done_event_type link_event, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier) {
           assert(wf->strand_.running_in_this_thread());
-          assert(wf->active->sequence + 1u == new_active->sequence); // guaranteed by rollover-barrier.
+          assert(wf->active->file->sequence + 1u == new_active->sequence); // guaranteed by rollover-barrier.
 
-          const auto old_active = std::exchange(wf->active, new_active);
+          const auto old_active = std::exchange(wf->active,
+              std::allocate_shared<entry>(wf->get_allocator(), new_active));
           wf->entries.push_back(old_active);
           std::invoke(new_barrier, std::error_code());
 
@@ -652,8 +861,9 @@ class wal_file
   // and has contiguous sequence.
   // `old` holds all entries that are not contiguous,
   // or that are no longer relevant.
-  entries_list entries, old;
-  std::shared_ptr<entry_type> active;
+  entries_list entries;
+  old_list old;
+  std::shared_ptr<entry> active;
 
   private:
   asio::strand<executor_type> strand_;

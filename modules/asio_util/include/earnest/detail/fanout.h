@@ -14,6 +14,8 @@
 #include <asio/async_result.hpp>
 #include <asio/executor_work_guard.hpp>
 
+#include <earnest/detail/move_only_function.h>
+
 namespace earnest::detail {
 
 
@@ -44,7 +46,7 @@ class fanout<Executor, void(Args...), Alloc> {
   : public std::enable_shared_from_this<impl>
   {
     private:
-    using function_type = std::function<void(std::shared_ptr<const std::tuple<Args...>>)>;
+    using function_type = move_only_function<void(std::shared_ptr<const std::tuple<Args...>>)>;
 
     public:
     explicit impl(executor_type ex, allocator_type alloc)

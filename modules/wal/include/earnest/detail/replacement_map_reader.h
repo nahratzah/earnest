@@ -29,7 +29,7 @@ class replacement_map_reader {
   using size_type = typename replacement_map<WalFD, Alloc>::size_type;
   using executor_type = typename std::remove_cvref_t<UnderlyingFd>::executor_type;
 
-  replacement_map_reader(UnderlyingFd fd, replacement_map<WalFD, Alloc> replacements, size_type file_size)
+  replacement_map_reader(UnderlyingFd fd, std::shared_ptr<replacement_map<WalFD, Alloc>> replacements, size_type file_size)
   : underlying_fd_(std::forward<UnderlyingFd>(fd)),
     replacements_(std::move(replacements)),
     file_size_(std::move(file_size))
@@ -68,13 +68,13 @@ class replacement_map_reader {
               this->get_executor());
 
           std::vector<asio::mutable_buffer> bufs = mb_to_bufvector_(std::move(mb), rlen);
-          typename replacement_map<WalFD, Alloc>::const_iterator repl_iter = this->replacements_.find(off);
+          typename replacement_map<WalFD, Alloc>::const_iterator repl_iter = this->replacements_->find(off);
           // We fan out the read, so that IO won't suffer (much) if it has lots of small edits.
           while (!bufs.empty()) {
-            assert(repl_iter == this->replacements_.end() || repl_iter->end_offset() > off);
-            assert(repl_iter == this->replacements_.begin() || std::prev(repl_iter)->end_offset() <= off);
+            assert(repl_iter == this->replacements_->end() || repl_iter->end_offset() > off);
+            assert(repl_iter == this->replacements_->begin() || std::prev(repl_iter)->end_offset() <= off);
 
-            if (repl_iter == this->replacements_.end()) {
+            if (repl_iter == this->replacements_->end()) {
               const auto buf_bytes = asio::buffer_size(bufs);
               asio::async_read_at(
                   this->underlying_fd_,
@@ -176,7 +176,7 @@ class replacement_map_reader {
   }
 
   UnderlyingFd underlying_fd_;
-  replacement_map<WalFD, Alloc> replacements_;
+  std::shared_ptr<replacement_map<WalFD, Alloc>> replacements_;
   size_type file_size_;
 };
 

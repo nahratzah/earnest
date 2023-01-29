@@ -27,7 +27,7 @@ TEST(rollover) {
   ioctx.run();
   ioctx.restart();
   REQUIRE CHECK_EQUAL(0u, w->entries.size());
-  REQUIRE CHECK_EQUAL(0u, w->active->sequence);
+  REQUIRE CHECK_EQUAL(0u, w->active->file->sequence);
 
   /*
    * Test: rollover, while writing to wal.
@@ -58,11 +58,11 @@ TEST(rollover) {
    */
   CHECK(rollover_callback_was_called);
   REQUIRE CHECK_EQUAL(1u, w->entries.size());
-  CHECK_EQUAL(1u, w->active->sequence);
-  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
+  CHECK_EQUAL(1u, w->active->file->sequence);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->file->state());
 
   std::vector<wal_file_t::variant_type> records;
-  w->async_records(
+  w->async_records_raw(
       [&records](auto v) {
         records.push_back(v);
         return std::error_code();
@@ -89,7 +89,7 @@ TEST(rollover) {
           w->entries.begin(), w->entries.end(),
           expected_indices.begin(), expected_indices.end(),
           [](const auto& entry, std::uint64_t expected_index) -> bool {
-            return entry->sequence == expected_index;
+            return entry->file->sequence == expected_index;
           }));
 
   const std::array<::earnest::detail::wal_file_entry_state, 1> expected_states{
@@ -99,6 +99,6 @@ TEST(rollover) {
           w->entries.begin(), w->entries.end(),
           expected_states.begin(), expected_states.end(),
           [](const auto& entry, auto expected_state) -> bool {
-            return entry->state() == expected_state;
+            return entry->file->state() == expected_state;
           }));
 }

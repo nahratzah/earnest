@@ -11,6 +11,7 @@
 #include <asio/executor_work_guard.hpp>
 
 #include <earnest/detail/completion_handler_fun.h>
+#include <earnest/detail/move_only_function.h>
 
 namespace earnest::detail {
 
@@ -26,7 +27,7 @@ class fanout_barrier {
   : public std::enable_shared_from_this<impl>
   {
     public:
-    using function_type = std::function<void(std::error_code)>;
+    using function_type = move_only_function<void(std::error_code)>;
 
     impl(executor_type ex, allocator_type alloc)
     : ex_(std::move(ex)),

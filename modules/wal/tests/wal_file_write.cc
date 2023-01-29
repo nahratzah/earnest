@@ -10,8 +10,7 @@
 
 TEST(write) {
   using wal_file_t = earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>;
-  using ::earnest::detail::wal_record_noop;
-  using ::earnest::detail::wal_record_skip32;
+  using ::earnest::detail::wal_record_create_file;
 
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("write");
 
@@ -29,7 +28,9 @@ TEST(write) {
    */
   bool append_callback_was_called = false;
   w->async_append(std::initializer_list<wal_file_t::write_variant_type>{
-        wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
+        wal_record_create_file{ .file{ "", "foo"} },
+        wal_record_create_file{ .file{ "", "bar"} },
+        wal_record_create_file{ .file{ "", "baz"} },
       },
       [&](std::error_code ec) {
         CHECK_EQUAL(std::error_code(), ec);
@@ -44,7 +45,7 @@ TEST(write) {
   CHECK(append_callback_was_called);
   CHECK(w->entries.empty());
 
-  std::vector<wal_file_t::variant_type> records;
+  std::vector<wal_file_t::record_type> records;
   w->async_records(
       [&records](auto v) {
         records.push_back(std::move(v));
@@ -53,8 +54,10 @@ TEST(write) {
       [&records](std::error_code ec) {
         REQUIRE CHECK_EQUAL(std::error_code(), ec);
 
-        auto expected = std::initializer_list<wal_file_t::variant_type>{
-          wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
+        auto expected = std::initializer_list<wal_file_t::record_type>{
+          wal_record_create_file{ .file{ "", "foo"} },
+          wal_record_create_file{ .file{ "", "bar"} },
+          wal_record_create_file{ .file{ "", "baz"} },
         };
         CHECK(std::equal(
                 expected.begin(), expected.end(),

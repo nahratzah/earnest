@@ -63,8 +63,8 @@ TEST(open_with_gaps) {
   /*
    * Validation.
    */
-  CHECK_EQUAL("4.wal", w->active->name);
-  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
+  CHECK_EQUAL("4.wal", w->active->file->name);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->file->state());
 
   {
     // entries holds only 3.wal
@@ -73,7 +73,7 @@ TEST(open_with_gaps) {
             w->entries.begin(), w->entries.end(),
             expected_indices.begin(), expected_indices.end(),
             [](const auto& entry, std::uint64_t expected_index) -> bool {
-              return entry->sequence == expected_index;
+              return entry->file->sequence == expected_index;
             }));
 
     // entries holds only 3.wal
@@ -84,7 +84,7 @@ TEST(open_with_gaps) {
             w->entries.begin(), w->entries.end(),
             expected_names.begin(), expected_names.end(),
             [](const auto& entry, std::string_view expected_name) -> bool {
-              return entry->name == expected_name;
+              return entry->file->name == expected_name;
             }));
 
     // entries holds only 3.wal
@@ -95,7 +95,7 @@ TEST(open_with_gaps) {
             w->entries.begin(), w->entries.end(),
             expected_states.begin(), expected_states.end(),
             [](const auto& entry, auto expected_state) -> bool {
-              return entry->state() == expected_state;
+              return entry->file->state() == expected_state;
             }));
   }
 

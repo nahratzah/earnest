@@ -20,26 +20,10 @@ template<typename FD, typename Allocator>
 struct file_recover_state {
   using fd_type = FD;
   using allocator_type = Allocator;
-  using executor_type = typename FD::executor_type;
 
-  file_recover_state(executor_type ex, allocator_type alloc = allocator_type())
-  : replacements(std::move(alloc)),
-    actual_file(std::move(ex))
+  explicit file_recover_state(allocator_type alloc = allocator_type())
+  : replacements(std::move(alloc))
   {}
-
-  file_recover_state(executor_type ex, const dir& d, const std::filesystem::path filename, open_mode m = open_mode::READ_WRITE, allocator_type alloc = allocator_type())
-  : file_recover_state(std::move(ex), std::move(alloc))
-  {
-    std::error_code ec;
-    actual_file.open(d, filename, m, ec);
-    if (ec == make_error_code(std::errc::no_such_file_or_directory)) {
-      // skip
-    } else if (ec) {
-      throw std::system_error(ec, "file_db::file_recover_state::open");
-    } else {
-      file_size = actual_file.size();
-    }
-  }
 
   auto apply(const wal_record_create_file& record) -> std::error_code {
     if (exists.value_or(false) != false) [[unlikely]] {
@@ -88,22 +72,13 @@ struct file_recover_state {
     if (record.file_offset + record.wal_len < record.file_offset) [[unlikely]] { // overflow
       log(record.file) << "overflow in WAL write record\n";
       return make_error_code(file_db_errc::unrecoverable);
-    } else if (record.file_offset + record.wal_len > file_size) [[unlikely]] { // out-of-bound write
+    } else if (file_size.has_value() && record.file_offset + record.wal_len > file_size.value()) [[unlikely]] { // out-of-bound write
       log(record.file) << "write record extends past end of file\n";
       return make_error_code(file_db_errc::unrecoverable);
     }
 
     replacements.insert(record);
     return {};
-  }
-
-  template<typename RecordVariant>
-  auto apply(const RecordVariant& record) -> std::error_code {
-    return std::visit(
-        [this](const auto& record) -> std::error_code {
-          return this->apply(record);
-        },
-        record);
   }
 
   private:
@@ -115,9 +90,8 @@ struct file_recover_state {
 
   public:
   replacement_map<fd_type, allocator_type> replacements;
-  fd_type actual_file;
   std::optional<bool> exists = std::nullopt;
-  std::uint64_t file_size = 0;
+  std::optional<std::uint64_t> file_size = 0;
 };
 
 

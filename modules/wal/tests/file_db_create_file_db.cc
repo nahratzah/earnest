@@ -27,5 +27,5 @@ TEST(create_file_db) {
   CHECK(fdb->namespaces.empty());
 
   CHECK_EQUAL(1u, fdb->files.size());
-  CHECK(fdb->files.contains(earnest::file_id("", earnest::file_db<asio::io_context::executor_type>::namespaces_filename)));
+  CHECK(fdb->files.contains(earnest::file_id("", std::string(earnest::file_db<asio::io_context::executor_type>::namespaces_filename))));
 }

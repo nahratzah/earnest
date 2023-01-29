@@ -431,7 +431,7 @@ template<typename WalRecordVariant>
 using wal_record_no_bookkeeping = typename record_support_::without_bookkeeping_variant<WalRecordVariant>::type;
 
 template<typename WalRecordVariant>
-auto make_wal_record_no_bookeeping(WalRecordVariant&& v) -> wal_record_no_bookkeeping<std::remove_cvref_t<WalRecordVariant>> {
+auto make_wal_record_no_bookkeeping(WalRecordVariant&& v) -> wal_record_no_bookkeeping<std::remove_cvref_t<WalRecordVariant>> {
   return record_support_::without_bookkeeping_variant<std::remove_cvref_t<WalRecordVariant>>::convert(std::forward<WalRecordVariant>(v));
 }
 

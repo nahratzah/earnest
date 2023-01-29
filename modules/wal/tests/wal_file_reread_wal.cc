@@ -36,7 +36,7 @@ TEST(reread_wal) {
    * Validation.
    */
   CHECK(w->entries.empty());
-  CHECK_EQUAL(0u, w->active->sequence);
-  CHECK_EQUAL("0000000000000000.wal", w->active->name);
-  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->state());
+  CHECK_EQUAL(0u, w->active->file->sequence);
+  CHECK_EQUAL("0000000000000000.wal", w->active->file->name);
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->file->state());
 }
