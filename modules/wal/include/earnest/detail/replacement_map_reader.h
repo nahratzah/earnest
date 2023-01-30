@@ -29,13 +29,13 @@ class replacement_map_reader {
   using size_type = typename replacement_map<WalFD, Alloc>::size_type;
   using executor_type = typename std::remove_cvref_t<UnderlyingFd>::executor_type;
 
-  replacement_map_reader(UnderlyingFd fd, std::shared_ptr<replacement_map<WalFD, Alloc>> replacements, size_type file_size)
-  : underlying_fd_(std::forward<UnderlyingFd>(fd)),
+  replacement_map_reader(std::shared_ptr<UnderlyingFd> fd, std::shared_ptr<replacement_map<WalFD, Alloc>> replacements, size_type file_size)
+  : underlying_fd_(std::move(fd)),
     replacements_(std::move(replacements)),
     file_size_(std::move(file_size))
   {}
 
-  auto get_executor() const -> executor_type { return underlying_fd_.get_executor(); }
+  auto get_executor() const -> executor_type { return underlying_fd_->get_executor(); }
 
   template<typename MB, typename CompletionToken>
   auto async_read_some_at(offset_type off, MB&& mb, CompletionToken&& token) const {
@@ -77,7 +77,7 @@ class replacement_map_reader {
             if (repl_iter == this->replacements_->end()) {
               const auto buf_bytes = asio::buffer_size(bufs);
               asio::async_read_at(
-                  this->underlying_fd_,
+                  *this->underlying_fd_,
                   off,
                   std::move(bufs),
                   asio::transfer_exactly(buf_bytes),
@@ -94,7 +94,7 @@ class replacement_map_reader {
               auto segment_bufs = extract_bufs_(bufs, repl_iter->offset() - off);
               const auto buf_bytes = asio::buffer_size(segment_bufs);
               asio::async_read_at(
-                  this->underlying_fd_,
+                  *this->underlying_fd_,
                   off,
                   std::move(segment_bufs),
                   asio::transfer_exactly(buf_bytes),
@@ -175,7 +175,7 @@ class replacement_map_reader {
     return out;
   }
 
-  UnderlyingFd underlying_fd_;
+  std::shared_ptr<UnderlyingFd> underlying_fd_;
   std::shared_ptr<replacement_map<WalFD, Alloc>> replacements_;
   size_type file_size_;
 };

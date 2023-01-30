@@ -346,7 +346,7 @@ class file_db
     };
 
     auto state_ptr = std::make_unique<state_t>(
-        reader_type(std::move(state.actual_file), std::allocate_shared<replacement_map<typename wal_type::fd_type, rebind_alloc<std::byte>>>(get_allocator(), std::move(state.replacements)), std::move(state.file_size.value_or(0))));
+        reader_type(std::allocate_shared<fd_type>(get_allocator(), std::move(state.actual_file)), std::allocate_shared<replacement_map<typename wal_type::fd_type, rebind_alloc<std::byte>>>(get_allocator(), std::move(state.replacements)), std::move(state.file_size.value_or(0))));
     auto& state_ref = *state_ptr;
     return async_read(
         state_ref.stream,
