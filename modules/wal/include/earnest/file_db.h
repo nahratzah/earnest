@@ -645,9 +645,9 @@ class transaction {
 
     return compute_replacements_map_1_op_(id)
     | asio::deferred(
-        [fdb=this->fdb_, id](std::error_code ec, std::shared_ptr<const typename file_replacements::mapped_type> state) mutable {
+        [fdb=this->fdb_, id, allocator=this->alloc_](std::error_code ec, std::shared_ptr<const typename file_replacements::mapped_type> state) mutable {
           return detail::deferred_on_executor<void(std::error_code, std::shared_ptr<const underlying_fd>, std::shared_ptr<const typename file_replacements::mapped_type>)>(
-              [id](std::error_code ec, std::shared_ptr<file_db> fdb, std::shared_ptr<const typename file_replacements::mapped_type> state) {
+              [id](std::error_code ec, std::shared_ptr<file_db> fdb, std::shared_ptr<const typename file_replacements::mapped_type> state, auto allocator) {
                 assert(fdb->strand_.running_in_this_thread());
 
                 if (!ec && state->exists.has_value() && !state->exists.value()) [[unlikely]]
@@ -658,10 +658,12 @@ class transaction {
                   auto files_iter = fdb->files.find(id);
                   if (files_iter != fdb->files.end())
                     ufd = files_iter->second.fd;
+                  else
+                    ufd = std::allocate_shared<underlying_fd>(allocator, fdb->get_executor());
                 }
                 return asio::deferred.values(ec, std::move(ufd), std::move(state));
               },
-              fdb->strand_, ec, std::move(fdb), std::move(state));
+              fdb->strand_, ec, std::move(fdb), std::move(state), std::move(allocator));
         })
     | asio::deferred(
         [](std::error_code ec, std::shared_ptr<const underlying_fd> ufd, std::shared_ptr<const typename file_replacements::mapped_type> state) {
