@@ -179,7 +179,8 @@ class replacement_map
 : private std::allocator_traits<Alloc>::template rebind_alloc<replacement_map_value<FD>>
 {
   public:
-  using value_type = replacement_map_value<FD>;
+  using fd_type = FD;
+  using value_type = replacement_map_value<fd_type>;
   using reference = value_type&;
   using const_reference = const value_type&;
   using pointer = value_type*;
@@ -320,7 +321,7 @@ class replacement_map
   auto cend() const -> const_iterator { return end(); }
 
   template<typename OtherAlloc>
-  auto merge(const replacement_map<FD, OtherAlloc>& other) -> replacement_map& {
+  auto merge(const replacement_map<fd_type, OtherAlloc>& other) -> replacement_map& {
     std::for_each(other.begin(), other.end(),
         [this](const_reference v) {
           this->insert_(this->make_value_(v));

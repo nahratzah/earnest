@@ -71,7 +71,7 @@ class file_db
   };
 
   struct file {
-    fd_type fd;
+    std::shared_ptr<fd_type> fd;
     bool exists_logically = false;
     std::uint64_t file_size = 0;
   };
@@ -405,13 +405,13 @@ class file_db
                         auto result = std::make_pair(
                             id,
                             file{
-                              .fd{fdb->get_executor()},
+                              .fd=std::allocate_shared<fd_type>(fdb->get_allocator(), fdb->get_executor()),
                               .exists_logically=true,
                             });
 
                         if (id.ns.empty()) {
                           try {
-                            result.second.fd.open(fdb->wal->get_dir(), id.filename, open_mode::READ_WRITE);
+                            result.second.fd->open(fdb->wal->get_dir(), id.filename, open_mode::READ_WRITE);
                           } catch (const std::system_error& ex) {
                             // Recovery will deal with it.
                           }
@@ -420,14 +420,14 @@ class file_db
                           if (ns_iter == fdb->namespaces.end())
                             throw std::system_error(std::make_error_code(std::errc::no_such_file_or_directory));
                           try {
-                            result.second.fd.open(ns_iter->second.d, id.filename, open_mode::READ_WRITE);
+                            result.second.fd->open(ns_iter->second.d, id.filename, open_mode::READ_WRITE);
                           } catch (const std::system_error& ex) {
                             // Recovery will deal with it.
                           }
                         }
 
-                        if (result.second.fd.is_open())
-                          result.second.file_size = result.second.fd.size();
+                        if (result.second.fd->is_open())
+                          result.second.file_size = result.second.fd->size();
                         return result;
                       });
                 } catch (const std::system_error& ex) {
@@ -489,7 +489,11 @@ class transaction {
   // The actual writes are tracked in a replacement map.
   // But the replacement map requires a positional stream, so we have to create one.
   using writes_buffer_type = detail::byte_positional_stream<executor_type, allocator_type>;
-  using writes_map = detail::replacement_map<writes_buffer_type, allocator_type>;
+  using writes_map = std::unordered_map<
+      file_id, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>,
+      std::hash<file_id>,
+      std::equal_to<file_id>,
+      typename std::allocator_traits<allocator_type>::template rebind_alloc<std::pair<const file_id, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>>>>;
 
   using file_replacements = std::unordered_map<
       file_id,
@@ -516,6 +520,13 @@ class transaction {
     typename file_db::wal_type::tx_lock lock;
   };
 
+  using raw_reader_type = detail::replacement_map_reader<
+      const typename file_db::fd_type,
+      typename file_replacements::mapped_type::fd_type,
+      allocator_type>;
+
+  using reader_type = detail::replacement_map_reader<raw_reader_type, writes_buffer_type, allocator_type>;
+
   public:
   transaction(const transaction&) = delete;
   transaction(transaction&&) = default;
@@ -523,6 +534,7 @@ class transaction {
   private:
   transaction(std::shared_ptr<FileDB> fdb, isolation i, std::optional<std::unordered_set<file_id>> fileset = std::nullopt, allocator_type allocator = allocator_type())
   : fdb_(fdb),
+    alloc_(allocator),
     i_(i),
     writes_buffer_(std::allocate_shared<writes_buffer_type>(allocator, fdb->get_executor(), allocator)),
     read_barrier_(fdb->get_executor(), allocator)
@@ -544,6 +556,18 @@ class transaction {
     }
   }
 
+  public:
+  template<typename Alloc, typename CompletionToken>
+  auto async_file_contents(file_id id, Alloc alloc, CompletionToken&& token) {
+    return async_file_contents_op_(std::move(id), std::move(alloc)) | std::forward<CompletionToken>(token);
+  }
+
+  template<typename CompletionToken>
+  auto async_file_contents(file_id id, CompletionToken&& token) {
+    return async_file_contents(std::move(id), std::allocator<std::byte>(), std::forward<CompletionToken>(token));
+  }
+
+  private:
   auto compute_replacements_map_op_(std::shared_ptr<file_db> fdb, std::optional<std::unordered_set<file_id>> fileset, allocator_type allocator) {
     auto repl_map = std::allocate_shared<locked_file_replacements>(allocator, allocator);
     return fdb->async_tx(
@@ -567,12 +591,12 @@ class transaction {
         });
   }
 
-  auto compute_replacements_map_1_op_(file_id id, allocator_type allocator) {
-    using result_map_ptr = std::shared_ptr<const locked_file_recover_state>;
+  auto compute_replacements_map_1_op_(file_id id) {
+    using result_map_ptr = std::shared_ptr<const typename file_replacements::mapped_type>;
 
     return read_barrier_.async_on_ready(asio::deferred)
     | asio::deferred(
-        [fdb=this->fdb_, id, allocator](std::error_code input_ec, std::shared_ptr<const locked_file_replacements> repl_maps) {
+        [fdb=this->fdb_, id, allocator=this->alloc_](std::error_code input_ec, std::shared_ptr<const locked_file_replacements> repl_maps) {
           return asio::async_initiate<decltype(asio::deferred), void(std::error_code, result_map_ptr)>(
               [id, repl_maps, fdb, allocator](auto handler, std::error_code input_ec) {
                 auto wrapped_handler = detail::completion_handler_fun(std::move(handler), fdb->get_executor());
@@ -593,9 +617,12 @@ class transaction {
                             },
                             record);
                       },
-                      completion_wrapper<void(std::error_code)>(
+                      completion_wrapper<void(std::error_code, typename file_db::wal_type::tx_lock)>(
                           std::move(wrapped_handler),
-                          [repl_map](auto handler, std::error_code ec) {
+                          [repl_map](auto handler, std::error_code ec, typename file_db::wal_type::tx_lock lock) {
+                            if (!ec && !repl_map->frs.exists.value_or(true))
+                              ec = make_error_code(std::errc::no_such_file_or_directory);
+                            repl_map->lock = std::move(lock);
                             std::invoke(handler, ec, result_map_ptr(repl_map, &repl_map->frs));
                           }));
                 } else {
@@ -605,7 +632,7 @@ class transaction {
                   if (iter == repl_maps->fr.end() || !iter->second.exists.value_or(true))
                     ec = make_error_code(std::errc::no_such_file_or_directory);
                   else
-                    result = std::shared_ptr(repl_maps, &iter->second);
+                    result = result_map_ptr(repl_maps, &iter->second);
                   std::invoke(wrapped_handler, std::move(ec), std::move(result));
                 }
               },
@@ -613,7 +640,106 @@ class transaction {
         });
   }
 
+  auto get_raw_reader_op_(file_id id) {
+    using underlying_fd = typename file_db::fd_type;
+
+    return compute_replacements_map_1_op_(id)
+    | asio::deferred(
+        [fdb=this->fdb_, id](std::error_code ec, std::shared_ptr<const typename file_replacements::mapped_type> state) mutable {
+          return detail::deferred_on_executor<void(std::error_code, std::shared_ptr<const underlying_fd>, std::shared_ptr<const typename file_replacements::mapped_type>)>(
+              [id](std::error_code ec, std::shared_ptr<file_db> fdb, std::shared_ptr<const typename file_replacements::mapped_type> state) {
+                assert(fdb->strand_.running_in_this_thread());
+
+                if (!ec && state->exists.has_value() && !state->exists.value()) [[unlikely]]
+                  ec = std::make_error_code(std::errc::no_such_file_or_directory);
+
+                std::shared_ptr<const underlying_fd> ufd;
+                if (!ec) [[likely]] {
+                  auto files_iter = fdb->files.find(id);
+                  if (files_iter != fdb->files.end())
+                    ufd = files_iter->second.fd;
+                }
+                return asio::deferred.values(ec, std::move(ufd), std::move(state));
+              },
+              fdb->strand_, ec, std::move(fdb), std::move(state));
+        })
+    | asio::deferred(
+        [](std::error_code ec, std::shared_ptr<const underlying_fd> ufd, std::shared_ptr<const typename file_replacements::mapped_type> state) {
+          return asio::deferred.values(
+              ec,
+              raw_reader_type(
+                  ufd,
+                  std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>>(state, &state->replacements),
+                  state->file_size.value_or(ufd != nullptr && ufd->is_open() ? ufd->size() : 0u)));
+        });
+  }
+
+  auto get_reader_op_(file_id id) {
+    std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> tx_writes;
+    auto writes_iter = writes_map_.find(id);
+    if (writes_iter != writes_map_.end()) tx_writes = writes_iter->second;
+
+    return get_raw_reader_op_(std::move(id))
+    | asio::deferred(
+        [tx_writes=std::move(tx_writes), allocator=this->alloc_](std::error_code ec, raw_reader_type raw_reader) {
+          auto file_size = raw_reader.size();
+          return asio::deferred.values(
+              ec,
+              reader_type(
+                  std::allocate_shared<raw_reader_type>(allocator, std::move(raw_reader)),
+                  tx_writes,
+                  file_size));
+        });
+  }
+
+  template<typename Alloc>
+  auto async_file_contents_op_(file_id id, Alloc alloc) {
+    using bytes_vec = std::vector<std::byte, typename std::allocator_traits<Alloc>::template rebind_alloc<std::byte>>;
+
+    return get_reader_op_(std::move(id)) |
+    asio::deferred(
+        [alloc=std::move(alloc), fdb=this->fdb_](std::error_code ec, reader_type r) mutable {
+          return asio::async_initiate<decltype(asio::deferred), void(std::error_code, bytes_vec)>(
+              [](auto handler, auto alloc, std::error_code ec, reader_type r, auto fdb_ex) {
+                if (ec) {
+                  std::invoke(
+                      detail::completion_handler_fun(handler, fdb_ex),
+                      ec, bytes_vec(std::move(alloc)));
+                  return;
+                }
+
+                struct state {
+                  state(reader_type&& r, Alloc alloc)
+                  : r(std::move(r)),
+                    bytes(std::move(alloc))
+                  {
+                    this->bytes.resize(this->r.size());
+                  }
+
+                  reader_type r;
+                  bytes_vec bytes;
+                };
+
+                auto state_ptr = std::make_unique<state>(std::move(r), alloc);
+                auto& state_ref = *state_ptr;
+
+                asio::async_read_at(
+                    state_ref.r,
+                    0,
+                    asio::buffer(state_ref.bytes),
+                    detail::completion_wrapper<void(std::error_code, std::size_t)>(
+                        std::move(handler),
+                        [state_ptr=std::move(state_ptr)](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                          assert(ec || nbytes == state_ptr->bytes.size());
+                          std::invoke(handler, ec, std::move(state_ptr->bytes));
+                        }));
+              },
+              asio::deferred, std::move(alloc), std::move(ec), std::move(r), fdb->get_executor());
+        });
+  }
+
   const std::shared_ptr<FileDB> fdb_;
+  allocator_type alloc_;
   const isolation i_;
   const std::shared_ptr<writes_buffer_type> writes_buffer_;
   const writes_map writes_map_;

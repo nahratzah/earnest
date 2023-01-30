@@ -29,13 +29,14 @@ class replacement_map_reader {
   using size_type = typename replacement_map<WalFD, Alloc>::size_type;
   using executor_type = typename std::remove_cvref_t<UnderlyingFd>::executor_type;
 
-  replacement_map_reader(std::shared_ptr<UnderlyingFd> fd, std::shared_ptr<replacement_map<WalFD, Alloc>> replacements, size_type file_size)
+  replacement_map_reader(std::shared_ptr<UnderlyingFd> fd, std::shared_ptr<const replacement_map<WalFD, Alloc>> replacements, size_type file_size)
   : underlying_fd_(std::move(fd)),
     replacements_(std::move(replacements)),
     file_size_(std::move(file_size))
   {}
 
   auto get_executor() const -> executor_type { return underlying_fd_->get_executor(); }
+  auto size() const -> size_type { return file_size_; }
 
   template<typename MB, typename CompletionToken>
   auto async_read_some_at(offset_type off, MB&& mb, CompletionToken&& token) const {
@@ -58,6 +59,12 @@ class replacement_map_reader {
           // Clamp rlen to the file size.
           std::size_t rlen = asio::buffer_size(mb);
           if (rlen > file_size_ - off) rlen = file_size_ - off;
+          std::vector<asio::mutable_buffer> bufs = mb_to_bufvector_(std::move(mb), rlen);
+
+          if (this->replacements_ == nullptr) {
+            this->underlying_fd_->async_read_some_at(off, std::move(bufs), std::move(handler));
+            return;
+          }
 
           auto barrier = make_completion_barrier(
               completion_wrapper<void(std::error_code)>(
@@ -67,7 +74,6 @@ class replacement_map_reader {
                   }),
               this->get_executor());
 
-          std::vector<asio::mutable_buffer> bufs = mb_to_bufvector_(std::move(mb), rlen);
           typename replacement_map<WalFD, Alloc>::const_iterator repl_iter = this->replacements_->find(off);
           // We fan out the read, so that IO won't suffer (much) if it has lots of small edits.
           while (!bufs.empty()) {
@@ -176,7 +182,7 @@ class replacement_map_reader {
   }
 
   std::shared_ptr<UnderlyingFd> underlying_fd_;
-  std::shared_ptr<replacement_map<WalFD, Alloc>> replacements_;
+  std::shared_ptr<const replacement_map<WalFD, Alloc>> replacements_;
   size_type file_size_;
 };
 

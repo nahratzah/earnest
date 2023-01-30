@@ -4,6 +4,7 @@
 #include "UnitTest++/UnitTest++.h"
 
 #include <asio/io_context.hpp>
+#include <asio/use_future.hpp>
 
 TEST(tx) {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("tx");
@@ -18,6 +19,10 @@ TEST(tx) {
   ioctx.restart();
 
   auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
-  // XXX do something?
+  auto contents = tx.async_file_contents(
+      earnest::file_id("", std::string(earnest::file_db<asio::io_context::executor_type>::namespaces_filename)),
+      asio::use_future);
   ioctx.run();
+
+  CHECK(!contents.get().empty());
 }
