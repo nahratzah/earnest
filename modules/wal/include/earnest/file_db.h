@@ -536,7 +536,7 @@ class transaction {
   : fdb_(fdb),
     alloc_(allocator),
     i_(i),
-    writes_buffer_(std::allocate_shared<writes_buffer_type>(allocator, fdb->get_executor(), allocator)),
+    writes_map_(allocator),
     read_barrier_(fdb->get_executor(), allocator)
   {
     switch (i_) {
@@ -743,7 +743,6 @@ class transaction {
   const std::shared_ptr<FileDB> fdb_;
   allocator_type alloc_;
   const isolation i_;
-  const std::shared_ptr<writes_buffer_type> writes_buffer_;
   const writes_map writes_map_;
   detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
 };
