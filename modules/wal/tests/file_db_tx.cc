@@ -19,10 +19,17 @@ TEST(tx) {
   ioctx.restart();
 
   auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
-  auto contents = tx.async_file_contents(
+  std::vector<std::byte> contents;
+  bool callback_called = false;
+  tx.async_file_contents(
       earnest::file_id("", std::string(earnest::file_db<asio::io_context::executor_type>::namespaces_filename)),
-      asio::use_future);
+      [&](std::error_code ec, std::vector<std::byte> bytes) {
+        CHECK_EQUAL(std::error_code(), ec);
+        contents = std::move(bytes);
+        callback_called = true;
+      });
   ioctx.run();
 
-  CHECK(!contents.get().empty());
+  CHECK(callback_called);
+  CHECK(!contents.empty());
 }
