@@ -518,8 +518,9 @@ class transaction {
 
   public:
   transaction(const transaction&) = delete;
-  transaction(transaction&&) = delete;
+  transaction(transaction&&) = default;
 
+  private:
   transaction(std::shared_ptr<FileDB> fdb, isolation i, std::optional<std::unordered_set<file_id>> fileset = std::nullopt, allocator_type allocator = allocator_type())
   : fdb_(fdb),
     i_(i),
@@ -543,7 +544,6 @@ class transaction {
     }
   }
 
-  private:
   auto compute_replacements_map_op_(std::shared_ptr<file_db> fdb, std::optional<std::unordered_set<file_id>> fileset, allocator_type allocator) {
     auto repl_map = std::allocate_shared<locked_file_replacements>(allocator, allocator);
     return fdb->async_tx(
