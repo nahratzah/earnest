@@ -24,6 +24,7 @@
 #include <earnest/detail/completion_wrapper.h>
 #include <earnest/detail/deferred_on_executor.h>
 #include <earnest/detail/file_recover_state.h>
+#include <earnest/detail/monitor.h>
 #include <earnest/detail/namespace_map.h>
 #include <earnest/detail/positional_stream_adapter.h>
 #include <earnest/detail/replacement_map.h>
@@ -526,6 +527,7 @@ class transaction {
       allocator_type>;
 
   using reader_type = detail::replacement_map_reader<raw_reader_type, writes_buffer_type, allocator_type>;
+  using monitor_type = detail::monitor<executor_type, allocator_type>;
 
   public:
   transaction(const transaction&) = delete;
@@ -537,7 +539,8 @@ class transaction {
     alloc_(allocator),
     i_(i),
     writes_map_(allocator),
-    read_barrier_(fdb->get_executor(), allocator)
+    read_barrier_(fdb->get_executor(), allocator),
+    writes_mon_(fdb->get_executor(), allocator)
   {
     switch (i_) {
       default:
@@ -683,14 +686,16 @@ class transaction {
 
     return get_raw_reader_op_(std::move(id))
     | asio::deferred(
-        [tx_writes=std::move(tx_writes), allocator=this->alloc_](std::error_code ec, raw_reader_type raw_reader) {
+        [writes_mon=this->writes_mon_, tx_writes=std::move(tx_writes), allocator=this->alloc_](std::error_code ec, raw_reader_type raw_reader) mutable {
           auto file_size = raw_reader.size();
-          return asio::deferred.values(
-              ec,
-              reader_type(
-                  std::allocate_shared<raw_reader_type>(allocator, std::move(raw_reader)),
-                  tx_writes,
-                  file_size));
+          return writes_mon.async_shared(
+              asio::append(
+                  asio::deferred,
+                  ec,
+                  reader_type(
+                      std::allocate_shared<raw_reader_type>(allocator, std::move(raw_reader)),
+                      tx_writes,
+                      file_size)));
         });
   }
 
@@ -698,11 +703,11 @@ class transaction {
   auto async_file_contents_op_(file_id id, Alloc alloc) {
     using bytes_vec = std::vector<std::byte, typename std::allocator_traits<Alloc>::template rebind_alloc<std::byte>>;
 
-    return get_reader_op_(std::move(id)) |
-    asio::deferred(
-        [alloc=std::move(alloc), fdb=this->fdb_](std::error_code ec, reader_type r) mutable {
+    return get_reader_op_(std::move(id))
+    | asio::deferred(
+        [alloc=std::move(alloc), fdb=this->fdb_](typename monitor_type::shared_lock lock, std::error_code ec, reader_type r) mutable {
           return asio::async_initiate<decltype(asio::deferred), void(std::error_code, bytes_vec)>(
-              [](auto handler, auto alloc, std::error_code ec, reader_type r, auto fdb_ex) {
+              [](auto handler, auto alloc, std::error_code ec, reader_type r, auto fdb_ex, typename monitor_type::shared_lock lock) {
                 if (ec) {
                   std::invoke(
                       detail::completion_handler_fun(handler, fdb_ex),
@@ -731,12 +736,14 @@ class transaction {
                     asio::buffer(state_ref.bytes),
                     detail::completion_wrapper<void(std::error_code, std::size_t)>(
                         std::move(handler),
-                        [state_ptr=std::move(state_ptr)](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                        [lock, state_ptr=std::move(state_ptr)](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
                           assert(ec || nbytes == state_ptr->bytes.size());
+                          lock.reset(); // No longer need the lock.
+                                        // And we want the compiler to not complain, so we must use the variable.
                           std::invoke(handler, ec, std::move(state_ptr->bytes));
                         }));
               },
-              asio::deferred, std::move(alloc), std::move(ec), std::move(r), fdb->get_executor());
+              asio::deferred, std::move(alloc), std::move(ec), std::move(r), fdb->get_executor(), lock);
         });
   }
 
@@ -745,6 +752,7 @@ class transaction {
   const isolation i_;
   const writes_map writes_map_;
   detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
+  monitor_type writes_mon_;
 };
 
 
