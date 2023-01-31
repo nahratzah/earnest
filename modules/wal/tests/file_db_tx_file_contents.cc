@@ -22,8 +22,8 @@ inline auto str_to_byte_vector(std::string_view s) -> std::vector<std::byte> {
   return v;
 }
 
-TEST(tx) {
-  const earnest::dir testdir = ensure_dir_exists_and_is_empty("tx");
+TEST(tx_file_contents) {
+  const earnest::dir testdir = ensure_dir_exists_and_is_empty("tx_file_contents");
   static const std::string text = "bla bla chocoladevla";
 
   asio::io_context ioctx;

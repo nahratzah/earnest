@@ -67,6 +67,6 @@ if (UnitTest++_FOUND)
       tests/file_db.cc
       tests/file_db_create_file_db.cc
       tests/file_db_open_file_db.cc
-      tests/file_db_tx.cc)
+      tests/file_db_tx_file_contents.cc)
   add_test(NAME file_db COMMAND file_db_test "${CMAKE_CURRENT_BINARY_DIR}/file_db_test_tmpdir")
 endif ()
