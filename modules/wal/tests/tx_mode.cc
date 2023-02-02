@@ -4,24 +4,6 @@
 
 namespace earnest {
 
-inline auto operator<<(std::ostream& o, tx_mode m) -> std::ostream& {
-  switch (m) {
-    case tx_mode::decline:
-      o << "tx_mode::decline";
-      break;
-    case tx_mode::read_only:
-      o << "tx_mode::read_only";
-      break;
-    case tx_mode::write_only:
-      o << tx_mode::write_only;
-      break;
-    case tx_mode::read_write:
-      o << tx_mode::read_write;
-      break;
-  }
-  return o;
-}
-
 TEST(read_permitted) {
   CHECK(!read_permitted(tx_mode::decline));
   CHECK(read_permitted(tx_mode::read_only));

@@ -72,7 +72,6 @@ install (TARGETS earnest DESTINATION lib)
 install (FILES
   include/earnest/shared_resource_allocator.h
   include/earnest/isolation.h
-  include/earnest/tx_mode.h
   DESTINATION include/earnest)
 install (FILES
   include/earnest/detail/allocated_buffer.h

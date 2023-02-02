@@ -33,6 +33,12 @@ if (UnitTest++_FOUND)
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wal_file_test_tmpdir")
   file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/file_db_test_tmpdir")
 
+  add_executable(tx_mode_test)
+  target_include_directories(tx_mode_test PRIVATE ${UTPP_INCLUDE_DIRS})
+  target_link_libraries(tx_mode_test PUBLIC wal io UnitTest++)
+  target_sources(tx_mode_test PRIVATE tests/tx_mode.cc)
+  add_test(NAME tx_mode COMMAND tx_mode_test)
+
   add_executable(replacement_map_test)
   target_include_directories(replacement_map_test PRIVATE ${UTPP_INCLUDE_DIRS})
   target_link_libraries(replacement_map_test PUBLIC wal io UnitTest++)

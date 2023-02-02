@@ -10,6 +10,8 @@ namespace earnest {
 enum class file_db_errc {
   unrecoverable,
   lock_failure,
+  read_not_permitted,
+  write_not_permitted,
 };
 
 inline auto file_db_category() -> const std::error_category& {
@@ -33,6 +35,10 @@ inline auto file_db_category() -> const std::error_category& {
           return "File-DB is unrecoverable"s;
         case file_db_errc::lock_failure:
           return "File-DB unable to lock"s;
+        case file_db_errc::read_not_permitted:
+          return "File-DB transaction does not have read permission"s;
+        case file_db_errc::write_not_permitted:
+          return "File-DB transaction does not have write permission"s;
       }
     }
   };

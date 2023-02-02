@@ -34,6 +34,7 @@
 #include <earnest/file_db_error.h>
 #include <earnest/file_id.h>
 #include <earnest/isolation.h>
+#include <earnest/tx_mode.h>
 
 namespace earnest {
 
@@ -177,10 +178,11 @@ class file_db
   }
 
   template<typename TxAllocator = std::allocator<std::byte>>
-  auto tx_begin(isolation i, TxAllocator alloc = TxAllocator()) -> transaction<file_db, TxAllocator> {
+  auto tx_begin(isolation i, tx_mode m = tx_mode::read_write, TxAllocator alloc = TxAllocator()) -> transaction<file_db, TxAllocator> {
     return transaction<file_db, TxAllocator>(
         this->shared_from_this(),
         i,
+        m,
         std::nullopt,
         std::move(alloc));
   }
@@ -534,10 +536,11 @@ class transaction {
   transaction(transaction&&) = default;
 
   private:
-  transaction(std::shared_ptr<FileDB> fdb, isolation i, std::optional<std::unordered_set<file_id>> fileset = std::nullopt, allocator_type allocator = allocator_type())
+  transaction(std::shared_ptr<FileDB> fdb, isolation i, tx_mode m, std::optional<std::unordered_set<file_id>> fileset = std::nullopt, allocator_type allocator = allocator_type())
   : fdb_(fdb),
     alloc_(allocator),
     i_(i),
+    m_(m),
     writes_map_(allocator),
     read_barrier_(fdb->get_executor(), allocator),
     writes_mon_(fdb->get_executor(), allocator)
@@ -551,10 +554,16 @@ class transaction {
         }
         break;
       case isolation::read_commited:
-        std::invoke(read_barrier_, std::error_code(), nullptr);
+        if (read_permitted(m))
+          std::invoke(read_barrier_, std::error_code(), nullptr);
+        else
+          std::invoke(read_barrier_, make_error_code(file_db_errc::read_not_permitted), nullptr);
         break;
       case isolation::repeatable_read:
-        compute_replacements_map_op_(fdb, std::move(fileset), allocator) | read_barrier_;
+        if (read_permitted(m))
+          compute_replacements_map_op_(fdb, std::move(fileset), allocator) | read_barrier_;
+        else
+          std::invoke(read_barrier_, make_error_code(file_db_errc::read_not_permitted), nullptr);
         break;
     }
   }
@@ -750,6 +759,7 @@ class transaction {
   const std::shared_ptr<FileDB> fdb_;
   allocator_type alloc_;
   const isolation i_;
+  const tx_mode m_;
   const writes_map writes_map_;
   mutable detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
   mutable monitor_type writes_mon_;
