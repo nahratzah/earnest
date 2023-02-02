@@ -561,7 +561,7 @@ class transaction {
 
   public:
   template<typename Alloc, typename CompletionToken>
-  auto async_file_contents(file_id id, Alloc alloc, CompletionToken&& token) {
+  auto async_file_contents(file_id id, Alloc alloc, CompletionToken&& token) const {
     return async_file_contents_op_(std::move(id), std::move(alloc)) | std::forward<CompletionToken>(token);
   }
 
@@ -594,7 +594,7 @@ class transaction {
         });
   }
 
-  auto compute_replacements_map_1_op_(file_id id) {
+  auto compute_replacements_map_1_op_(file_id id) const {
     using result_map_ptr = std::shared_ptr<const typename file_replacements::mapped_type>;
 
     return read_barrier_.async_on_ready(asio::deferred)
@@ -643,14 +643,14 @@ class transaction {
         });
   }
 
-  auto get_raw_reader_op_(file_id id) {
+  auto get_raw_reader_op_(file_id id) const {
     using underlying_fd = typename file_db::fd_type;
 
     return compute_replacements_map_1_op_(id)
     | asio::deferred(
         [fdb=this->fdb_, id, allocator=this->alloc_](std::error_code ec, std::shared_ptr<const typename file_replacements::mapped_type> state) mutable {
           return detail::deferred_on_executor<void(std::error_code, std::shared_ptr<const underlying_fd>, std::shared_ptr<const typename file_replacements::mapped_type>)>(
-              [id](std::error_code ec, std::shared_ptr<file_db> fdb, std::shared_ptr<const typename file_replacements::mapped_type> state, auto allocator) {
+              [id](std::error_code ec, std::shared_ptr<const file_db> fdb, std::shared_ptr<const typename file_replacements::mapped_type> state, auto allocator) {
                 assert(fdb->strand_.running_in_this_thread());
 
                 if (!ec && state->exists.has_value() && !state->exists.value()) [[unlikely]]
@@ -679,7 +679,7 @@ class transaction {
         });
   }
 
-  auto get_reader_op_(file_id id) {
+  auto get_reader_op_(file_id id) const {
     std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> tx_writes;
     auto writes_iter = writes_map_.find(id);
     if (writes_iter != writes_map_.end()) tx_writes = writes_iter->second;
@@ -700,7 +700,7 @@ class transaction {
   }
 
   template<typename Alloc>
-  auto async_file_contents_op_(file_id id, Alloc alloc) {
+  auto async_file_contents_op_(file_id id, Alloc alloc) const {
     using bytes_vec = std::vector<std::byte, typename std::allocator_traits<Alloc>::template rebind_alloc<std::byte>>;
 
     return get_reader_op_(std::move(id))
@@ -751,8 +751,8 @@ class transaction {
   allocator_type alloc_;
   const isolation i_;
   const writes_map writes_map_;
-  detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
-  monitor_type writes_mon_;
+  mutable detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
+  mutable monitor_type writes_mon_;
 };
 
 
