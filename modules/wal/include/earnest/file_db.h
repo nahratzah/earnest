@@ -679,12 +679,16 @@ class transaction {
         })
     | asio::deferred(
         [](std::error_code ec, std::shared_ptr<const underlying_fd> ufd, std::shared_ptr<const typename file_replacements::mapped_type> state) {
+          typename raw_reader_type::size_type filesize = 0;
+          std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>> replacements;
+          if (state != nullptr) [[likely]] {
+            filesize = state->file_size.value_or(ufd != nullptr && ufd->is_open() ? ufd->size() : 0u);
+            replacements = std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>>(state, &state->replacements);
+          }
+
           return asio::deferred.values(
               ec,
-              raw_reader_type(
-                  ufd,
-                  std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>>(state, &state->replacements),
-                  state->file_size.value_or(ufd != nullptr && ufd->is_open() ? ufd->size() : 0u)));
+              raw_reader_type(ufd, std::move(replacements), filesize));
         });
   }
 
@@ -753,6 +757,37 @@ class transaction {
                         }));
               },
               asio::deferred, std::move(alloc), std::move(ec), std::move(r), fdb->get_executor(), lock);
+        });
+  }
+
+  template<typename MB>
+  auto async_file_read_some_op_(file_id id, std::uint64_t offset, MB&& buffers) const {
+    return get_reader_op_(std::move(id))
+    | asio::deferred(
+        [ fdb=this->fdb_,
+          buffers=std::forward<MB>(buffers),
+          offset
+        ](typename monitor_type::shared_lock lock, std::error_code ec, reader_type r) mutable {
+          return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
+              [](auto handler, std::error_code input_ec, std::uint64_t offset, auto mb, typename monitor_type::shared_lock lock, reader_type r, auto fdb_ex) {
+                if (input_ec) {
+                  std::invoke(detail::completion_handler_fun(std::move(handler), std::move(fdb_ex)), input_ec, std::size_t(0));
+                  return;
+                }
+
+                auto r_ptr = std::make_unique<reader_type>(std::move(r));
+                auto& r_ref = *r_ptr;
+
+                r_ref->async_read_some_at(offset, std::move(mb),
+                    completion_wrapper<void(std::error_code, std::size_t)>(
+                        std::move(handler),
+                        [lock=std::move(lock), r_ptr=std::move(r_ptr)](auto handler, std::error_code ec, std::size_t nbytes) mutable {
+                          lock.reset();
+                          r_ptr.reset();
+                          std::invoke(handler, ec, nbytes);
+                        }));
+              },
+              asio::deferred, ec, offset, std::move(buffers), std::move(lock), std::move(r), fdb->get_executor());
         });
   }
 
