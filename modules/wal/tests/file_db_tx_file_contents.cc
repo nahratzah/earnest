@@ -154,7 +154,6 @@ TEST_FIXTURE(tx_file_contents, modifications_are_local) {
   ioctx.restart();
 
   std::string contents;
-  bool callback_called = false;
   tx2.async_file_contents(
       testfile,
       [&](std::error_code ec, std::vector<std::byte> bytes) {
