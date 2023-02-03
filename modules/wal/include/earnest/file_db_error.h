@@ -23,7 +23,7 @@ inline auto file_db_category() -> const std::error_category& {
     constexpr category_impl() noexcept = default;
 
     auto name() const noexcept -> const char* override {
-      return "earnest::wal";
+      return "earnest::file_db";
     }
 
     auto message(int condition) const -> std::string override {

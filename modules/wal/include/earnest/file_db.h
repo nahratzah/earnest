@@ -494,11 +494,21 @@ class transaction {
   // The actual writes are tracked in a replacement map.
   // But the replacement map requires a positional stream, so we have to create one.
   using writes_buffer_type = detail::byte_positional_stream<executor_type, allocator_type>;
+
+  struct writes_map_element {
+    writes_map_element(allocator_type alloc)
+    : replacements(alloc)
+    {}
+
+    detail::replacement_map<writes_buffer_type, allocator_type> replacements;
+    std::optional<std::uint64_t> file_size = std::nullopt;
+  };
+
   using writes_map = std::unordered_map<
-      file_id, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>,
+      file_id, std::shared_ptr<writes_map_element>,
       std::hash<file_id>,
       std::equal_to<file_id>,
-      typename std::allocator_traits<allocator_type>::template rebind_alloc<std::pair<const file_id, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>>>>;
+      typename std::allocator_traits<allocator_type>::template rebind_alloc<std::pair<const file_id, std::shared_ptr<writes_map_element>>>>;
 
   using file_replacements = std::unordered_map<
       file_id,
@@ -532,9 +542,10 @@ class transaction {
 
   using reader_type = detail::replacement_map_reader<raw_reader_type, writes_buffer_type, allocator_type>;
   using monitor_type = detail::monitor<executor_type, allocator_type>;
+  class file;
 
   public:
-  transaction(const transaction&) = delete;
+  transaction(const transaction&) = default;
   transaction(transaction&&) = default;
 
   private:
@@ -556,16 +567,10 @@ class transaction {
         }
         break;
       case isolation::read_commited:
-        if (read_permitted(m))
-          std::invoke(read_barrier_, std::error_code(), nullptr);
-        else
-          std::invoke(read_barrier_, make_error_code(file_db_errc::read_not_permitted), nullptr);
+        std::invoke(read_barrier_, std::error_code(), nullptr);
         break;
       case isolation::repeatable_read:
-        if (read_permitted(m))
-          compute_replacements_map_op_(fdb, std::move(fileset), allocator) | read_barrier_;
-        else
-          std::invoke(read_barrier_, make_error_code(file_db_errc::read_not_permitted), nullptr);
+        compute_replacements_map_op_(fdb, std::move(fileset), allocator) | read_barrier_;
         break;
     }
   }
@@ -579,6 +584,13 @@ class transaction {
   template<typename CompletionToken>
   auto async_file_contents(file_id id, CompletionToken&& token) {
     return async_file_contents(std::move(id), std::allocator<std::byte>(), std::forward<CompletionToken>(token));
+  }
+
+  auto get_allocator() const -> allocator_type { return alloc_; }
+  auto get_executor() const -> executor_type { return fdb_->get_executor(); }
+
+  auto operator[](file_id id) -> file {
+    return file(*this, std::move(id));
   }
 
   private:
@@ -700,10 +712,13 @@ class transaction {
         [ writes_mon=this->writes_mon_,
           wmap=this->writes_map_,
           allocator=this->alloc_,
+          m=this->m_,
           id
         ](std::error_code ec, raw_reader_type raw_reader) mutable {
           return asio::async_initiate<decltype(asio::deferred), void(typename monitor_type::shared_lock, std::error_code, reader_type)>(
-              [allocator](auto handler, std::error_code ec, raw_reader_type raw_reader, auto writes_mon, std::shared_ptr<writes_map> wmap, file_id id) {
+              [allocator, m](auto handler, std::error_code ec, raw_reader_type raw_reader, auto writes_mon, std::shared_ptr<const writes_map> wmap, file_id id) {
+                if (!read_permitted(m)) ec = make_error_code(file_db_errc::read_not_permitted);
+
                 writes_mon.async_shared(
                     detail::completion_wrapper<void(typename monitor_type::shared_lock)>(
                         std::move(handler),
@@ -711,17 +726,17 @@ class transaction {
                           id=std::move(id),
                           raw_reader=std::move(raw_reader)
                         ](auto handler, typename monitor_type::shared_lock lock) mutable {
-                          std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> tx_writes;
+                          std::shared_ptr<writes_map_element> tx_writes;
                           auto writes_iter = wmap->find(id);
                           if (writes_iter != wmap->end()) tx_writes = writes_iter->second;
 
-                          auto file_size = raw_reader.size();
+                          auto file_size = tx_writes == nullptr ? raw_reader.size() : tx_writes->file_size.value_or(raw_reader.size());
                           std::invoke(handler,
                               std::move(lock),
                               ec,
                               reader_type(
                                   std::allocate_shared<raw_reader_type>(allocator, std::move(raw_reader)),
-                                  tx_writes,
+                                  std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>(tx_writes, &tx_writes->replacements),
                                   file_size));
                         }));
               },
@@ -735,10 +750,13 @@ class transaction {
         [ writes_mon=this->writes_mon_,
           wmap=this->writes_map_,
           allocator=this->alloc_,
+          m=this->m_,
           id
         ](std::error_code ec, raw_reader_type raw_reader) mutable {
-          return asio::async_initiate<decltype(asio::deferred), void(typename monitor_type::exclusive_lock, std::error_code, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>, typename raw_reader_type::size_type)>(
-              [allocator](auto handler, std::error_code ec, raw_reader_type raw_reader, auto writes_mon, std::shared_ptr<writes_map> wmap, file_id id) {
+          return asio::async_initiate<decltype(asio::deferred), void(typename monitor_type::exclusive_lock, std::error_code, std::shared_ptr<writes_map_element>, typename raw_reader_type::size_type)>(
+              [allocator, m](auto handler, std::error_code ec, raw_reader_type raw_reader, auto writes_mon, std::shared_ptr<writes_map> wmap, file_id id) {
+                if (!write_permitted(m)) ec = make_error_code(file_db_errc::write_not_permitted);
+
                 writes_mon.async_exclusive(
                     detail::completion_wrapper<void(typename monitor_type::exclusive_lock)>(
                         std::move(handler),
@@ -746,18 +764,18 @@ class transaction {
                           id=std::move(id),
                           raw_reader=std::move(raw_reader)
                         ](auto handler, typename monitor_type::exclusive_lock lock) mutable {
-                          std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> tx_writes;
+                          std::shared_ptr<writes_map_element> tx_writes;
                           auto writes_iter = wmap->find(id);
                           if (writes_iter == wmap->end()) {
                             bool inserted;
                             std::tie(writes_iter, inserted) = wmap->emplace(
                                 std::move(id),
-                                std::allocate_shared<detail::replacement_map<writes_buffer_type, allocator_type>>(allocator, allocator));
+                                std::allocate_shared<writes_map_element>(allocator, allocator));
                             assert(inserted);
                           }
                           tx_writes = writes_iter->second;
 
-                          auto file_size = raw_reader.size();
+                          auto file_size = tx_writes == nullptr ? raw_reader.size() : tx_writes->file_size.value_or(raw_reader.size());
                           std::invoke(handler,
                               std::move(lock),
                               ec,
@@ -835,8 +853,8 @@ class transaction {
                 auto r_ptr = std::make_unique<reader_type>(std::move(r));
                 auto& r_ref = *r_ptr;
 
-                r_ref->async_read_some_at(offset, std::move(mb),
-                    completion_wrapper<void(std::error_code, std::size_t)>(
+                r_ref.async_read_some_at(offset, std::move(mb),
+                    detail::completion_wrapper<void(std::error_code, std::size_t)>(
                         std::move(handler),
                         [lock=std::move(lock), r_ptr=std::move(r_ptr)](auto handler, std::error_code ec, std::size_t nbytes) mutable {
                           lock.reset();
@@ -849,7 +867,7 @@ class transaction {
   }
 
   template<typename MB>
-  auto async_file_write_op_(file_id id, std::uint64_t offset, MB&& buffers) {
+  auto async_file_write_some_op_(file_id id, std::uint64_t offset, MB&& buffers) {
     auto buffer = std::allocate_shared<writes_buffer_type>(alloc_, fdb_->get_executor(), alloc_);
     std::error_code ec;
     asio::write_at(*buffer, 0, std::forward<MB>(buffers), asio::transfer_all(), ec);
@@ -859,15 +877,11 @@ class transaction {
         [ fdb=this->fdb_,
           buffer=std::move(buffer),
           write_ec=std::move(ec),
-          offset, m=this->m_
-        ](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> replacements, auto filesize) mutable {
+          offset
+        ](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) mutable {
           return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
-              [m, write_ec, offset, fdb=std::move(fdb), buffer=std::move(buffer)](auto handler, typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> replacements, auto filesize) {
+              [write_ec, offset, fdb=std::move(fdb), buffer=std::move(buffer)](auto handler, typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) {
                 auto wrapped_handler = detail::completion_handler_fun(std::move(handler), std::move(fdb->get_executor()));
-                if (!write_permitted(m)) {
-                  std::invoke(wrapped_handler, make_error_code(file_db_errc::write_not_permitted), 0);
-                  return;
-                }
                 if (ec) {
                   std::invoke(wrapped_handler, ec, 0);
                   return;
@@ -879,12 +893,13 @@ class transaction {
 
                 const auto buffer_size = buffer->cdata().size();
                 // We don't allow writes past the end of a file.
-                if (offset > filesize || buffer_size > filesize - offset) {
+                if (offset > replacements->file_size.value_or(filesize) ||
+                    buffer_size > replacements->file_size.value_or(filesize) - offset) {
                   std::invoke(wrapped_handler, write_ec, 0);
                   return;
                 }
 
-                replacements->insert(offset, 0, buffer_size, std::move(buffer));
+                replacements->replacements.insert(offset, 0, buffer_size, std::move(buffer));
                 lock.reset();
                 std::invoke(wrapped_handler, std::error_code(), buffer_size);
               },
@@ -892,13 +907,53 @@ class transaction {
         });
   }
 
-  const std::shared_ptr<FileDB> fdb_;
+  std::shared_ptr<FileDB> fdb_;
   allocator_type alloc_;
-  const isolation i_;
-  const tx_mode m_;
-  const std::shared_ptr<writes_map> writes_map_;
+  isolation i_;
+  tx_mode m_;
+  std::shared_ptr<writes_map> writes_map_;
   mutable detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
   mutable monitor_type writes_mon_;
+};
+
+
+template<typename FileDB, typename Allocator>
+class transaction<FileDB, Allocator>::file {
+  template<typename, typename> friend class transaction;
+
+  public:
+  using executor_type = typename transaction::executor_type;
+  using allocator_type = typename transaction::allocator_type;
+
+  private:
+  file(transaction<FileDB, Allocator> tx, file_id id)
+  : tx_(std::move(tx)),
+    id_(std::move(id))
+  {}
+
+  public:
+  auto get_executor() const -> executor_type { return tx_.get_executor(); }
+  auto get_allocator() const -> allocator_type { return tx_.get_allocator(); }
+  auto id() const noexcept -> const file_id& { return id_; }
+
+  template<typename CompletionToken>
+  auto async_truncate(std::uint64_t new_size, CompletionToken&& token) {
+    return tx_.async_truncate_op_(new_size) | std::forward<CompletionToken>(token);
+  }
+
+  template<typename MB, typename CompletionToken>
+  auto async_read_some_at(std::uint64_t offset, MB&& mb, CompletionToken&& token) const {
+    return tx_.async_file_read_some_op_(id_, offset, std::forward<MB>(mb)) | std::forward<CompletionToken>(token);
+  }
+
+  template<typename MB, typename CompletionToken>
+  auto async_write_some_at(std::uint64_t offset, MB&& mb, CompletionToken&& token) {
+    return tx_.async_file_write_some_op_(id_, offset, std::forward<MB>(mb)) | std::forward<CompletionToken>(token);
+  }
+
+  private:
+  transaction<FileDB, Allocator> tx_;
+  file_id id_;
 };
 
 

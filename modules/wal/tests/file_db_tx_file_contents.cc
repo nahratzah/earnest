@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <asio/io_context.hpp>
+#include <asio/read_at.hpp>
 #include <asio/use_future.hpp>
 
 class tx_file_contents {
@@ -56,6 +57,68 @@ TEST_FIXTURE(tx_file_contents, read_fails_when_not_permitted) {
   ioctx.run();
 
   CHECK(callback_called);
+}
+
+TEST_FIXTURE(tx_file_contents, can_read_using_file) {
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read, earnest::tx_mode::read_only);
+  auto f = tx[testfile];
+
+  bool callback_called = false;
+  std::string contents;
+  contents.resize(text.size());
+  asio::async_read_at(f, 0, asio::buffer(contents),
+      [&](std::error_code ec, std::size_t nbytes) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK_EQUAL(text.size(), nbytes);
+        callback_called = true;
+      });
+  ioctx.run();
+
+  CHECK(callback_called);
+  CHECK_EQUAL(text, contents);
+}
+
+TEST_FIXTURE(tx_file_contents, modify_file) {
+  using namespace std::literals;
+
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  auto f = tx[testfile];
+
+  bool write_callback_called = false, read_callback_called = false;
+  std::string contents;
+  asio::async_write_at(f, 4, asio::buffer("xxx"sv),
+      [&](std::error_code ec, std::size_t nbytes) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK_EQUAL(3u, nbytes);
+        write_callback_called = true;
+
+        tx.async_file_contents(
+            testfile,
+            [&](std::error_code ec, std::vector<std::byte> bytes) {
+              CHECK_EQUAL(std::error_code(), ec);
+
+              std::cerr << "bytes (" << bytes.size() << " bytes) =";
+              for (std::byte b : bytes)
+                std::cerr << " " << std::hex << static_cast<unsigned int>(static_cast<unsigned char>(b));
+              std::cerr << std::dec << "\n";
+
+              read_callback_called = true;
+
+              std::transform(bytes.begin(), bytes.end(),
+                  std::back_inserter(contents),
+                  [](std::byte b) -> char {
+                    return static_cast<char>(static_cast<unsigned char>(b));
+                  });
+            });
+      });
+  ioctx.run();
+
+  std::string expected = text;
+  expected[4] = expected[5] = expected[6] = 'x';
+
+  CHECK(write_callback_called);
+  CHECK(read_callback_called);
+  CHECK_EQUAL(expected, contents);
 }
 
 inline auto str_to_byte_vector(std::string_view s) -> std::vector<std::byte> {
