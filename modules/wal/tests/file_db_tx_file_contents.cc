@@ -139,6 +139,38 @@ TEST_FIXTURE(tx_file_contents, cannot_modify_file_past_eof) {
   CHECK(callback_called);
 }
 
+TEST_FIXTURE(tx_file_contents, modifications_are_local) {
+  using namespace std::literals;
+
+  auto tx1 = fdb->tx_begin(earnest::isolation::repeatable_read, earnest::tx_mode::write_only);
+  auto tx2 = fdb->tx_begin(earnest::isolation::repeatable_read, earnest::tx_mode::read_only);
+  auto f = tx1[testfile];
+  asio::async_write_at(f, 4, asio::buffer("xxx"sv),
+      [&](std::error_code ec, [[maybe_unused]] std::size_t nbytes) {
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+        REQUIRE CHECK_EQUAL(3u, nbytes);
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  std::string contents;
+  bool callback_called = false;
+  tx2.async_file_contents(
+      testfile,
+      [&](std::error_code ec, std::vector<std::byte> bytes) {
+        CHECK_EQUAL(std::error_code(), ec);
+
+        std::transform(bytes.begin(), bytes.end(),
+            std::back_inserter(contents),
+            [](std::byte b) -> char {
+              return static_cast<char>(static_cast<unsigned char>(b));
+            });
+      });
+  ioctx.run();
+
+  CHECK_EQUAL(text, contents);
+}
+
 inline auto str_to_byte_vector(std::string_view s) -> std::vector<std::byte> {
   std::vector<std::byte> v;
   std::transform(s.begin(), s.end(),
