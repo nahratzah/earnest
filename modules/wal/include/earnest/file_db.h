@@ -15,9 +15,11 @@
 #include <asio/append.hpp>
 #include <asio/async_result.hpp>
 #include <asio/bind_executor.hpp>
+#include <asio/completion_condition.hpp>
 #include <asio/deferred.hpp>
 #include <asio/strand.hpp>
 #include <asio/write.hpp>
+#include <asio/write_at.hpp>
 
 #include <earnest/detail/byte_positional_stream.h>
 #include <earnest/detail/completion_handler_fun.h>
@@ -541,7 +543,7 @@ class transaction {
     alloc_(allocator),
     i_(i),
     m_(m),
-    writes_map_(allocator),
+    writes_map_(std::allocate_shared<writes_map>(allocator, allocator)),
     read_barrier_(fdb->get_executor(), allocator),
     writes_mon_(fdb->get_executor(), allocator)
   {
@@ -693,22 +695,77 @@ class transaction {
   }
 
   auto get_reader_op_(file_id id) const {
-    std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> tx_writes;
-    auto writes_iter = writes_map_.find(id);
-    if (writes_iter != writes_map_.end()) tx_writes = writes_iter->second;
-
-    return get_raw_reader_op_(std::move(id))
+    return get_raw_reader_op_(id)
     | asio::deferred(
-        [writes_mon=this->writes_mon_, tx_writes=std::move(tx_writes), allocator=this->alloc_](std::error_code ec, raw_reader_type raw_reader) mutable {
-          auto file_size = raw_reader.size();
-          return writes_mon.async_shared(
-              asio::append(
-                  asio::deferred,
-                  ec,
-                  reader_type(
-                      std::allocate_shared<raw_reader_type>(allocator, std::move(raw_reader)),
-                      tx_writes,
-                      file_size)));
+        [ writes_mon=this->writes_mon_,
+          wmap=this->writes_map_,
+          allocator=this->alloc_,
+          id
+        ](std::error_code ec, raw_reader_type raw_reader) mutable {
+          return asio::async_initiate<decltype(asio::deferred), void(typename monitor_type::shared_lock, std::error_code, reader_type)>(
+              [allocator](auto handler, std::error_code ec, raw_reader_type raw_reader, auto writes_mon, std::shared_ptr<writes_map> wmap, file_id id) {
+                writes_mon.async_shared(
+                    detail::completion_wrapper<void(typename monitor_type::shared_lock)>(
+                        std::move(handler),
+                        [ ec, allocator, wmap,
+                          id=std::move(id),
+                          raw_reader=std::move(raw_reader)
+                        ](auto handler, typename monitor_type::shared_lock lock) mutable {
+                          std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> tx_writes;
+                          auto writes_iter = wmap->find(id);
+                          if (writes_iter != wmap->end()) tx_writes = writes_iter->second;
+
+                          auto file_size = raw_reader.size();
+                          std::invoke(handler,
+                              std::move(lock),
+                              ec,
+                              reader_type(
+                                  std::allocate_shared<raw_reader_type>(allocator, std::move(raw_reader)),
+                                  tx_writes,
+                                  file_size));
+                        }));
+              },
+              asio::deferred, ec, std::move(raw_reader), std::move(writes_mon), std::move(wmap), std::move(id));
+        });
+  }
+
+  auto get_writer_op_(file_id id) {
+    return get_raw_reader_op_(id)
+    | asio::deferred(
+        [ writes_mon=this->writes_mon_,
+          wmap=this->writes_map_,
+          allocator=this->alloc_,
+          id
+        ](std::error_code ec, raw_reader_type raw_reader) mutable {
+          return asio::async_initiate<decltype(asio::deferred), void(typename monitor_type::exclusive_lock, std::error_code, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>, typename raw_reader_type::size_type)>(
+              [allocator](auto handler, std::error_code ec, raw_reader_type raw_reader, auto writes_mon, std::shared_ptr<writes_map> wmap, file_id id) {
+                writes_mon.async_exclusive(
+                    detail::completion_wrapper<void(typename monitor_type::exclusive_lock)>(
+                        std::move(handler),
+                        [ ec, allocator, wmap,
+                          id=std::move(id),
+                          raw_reader=std::move(raw_reader)
+                        ](auto handler, typename monitor_type::exclusive_lock lock) mutable {
+                          std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> tx_writes;
+                          auto writes_iter = wmap->find(id);
+                          if (writes_iter == wmap->end()) {
+                            bool inserted;
+                            std::tie(writes_iter, inserted) = wmap->emplace(
+                                std::move(id),
+                                std::allocate_shared<detail::replacement_map<writes_buffer_type, allocator_type>>(allocator, allocator));
+                            assert(inserted);
+                          }
+                          tx_writes = writes_iter->second;
+
+                          auto file_size = raw_reader.size();
+                          std::invoke(handler,
+                              std::move(lock),
+                              ec,
+                              std::move(tx_writes),
+                              file_size);
+                        }));
+              },
+              asio::deferred, ec, std::move(raw_reader), std::move(writes_mon), std::move(wmap), std::move(id));
         });
   }
 
@@ -791,11 +848,55 @@ class transaction {
         });
   }
 
+  template<typename MB>
+  auto async_file_write_op_(file_id id, std::uint64_t offset, MB&& buffers) {
+    auto buffer = std::allocate_shared<writes_buffer_type>(alloc_, fdb_->get_executor(), alloc_);
+    std::error_code ec;
+    asio::write_at(*buffer, 0, std::forward<MB>(buffers), asio::transfer_all(), ec);
+
+    return get_writer_op_(std::move(id))
+    | asio::deferred(
+        [ fdb=this->fdb_,
+          buffer=std::move(buffer),
+          write_ec=std::move(ec),
+          offset, m=this->m_
+        ](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> replacements, auto filesize) mutable {
+          return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
+              [m, write_ec, offset, fdb=std::move(fdb), buffer=std::move(buffer)](auto handler, typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>> replacements, auto filesize) {
+                auto wrapped_handler = detail::completion_handler_fun(std::move(handler), std::move(fdb->get_executor()));
+                if (!write_permitted(m)) {
+                  std::invoke(wrapped_handler, make_error_code(file_db_errc::write_not_permitted), 0);
+                  return;
+                }
+                if (ec) {
+                  std::invoke(wrapped_handler, ec, 0);
+                  return;
+                }
+                if (write_ec) {
+                  std::invoke(wrapped_handler, write_ec, 0);
+                  return;
+                }
+
+                const auto buffer_size = buffer->cdata().size();
+                // We don't allow writes past the end of a file.
+                if (offset > filesize || buffer_size > filesize - offset) {
+                  std::invoke(wrapped_handler, write_ec, 0);
+                  return;
+                }
+
+                replacements->insert(offset, 0, buffer_size, std::move(buffer));
+                lock.reset();
+                std::invoke(wrapped_handler, std::error_code(), buffer_size);
+              },
+              asio::deferred, std::move(lock), ec, std::move(replacements), std::move(filesize));
+        });
+  }
+
   const std::shared_ptr<FileDB> fdb_;
   allocator_type alloc_;
   const isolation i_;
   const tx_mode m_;
-  const writes_map writes_map_;
+  const std::shared_ptr<writes_map> writes_map_;
   mutable detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
   mutable monitor_type writes_mon_;
 };

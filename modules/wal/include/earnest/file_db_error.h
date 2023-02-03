@@ -12,6 +12,7 @@ enum class file_db_errc {
   lock_failure,
   read_not_permitted,
   write_not_permitted,
+  write_past_eof,
 };
 
 inline auto file_db_category() -> const std::error_category& {
@@ -39,6 +40,8 @@ inline auto file_db_category() -> const std::error_category& {
           return "File-DB transaction does not have read permission"s;
         case file_db_errc::write_not_permitted:
           return "File-DB transaction does not have write permission"s;
+        case file_db_errc::write_past_eof:
+          return "File-DB write past extends past end-of-file"s;
       }
     }
   };
