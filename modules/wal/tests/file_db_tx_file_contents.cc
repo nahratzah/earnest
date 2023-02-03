@@ -121,6 +121,24 @@ TEST_FIXTURE(tx_file_contents, modify_file) {
   CHECK_EQUAL(expected, contents);
 }
 
+TEST_FIXTURE(tx_file_contents, cannot_modify_file_past_eof) {
+  using namespace std::literals;
+
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  auto f = tx[testfile];
+
+  bool callback_called = false;
+  std::string contents;
+  asio::async_write_at(f, text.size() - 2u, asio::buffer("xxx"sv),
+      [&](std::error_code ec, [[maybe_unused]] std::size_t nbytes) {
+        CHECK_EQUAL(make_error_code(earnest::file_db_errc::write_past_eof), ec);
+        callback_called = true;
+      });
+  ioctx.run();
+
+  CHECK(callback_called);
+}
+
 inline auto str_to_byte_vector(std::string_view s) -> std::vector<std::byte> {
   std::vector<std::byte> v;
   std::transform(s.begin(), s.end(),

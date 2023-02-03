@@ -895,7 +895,7 @@ class transaction {
                 // We don't allow writes past the end of a file.
                 if (offset > replacements->file_size.value_or(filesize) ||
                     buffer_size > replacements->file_size.value_or(filesize) - offset) {
-                  std::invoke(wrapped_handler, write_ec, 0);
+                  std::invoke(wrapped_handler, make_error_code(file_db_errc::write_past_eof), 0);
                   return;
                 }
 
