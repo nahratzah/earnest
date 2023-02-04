@@ -265,13 +265,13 @@ class wal_file
                     return;
                   }
 
-                  wf->active->async_append(std::move(records),
-                      detail::completion_wrapper<void(std::error_code)>(
-                          std::move(handler).inner_handler(),
-                          [lock=tx_lock(wf, wf->active)](auto handler, std::error_code ec) mutable {
-                            lock.reset();
-                            std::invoke(handler, ec);
-                          }));
+                  // Note: we don't need to hold a tx_lock,
+                  // because:
+                  // 1. the seal operation will create one of those when required
+                  // 2. the seal operation will maintain its own lock until the seal is confirmed written out
+                  // 3. the seal won't complete writing out until all writes preceding it are completed
+                  //    (which includes this write)
+                  wf->active->async_append(std::move(records), std::move(handler).inner_handler());
                 }));
         },
         token, this->shared_from_this(), write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()));
