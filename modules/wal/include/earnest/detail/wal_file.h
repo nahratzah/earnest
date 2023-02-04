@@ -258,12 +258,20 @@ class wal_file
             completion_wrapper<void()>(
                 completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
                 [wf, records=std::move(records)](auto handler) mutable {
+                  assert(wf->strand_.running_in_this_thread());
+
                   if (wf->active == nullptr) [[unlikely]] {
                     handler.dispatch(make_error_code(wal_errc::bad_state));
                     return;
                   }
 
-                  wf->active->async_append(std::move(records), std::move(handler).inner_handler());
+                  wf->active->async_append(std::move(records),
+                      detail::completion_wrapper<void(std::error_code)>(
+                          std::move(handler).inner_handler(),
+                          [lock=tx_lock(wf, wf->active)](auto handler, std::error_code ec) mutable {
+                            lock.reset();
+                            std::invoke(handler, ec);
+                          }));
                 }));
         },
         token, this->shared_from_this(), write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()));
