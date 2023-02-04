@@ -199,6 +199,27 @@ class file_db
         std::move(alloc));
   }
 
+  template<typename CompletionToken>
+  auto async_wal_rollover(CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<file_db> fdb) {
+          asio::dispatch(
+              completion_wrapper<void()>(
+                  detail::completion_handler_fun(std::move(handler), fdb->get_executor(), fdb->strand_, fdb->get_allocator()),
+                  [fdb](auto handler) {
+                    fdb->wal->async_rollover(std::move(handler).as_unbound_handler());
+                  }));
+        },
+        token, this->shared_from_this());
+  }
+
+  auto async_wal_rollover() -> void {
+    async_wal_rollover(
+        []([[maybe_unused]] std::error_code ec) {
+          // skip
+        });
+  }
+
   private:
   auto undo_on_fail_op_() {
     return asio::deferred(
