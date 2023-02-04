@@ -125,6 +125,11 @@ class file_db
                   .then(fdb->recover_namespaces_op_())
                   .otherwise(asio::deferred.values(ec));
             }))
+    | asio::deferred(
+        [fdb=this->shared_from_this()](std::error_code ec) {
+          if (!ec) fdb->install_apply_();
+          return asio::deferred.values(ec);
+        })
     | undo_on_fail_op_()
     | std::forward<CompletionToken>(token);
   }
@@ -156,6 +161,11 @@ class file_db
                   .then(fdb->recover_namespaces_op_())
                   .otherwise(asio::deferred.values(ec));
             }))
+    | asio::deferred(
+        [fdb=this->shared_from_this()](std::error_code ec) {
+          if (!ec) fdb->install_apply_();
+          return asio::deferred.values(ec);
+        })
     | undo_on_fail_op_()
     | std::forward<CompletionToken>(token);
   }
@@ -463,6 +473,195 @@ class file_db
         token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
   }
 
+  auto install_apply_() -> void {
+    wal->set_apply_callback(
+        [ weak_fdb=this->weak_from_this(),
+          ex=get_executor()
+        ]<typename CompletionToken>(std::shared_ptr<typename wal_type::entry> e, CompletionToken&& token) {
+          return asio::async_initiate<CompletionToken, void(std::error_code)>(
+              [](auto handler, std::weak_ptr<file_db> weak_fdb, auto ex, std::shared_ptr<typename wal_type::entry> e) {
+                std::shared_ptr<file_db> fdb;
+                try {
+                  fdb = std::shared_ptr<file_db>(weak_fdb);
+                } catch (const std::bad_weak_ptr&) {
+                  std::invoke(completion_handler_fun(std::move(handler), ex), make_error_code(file_db_errc::closing));
+                  return;
+                }
+
+                fdb->apply_wal_entry_(std::move(e), std::move(handler));
+              },
+              token, weak_fdb, ex, std::move(e));
+        });
+  }
+
+  template<typename CompletionToken>
+  auto apply_wal_entry_(std::shared_ptr<typename wal_type::entry> e, CompletionToken&& token) {
+    using update_map = std::unordered_map<
+        file_id, detail::file_recover_state<typename wal_type::fd_type, allocator_type>,
+        std::hash<file_id>,
+        std::equal_to<file_id>,
+        rebind_alloc<std::pair<const file_id, detail::file_recover_state<typename wal_type::fd_type, allocator_type>>>>;
+
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<file_db> fdb, std::shared_ptr<typename wal_type::entry> e) {
+          auto update_map_ptr = std::allocate_shared<update_map>(fdb->get_allocator(), fdb->get_allocator());
+          e->async_records(
+              [fdb, update_map_ptr](typename wal_type::entry::nb_variant_type v) -> std::error_code {
+                const file_id& id = std::visit(
+                    [](const auto& record) -> const file_id& {
+                      return record.file;
+                    },
+                    v);
+
+                auto update_iter = update_map_ptr->find(id);
+                if (update_iter == update_map_ptr->end()) {
+                  bool inserted;
+                  std::tie(update_iter, inserted) = update_map_ptr->emplace(id, fdb->get_allocator());
+                  assert(inserted);
+                }
+
+                std::visit(
+                    [update_iter]<typename Record>(Record&& record) {
+                      update_iter->second.apply(std::forward<Record>(record));
+                    },
+                    std::move(v));
+                return {};
+              },
+              completion_wrapper<void(std::error_code)>(
+                  completion_handler_fun(std::move(handler), fdb->get_executor(), fdb->strand_, fdb->get_allocator()),
+                  [fdb, update_map_ptr](auto handler, std::error_code) {
+                    assert(fdb->strand_.running_in_this_thread());
+                    auto barrier = detail::make_completion_barrier(std::move(handler).as_unbound_handler(), fdb->get_executor());
+
+                    for (const auto& [id, update] : *update_map_ptr)
+                      fdb->apply_file_recovery_(id, update, barrier);
+                    std::invoke(barrier, std::error_code());
+                  }));
+        },
+        token, this->shared_from_this(), std::move(e));
+  }
+
+  template<typename BarrierHandler, typename BarrierExecutor>
+  [[nodiscard]]
+  auto apply_file_recovery_(const file_id& id, const detail::file_recover_state<typename wal_type::fd_type, allocator_type>& update, detail::completion_barrier<BarrierHandler, BarrierExecutor>& barrier) -> bool {
+    assert(strand_.running_in_this_thread());
+
+    auto sync_barrier = detail::fanout_barrier<executor_type, allocator_type>(get_executor(), get_allocator());
+    bool need_namespaces_update = false;
+    bool need_fsync = false;
+    bool need_fdatasync = false;
+    auto files_iter = files.find(id);
+    bool files_found = (files_iter != files.end());
+    bool files_open = (files_found && files_iter->second.fd->is_open());
+
+    try {
+      if (update.exists.has_value()) {
+        if (update.exists.value()) {
+          if (!files_found) {
+            bool inserted;
+            std::tie(files_iter, inserted) = files.emplace(id, file{ .fd=std::allocate_shared<fd_type>(get_allocator(), get_executor()) });
+            assert(inserted);
+            files_found = true;
+          }
+          if (!files_open) {
+            auto ns_iter = namespaces.find(id.ns);
+            if (ns_iter == namespaces.end())
+              throw std::system_error(make_error_code(file_db_errc::unrecoverable), "missing namespace");
+
+            files_iter->second.fd->create(ns_iter->second.d, id.filename);
+            need_namespaces_update = true;
+            need_fsync = true;
+          }
+        } else {
+          if (files_open) {
+            auto ns_iter = namespaces.find(id.ns);
+            if (ns_iter == namespaces.end())
+              throw std::system_error(make_error_code(file_db_errc::unrecoverable), "missing namespace");
+
+            files_iter->second.fd->close();
+            files_open = false;
+            ns_iter->second.d.erase(id.filename);
+          }
+          if (files_found) {
+            files.erase(files_iter);
+            files_iter = files.end();
+            files_found = false;
+            need_namespaces_update = true;
+          }
+        }
+      }
+
+      if (update.file_size.has_value()) {
+        if (!files_found)
+          throw std::system_error(make_error_code(file_db_errc::unrecoverable), "cannot truncate, because there's no record of this file");
+        if (!files_open)
+          throw std::system_error(make_error_code(file_db_errc::unrecoverable), "cannot truncate, because this file is closed");
+
+        files_iter->second.fd->truncate(update.file_size.value());
+        need_fdatasync = true;
+      }
+    } catch (const std::system_error& ex) {
+      std::clog << "File-DB " << id.ns << "/" << id.filename << ": unable to apply WAL records: " << ex.what() << "\n";
+      std::invoke(++barrier, ex.code());
+      return need_namespaces_update;
+    }
+
+    for (const auto& elem : update.replacements) {
+      if (!files_open) {
+        std::clog << "File-DB " << id.ns << "/" << id.filename << ": unabel to apply WAL records: modified file is not opened\n";
+        std::invoke(++barrier, make_error_code(file_db_errc::unrecoverable));
+        return need_namespaces_update;
+      }
+
+      auto tmp_ptr = std::allocate_shared<std::vector<std::byte, rebind_alloc<std::byte>>>(get_allocator(), get_allocator());
+
+      std::shared_ptr<fd_type> fd_ptr = files_iter->second.fd;
+      asio::async_read_at(
+          elem.wal_file(),
+          elem.wal_offset(),
+          asio::buffer(*tmp_ptr),
+          asio::transfer_all(),
+          asio::deferred)
+      | asio::deferred(
+          [fd_ptr, elem, tmp_ptr](std::error_code ec, std::size_t nbytes) {
+            return asio::deferred.when(!ec)
+                .then(
+                    asio::async_write_at(
+                        *fd_ptr,
+                        elem.offset(),
+                        asio::buffer(*tmp_ptr),
+                        asio::transfer_all(),
+                        asio::deferred))
+                .otherwise(asio::deferred.values(ec, nbytes));
+          })
+      | asio::deferred(
+          [fd_ptr, elem, tmp_ptr](std::error_code ec, [[maybe_unused]] std::size_t nbytes) {
+            return asio::deferred.values(ec);
+          })
+      | ++sync_barrier;
+      need_fdatasync = true;
+    }
+
+    if (need_fsync || need_fdatasync) {
+      std::invoke(sync_barrier, std::error_code());
+      sync_barrier.async_on_ready(asio::deferred)
+      | asio::deferred(
+          [fd_ptr=files_iter->second.fd, need_fsync](std::error_code ec) {
+            return asio::deferred.when(!ec)
+                .then(fd_ptr->async_flush(!need_fsync, asio::deferred))
+                .otherwise(asio::deferred.values(ec));
+          })
+      | asio::deferred(
+          [fd_ptr=files_iter->second.fd](std::error_code ec) mutable {
+            fd_ptr.reset();
+            return asio::deferred.values(ec);
+          })
+      | ++barrier;
+    }
+
+    return need_namespaces_update;
+  }
+
   allocator_type alloc_;
 
   public:
@@ -556,7 +755,8 @@ class transaction {
     m_(m),
     writes_map_(std::allocate_shared<writes_map>(allocator, allocator)),
     read_barrier_(fdb->get_executor(), allocator),
-    writes_mon_(fdb->get_executor(), allocator)
+    writes_mon_(fdb->get_executor(), allocator),
+    wait_for_writes_(fdb->get_executor(), allocator)
   {
     switch (i_) {
       default:
@@ -877,11 +1077,17 @@ class transaction {
         [ fdb=this->fdb_,
           buffer=std::move(buffer),
           write_ec=std::move(ec),
+          write_done_handler=++this->wait_for_writes_,
           offset
         ](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) mutable {
           return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
-              [write_ec, offset, fdb=std::move(fdb), buffer=std::move(buffer)](auto handler, typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) {
-                auto wrapped_handler = detail::completion_handler_fun(std::move(handler), std::move(fdb->get_executor()));
+              [write_ec, offset, fdb=std::move(fdb), buffer=std::move(buffer), write_done_handler=std::move(write_done_handler)](auto handler, typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) {
+                auto wrapped_handler = completion_wrapper<void(std::error_code, std::size_t)>(
+                    detail::completion_handler_fun(std::move(handler), std::move(fdb->get_executor())),
+                    [write_done_handler=std::move(write_done_handler)](auto handler, std::error_code ec, std::size_t nbytes) mutable {
+                      std::invoke(write_done_handler, ec);
+                      std::invoke(handler, ec, nbytes);
+                    });
                 if (ec) {
                   std::invoke(wrapped_handler, ec, 0);
                   return;
@@ -914,6 +1120,7 @@ class transaction {
   std::shared_ptr<writes_map> writes_map_;
   mutable detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
   mutable monitor_type writes_mon_;
+  detail::fanout_barrier<executor_type, allocator_type> wait_for_writes_;
 };
 
 

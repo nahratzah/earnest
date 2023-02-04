@@ -67,6 +67,7 @@ class wal_file
 
   using entry_type = wal_file_entry<executor_type, allocator_type>;
 
+  public:
   class entry
   : public std::enable_shared_from_this<entry>
   {
@@ -156,6 +157,7 @@ class wal_file
     mutable std::shared_ptr<cache_impl> cache_;
   };
 
+  private:
   using entries_list = std::vector<std::shared_ptr<entry>, rebind_alloc<std::shared_ptr<entry>>>;
   using old_list = std::vector<std::shared_ptr<entry_type>, rebind_alloc<std::shared_ptr<entry_type>>>;
 
@@ -208,8 +210,9 @@ class wal_file
     ~tx_lock() {
       if (entry_ != nullptr) {
         wf_->strand_.dispatch(
-            [entry=this->entry_]() {
+            [wf=this->wf_, entry=this->entry_]() {
               --entry->locks;
+              wf->maybe_run_apply_();
             },
             wf_->get_allocator());
       }
@@ -442,6 +445,32 @@ class wal_file
                   }));
         },
         token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
+  }
+
+  template<typename Callback>
+  auto set_apply_callback(Callback&& callback) -> void {
+    strand_.dispatch(
+        [wf=this->shared_from_this(), callback=std::forward<Callback>(callback)]() mutable {
+          wf->apply_impl_ = [weak_wf=std::weak_ptr<wal_file>(wf), callback=std::move(callback)]() mutable {
+            std::shared_ptr<wal_file> wf;
+            try {
+              wf = std::shared_ptr<wal_file>(weak_wf);
+            } catch (const std::bad_weak_ptr&) {
+              return;
+            }
+
+            wf->apply_(callback);
+          };
+          wf->maybe_run_apply_();
+        },
+        get_allocator());
+  }
+
+  auto clear_apply_callback() -> void {
+    strand_.dispatch(
+        [wf=this->shared_from_this()]() {
+          wf->apply_impl_ = nullptr;
+        });
   }
 
   private:
@@ -856,6 +885,49 @@ class wal_file
             strand_));
   }
 
+  auto maybe_run_apply_() const -> void {
+    assert(strand_.running_in_this_thread());
+
+    if (!apply_impl_) return;
+
+    if (!apply_running_ && !entries.empty() && entries.front()->locks == 0) {
+      apply_running_ = true;
+      apply_impl_();
+    }
+  }
+
+  template<typename Callback>
+  auto apply_(Callback& callback) -> void {
+    assert(strand_.running_in_this_thread());
+    assert(apply_running_);
+
+    if (entries.empty() || entries.front()->locks != 0) {
+      apply_running_ = false;
+      return;
+    }
+
+    std::invoke(
+        callback, entries.front(),
+        asio::bind_executor(
+            strand_,
+            [wf=this->shared_from_this()](std::error_code ec) {
+              assert(wf->strand_.running_in_this_thread());
+
+              if (ec) {
+                std::clog << "WAL: unable to apply WAL-file, " << ec.message() << "\n";
+                wf->apply_running_ = false;
+                return;
+              }
+
+              wf->old.push_back(wf->entries.front()->file);
+              wf->entries.erase(wf->entries.begin());
+              if (wf->apply_impl_)
+                wf->apply_impl_();
+              else
+                wf->apply_running_ = false;
+            }));
+  }
+
   public:
   // `entries` holds all entries that lead up to `active`,
   // and has contiguous sequence.
@@ -872,6 +944,9 @@ class wal_file
   // We use a fanout-barrier to make sure the rollovers update the 'active' pointer
   // in sequence of invocation.
   fanout_barrier<executor_type, allocator_type> rollover_barrier_;
+
+  mutable bool apply_running_ = false;
+  std::function<void()> apply_impl_;
 };
 
 

@@ -96,12 +96,6 @@ TEST_FIXTURE(tx_file_contents, modify_file) {
             testfile,
             [&](std::error_code ec, std::vector<std::byte> bytes) {
               CHECK_EQUAL(std::error_code(), ec);
-
-              std::cerr << "bytes (" << bytes.size() << " bytes) =";
-              for (std::byte b : bytes)
-                std::cerr << " " << std::hex << static_cast<unsigned int>(static_cast<unsigned char>(b));
-              std::cerr << std::dec << "\n";
-
               read_callback_called = true;
 
               std::transform(bytes.begin(), bytes.end(),
