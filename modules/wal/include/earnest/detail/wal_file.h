@@ -208,6 +208,10 @@ class wal_file
     }
 
     ~tx_lock() {
+      reset();
+    }
+
+    auto reset() {
       if (entry_ != nullptr) {
         wf_->strand_.dispatch(
             [wf=this->wf_, entry=this->entry_]() {
@@ -215,6 +219,9 @@ class wal_file
               wf->maybe_run_apply_();
             },
             wf_->get_allocator());
+
+        entry_.reset();
+        wf_.reset();
       }
     }
 
@@ -862,7 +869,13 @@ class wal_file
           std::invoke(new_barrier, std::error_code());
 
           auto completion = link_event.async_on_ready(asio::deferred);
-          old_active->async_seal(std::move(link_event));
+          old_active->async_seal(
+              completion_wrapper<void(std::error_code)>(
+                  std::move(link_event),
+                  [seal_lock=tx_lock(wf, wf->active)](auto handler, std::error_code ec) mutable {
+                    seal_lock.reset();
+                    std::invoke(handler, ec);
+                  }));
           return completion;
         },
         strand_, this->shared_from_this(), std::move(link_event), std::move(new_active), std::move(new_barrier));
