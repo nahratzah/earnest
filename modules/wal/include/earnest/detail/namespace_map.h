@@ -15,6 +15,8 @@ template<std::size_t Version = 0>
 struct namespace_map {
   std::unordered_map<std::string, std::string> namespaces;
   std::unordered_set<file_id> files;
+
+  auto operator<=>(const namespace_map& y) const noexcept = default;
 };
 
 template<typename X>

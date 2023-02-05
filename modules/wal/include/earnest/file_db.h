@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <initializer_list>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -72,6 +73,7 @@ class file_db
 
   struct ns {
     dir d;
+    std::filesystem::path dirname;
   };
 
   struct file {
@@ -432,7 +434,7 @@ class file_db
                       ns_map.namespaces.begin(), ns_map.namespaces.end(),
                       std::inserter(fdb->namespaces, fdb->namespaces.end()),
                       [](const std::pair<const std::string, std::string>& ns_entry) {
-                        return std::make_pair(ns_entry.first, ns{ .d{ns_entry.second} });
+                        return std::make_pair(ns_entry.first, ns{ .d{ns_entry.second}, .dirname=ns_entry.second });
                       });
                   std::transform(
                       ns_map.files.begin(), ns_map.files.end(),
@@ -554,8 +556,13 @@ class file_db
                     assert(fdb->strand_.running_in_this_thread());
                     auto barrier = detail::make_completion_barrier(std::move(handler).as_unbound_handler(), fdb->get_executor());
 
-                    for (const auto& [id, update] : *update_map_ptr)
-                      fdb->apply_file_recovery_(id, update, barrier);
+                    bool need_ns_update = false;
+                    for (const auto& [id, update] : *update_map_ptr) {
+                      if (fdb->apply_file_recovery_(id, update, barrier))
+                        need_ns_update = true;
+                    }
+                    if (need_ns_update) fdb->write_ns_op_() | ++barrier;
+
                     std::invoke(barrier, std::error_code());
                   }));
         },
@@ -694,6 +701,54 @@ class file_db
     }
 
     return need_namespaces_update;
+  }
+
+  auto write_ns_op_() {
+    using detail::wal_record_truncate_file;
+    using detail::wal_record_modify_file_write32;
+
+    assert(strand_.running_in_this_thread());
+
+    detail::namespace_map<> ns_map;
+    std::transform(
+        namespaces.cbegin(), namespaces.cend(),
+        std::inserter(ns_map.namespaces, ns_map.namespaces.end()),
+        [](const auto& ns_pair) {
+          return std::make_pair(ns_pair.first, ns_pair.second.dirname.generic_string());
+        });
+    std::transform(
+        files.cbegin(), files.cend(),
+        std::inserter(ns_map.files, ns_map.files.end()),
+        [](const auto& f_pair) -> const file_id& {
+          return f_pair.first;
+        });
+
+    auto stream = std::allocate_shared<byte_stream<executor_type>, rebind_alloc<std::byte>>(get_allocator(), get_executor(), get_allocator());
+    return async_write(
+        *stream,
+        xdr_writer<>() & xdr_constant(std::move(ns_map)),
+        asio::deferred)
+    | asio::deferred(
+        [wal=this->wal, stream](std::error_code ec) {
+          const auto data_len = stream->cdata().size();
+          return asio::deferred.when(!ec)
+              .then(
+                  wal->async_append(
+                      std::initializer_list<typename wal_type::write_variant_type>{
+                        wal_record_truncate_file{
+                          .file{"", std::string(namespaces_filename)},
+                          .new_size=data_len,
+                        },
+                        wal_record_modify_file_write32{
+                          .file{"", std::string(namespaces_filename)},
+                          .file_offset=0,
+                          .data=std::move(*stream).data(),
+                        },
+                      },
+                      asio::deferred)
+                  )
+              .otherwise(asio::deferred.values(ec));
+        });
   }
 
   allocator_type alloc_;
