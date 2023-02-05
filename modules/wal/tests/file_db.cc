@@ -1,7 +1,11 @@
 #include "file_db.h"
 #include "UnitTest++/UnitTest++.h"
 
+#include <algorithm>
 #include <iostream>
+#include <iterator>
+#include <string_view>
+#include <vector>
 #include <earnest/dir.h>
 
 earnest::dir write_dir;
@@ -35,6 +39,16 @@ auto ensure_dir_exists_and_is_empty(std::filesystem::path name) -> earnest::dir 
     }
   }
   return new_dir;
+}
+
+auto str_to_byte_vector(std::string_view s) -> std::vector<std::byte> {
+  std::vector<std::byte> v;
+  std::transform(s.begin(), s.end(),
+      std::back_inserter(v),
+      [](char c) -> std::byte {
+        return static_cast<std::byte>(static_cast<unsigned char>(c));
+      });
+  return v;
 }
 
 int main(int argc, char** argv) {

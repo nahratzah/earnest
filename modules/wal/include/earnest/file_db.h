@@ -585,23 +585,36 @@ class file_db
             files_found = true;
           }
           if (!files_open) {
-            auto ns_iter = namespaces.find(id.ns);
-            if (ns_iter == namespaces.end())
-              throw std::system_error(make_error_code(file_db_errc::unrecoverable), "missing namespace");
+            dir d;
+            if (id.ns.empty()) {
+              d = wal->get_dir();
+            } else {
+              auto ns_iter = namespaces.find(id.ns);
+              if (ns_iter == namespaces.end())
+                throw std::system_error(make_error_code(file_db_errc::unrecoverable), "missing namespace");
+              d = ns_iter->second.d;
+            }
 
-            files_iter->second.fd->create(ns_iter->second.d, id.filename);
+            files_iter->second.fd->create(d, id.filename);
             need_namespaces_update = true;
             need_fsync = true;
+            files_open = true;
           }
         } else {
           if (files_open) {
-            auto ns_iter = namespaces.find(id.ns);
-            if (ns_iter == namespaces.end())
-              throw std::system_error(make_error_code(file_db_errc::unrecoverable), "missing namespace");
+            dir d;
+            if (id.ns.empty()) {
+              d = wal->get_dir();
+            } else {
+              auto ns_iter = namespaces.find(id.ns);
+              if (ns_iter == namespaces.end())
+                throw std::system_error(make_error_code(file_db_errc::unrecoverable), "missing namespace");
+              d = ns_iter->second.d;
+            }
 
             files_iter->second.fd->close();
             files_open = false;
-            ns_iter->second.d.erase(id.filename);
+            d.erase(id.filename);
           }
           if (files_found) {
             files.erase(files_iter);
@@ -629,12 +642,12 @@ class file_db
 
     for (const auto& elem : update.replacements) {
       if (!files_open) {
-        std::clog << "File-DB " << id.ns << "/" << id.filename << ": unabel to apply WAL records: modified file is not opened\n";
+        std::clog << "File-DB " << id.ns << "/" << id.filename << ": unable to apply WAL records: modified file is not opened\n";
         std::invoke(++barrier, make_error_code(file_db_errc::unrecoverable));
         return need_namespaces_update;
       }
 
-      auto tmp_ptr = std::allocate_shared<std::vector<std::byte, rebind_alloc<std::byte>>>(get_allocator(), get_allocator());
+      auto tmp_ptr = std::allocate_shared<std::vector<std::byte, rebind_alloc<std::byte>>>(get_allocator(), elem.size(), get_allocator());
 
       std::shared_ptr<fd_type> fd_ptr = files_iter->second.fd;
       asio::async_read_at(
@@ -876,7 +889,9 @@ class transaction {
                   std::error_code ec;
                   result_map_ptr result;
                   auto iter = repl_maps->fr.find(id);
-                  if (iter == repl_maps->fr.end() || !iter->second.exists.value_or(true))
+                  if (iter == repl_maps->fr.end()) {
+                    result = nullptr;
+                  } else if (!iter->second.exists.value_or(true))
                     ec = make_error_code(std::errc::no_such_file_or_directory);
                   else
                     result = result_map_ptr(repl_maps, &iter->second);
@@ -897,7 +912,7 @@ class transaction {
               [id](std::error_code ec, std::shared_ptr<const file_db> fdb, std::shared_ptr<const typename file_replacements::mapped_type> state, auto allocator) {
                 assert(fdb->strand_.running_in_this_thread());
 
-                if (!ec && state->exists.has_value() && !state->exists.value()) [[unlikely]]
+                if (!ec && state != nullptr && !state->exists.value_or(true)) [[unlikely]]
                   ec = std::make_error_code(std::errc::no_such_file_or_directory);
 
                 std::shared_ptr<const underlying_fd> ufd;
@@ -914,10 +929,11 @@ class transaction {
         })
     | asio::deferred(
         [](std::error_code ec, std::shared_ptr<const underlying_fd> ufd, std::shared_ptr<const typename file_replacements::mapped_type> state) {
-          typename raw_reader_type::size_type filesize = 0;
+          typename raw_reader_type::size_type filesize = (ufd != nullptr && ufd->is_open() ? ufd->size() : 0u);
           std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>> replacements;
-          if (state != nullptr) [[likely]] {
-            filesize = state->file_size.value_or(ufd != nullptr && ufd->is_open() ? ufd->size() : 0u);
+
+          if (state != nullptr) {
+            if (state->file_size.has_value()) filesize = state->file_size.value();
             replacements = std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>>(state, &state->replacements);
           }
 

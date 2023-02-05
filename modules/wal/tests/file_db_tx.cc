@@ -164,16 +164,6 @@ TEST_FIXTURE(tx_file_contents, modifications_are_local) {
   CHECK_EQUAL(text, contents);
 }
 
-inline auto str_to_byte_vector(std::string_view s) -> std::vector<std::byte> {
-  std::vector<std::byte> v;
-  std::transform(s.begin(), s.end(),
-      std::back_inserter(v),
-      [](char c) -> std::byte {
-        return static_cast<std::byte>(static_cast<unsigned char>(c));
-      });
-  return v;
-}
-
 tx_file_contents::tx_file_contents() {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("tx_file_contents");
   fdb = std::make_shared<earnest::file_db<asio::io_context::executor_type>>(ioctx.get_executor());
