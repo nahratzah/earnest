@@ -164,6 +164,36 @@ TEST_FIXTURE(tx_file_contents, modifications_are_local) {
   CHECK_EQUAL(text, contents);
 }
 
+TEST_FIXTURE(tx_file_contents, truncate) {
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  bool callback_called = false;
+  tx[testfile].async_truncate(7,
+      [&](std::error_code ec) {
+        CHECK_EQUAL(std::error_code(), ec);
+        callback_called = true;
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  CHECK(callback_called);
+
+  std::string contents;
+  tx.async_file_contents(
+      testfile,
+      [&](std::error_code ec, std::vector<std::byte> bytes) {
+        CHECK_EQUAL(std::error_code(), ec);
+
+        std::transform(bytes.begin(), bytes.end(),
+            std::back_inserter(contents),
+            [](std::byte b) -> char {
+              return static_cast<char>(static_cast<unsigned char>(b));
+            });
+      });
+  ioctx.run();
+
+  CHECK_EQUAL(text.substr(0, 7), contents);
+}
+
 tx_file_contents::tx_file_contents() {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("tx_file_contents");
   fdb = std::make_shared<earnest::file_db<asio::io_context::executor_type>>(ioctx.get_executor());

@@ -790,6 +790,7 @@ class transaction {
 
     detail::replacement_map<writes_buffer_type, allocator_type> replacements;
     std::optional<std::uint64_t> file_size = std::nullopt;
+    bool created = false, erased = false;
   };
 
   using writes_map = std::unordered_map<
@@ -1173,19 +1174,26 @@ class transaction {
           offset
         ](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) mutable {
           return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
-              [write_ec, offset, fdb=std::move(fdb), buffer=std::move(buffer), write_done_handler=std::move(write_done_handler)](auto handler, typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) {
+              [write_ec, offset, fdb=std::move(fdb), buffer=std::move(buffer), write_done_handler=std::move(write_done_handler)](auto handler, typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) mutable {
                 auto wrapped_handler = completion_wrapper<void(std::error_code, std::size_t)>(
                     detail::completion_handler_fun(std::move(handler), std::move(fdb->get_executor())),
                     [write_done_handler=std::move(write_done_handler)](auto handler, std::error_code ec, std::size_t nbytes) mutable {
                       std::invoke(write_done_handler, ec);
                       std::invoke(handler, ec, nbytes);
                     });
+
                 if (ec) {
                   std::invoke(wrapped_handler, ec, 0);
                   return;
                 }
                 if (write_ec) {
                   std::invoke(wrapped_handler, write_ec, 0);
+                  return;
+                }
+
+                // If the file is erased, fail the call.
+                if (replacements->erased) {
+                  std::invoke(wrapped_handler, make_error_code(file_db_errc::file_erased), 0);
                   return;
                 }
 
@@ -1202,6 +1210,43 @@ class transaction {
                 std::invoke(wrapped_handler, std::error_code(), buffer_size);
               },
               asio::deferred, std::move(lock), ec, std::move(replacements), std::move(filesize));
+        });
+  }
+
+  auto async_truncate_op_(file_id id, std::uint64_t new_size) {
+    return get_writer_op_(std::move(id))
+    | asio::deferred(
+        [ ex=this->fdb_->get_executor(),
+          write_done_handler=++this->wait_for_writes_,
+          allocator=this->alloc_,
+          new_size
+        ](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) mutable {
+          return asio::async_initiate<decltype(asio::deferred), void(std::error_code)>(
+              [write_done_handler=std::move(write_done_handler), new_size, allocator=std::move(allocator)](auto handler, auto ex, typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) mutable {
+                auto wrapped_handler = completion_wrapper<void(std::error_code)>(
+                    detail::completion_handler_fun(std::move(handler), ex),
+                    [write_done_handler=std::move(write_done_handler)](auto handler, std::error_code ec) mutable {
+                      std::invoke(write_done_handler, ec);
+                      std::invoke(handler, ec);
+                    });
+
+                if (!ec && replacements->erased)
+                  ec = make_error_code(file_db_errc::file_erased);
+                if (!ec) {
+                  if (new_size > filesize) {
+                    auto buffer = std::allocate_shared<writes_buffer_type>(allocator, ex, allocator);
+                    buffer->data().resize(new_size - filesize);
+                    replacements->replacements.insert(filesize, 0, new_size - filesize, std::move(buffer));
+                  } else if (new_size < filesize) {
+                    replacements->replacements.truncate(new_size);
+                  }
+                  replacements->file_size = new_size;
+                }
+
+                lock.reset();
+                std::invoke(handler, ec);
+              },
+              asio::deferred, std::move(ex), std::move(lock), ec, std::move(replacements), std::move(filesize));
         });
   }
 
@@ -1237,7 +1282,7 @@ class transaction<FileDB, Allocator>::file {
 
   template<typename CompletionToken>
   auto async_truncate(std::uint64_t new_size, CompletionToken&& token) {
-    return tx_.async_truncate_op_(new_size) | std::forward<CompletionToken>(token);
+    return tx_.async_truncate_op_(id_, new_size) | std::forward<CompletionToken>(token);
   }
 
   template<typename MB, typename CompletionToken>
