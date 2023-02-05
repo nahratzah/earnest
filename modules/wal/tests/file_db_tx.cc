@@ -164,7 +164,7 @@ TEST_FIXTURE(tx_file_contents, modifications_are_local) {
   CHECK_EQUAL(text, contents);
 }
 
-TEST_FIXTURE(tx_file_contents, truncate) {
+TEST_FIXTURE(tx_file_contents, truncate_shorten) {
   auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
   bool callback_called = false;
   tx[testfile].async_truncate(7,
@@ -192,6 +192,45 @@ TEST_FIXTURE(tx_file_contents, truncate) {
   ioctx.run();
 
   CHECK_EQUAL(text.substr(0, 7), contents);
+}
+
+TEST_FIXTURE(tx_file_contents, truncate_lengthen) {
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  bool callback_called = false;
+  auto f = tx[testfile];
+  f.async_truncate(text.size() + 6u,
+      [&](std::error_code ec) {
+        CHECK_EQUAL(std::error_code(), ec);
+        callback_called = true;
+
+        asio::async_write_at(
+            f,
+            text.size(),
+            asio::buffer(std::string_view(" 1 2 3")),
+            [](std::error_code ec, [[maybe_unused]] std::size_t nbytes) {
+              CHECK_EQUAL(std::error_code(), ec);
+            });
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  CHECK(callback_called);
+
+  std::string contents;
+  tx.async_file_contents(
+      testfile,
+      [&](std::error_code ec, std::vector<std::byte> bytes) {
+        CHECK_EQUAL(std::error_code(), ec);
+
+        std::transform(bytes.begin(), bytes.end(),
+            std::back_inserter(contents),
+            [](std::byte b) -> char {
+              return static_cast<char>(static_cast<unsigned char>(b));
+            });
+      });
+  ioctx.run();
+
+  CHECK_EQUAL(text + " 1 2 3", contents);
 }
 
 tx_file_contents::tx_file_contents() {
