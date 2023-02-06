@@ -29,6 +29,8 @@ class replacement_map_reader {
   using size_type = typename replacement_map<WalFD, Alloc>::size_type;
   using executor_type = typename std::remove_cvref_t<UnderlyingFd>::executor_type;
 
+  constexpr replacement_map_reader() noexcept = default;
+
   replacement_map_reader(std::shared_ptr<UnderlyingFd> fd, std::shared_ptr<const replacement_map<WalFD, Alloc>> replacements, size_type file_size)
   : underlying_fd_(std::move(fd)),
     replacements_(std::move(replacements)),
@@ -183,7 +185,7 @@ class replacement_map_reader {
 
   std::shared_ptr<UnderlyingFd> underlying_fd_;
   std::shared_ptr<const replacement_map<WalFD, Alloc>> replacements_;
-  size_type file_size_;
+  size_type file_size_ = 0;
 };
 
 

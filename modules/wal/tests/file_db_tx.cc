@@ -45,6 +45,20 @@ TEST_FIXTURE(tx_file_contents, read_contents) {
   CHECK_EQUAL(text, contents);
 }
 
+TEST_FIXTURE(tx_file_contents, cannot_read_contents_on_nonexistent_file) {
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  bool callback_called = false;
+  tx.async_file_contents(
+      earnest::file_id("", "non-exsistant-file"),
+      [&](std::error_code ec, [[maybe_unused]] std::vector<std::byte> bytes) {
+        CHECK_EQUAL(make_error_code(earnest::file_db_errc::file_erased), ec);
+        callback_called = true;
+      });
+  ioctx.run();
+
+  CHECK(callback_called);
+}
+
 TEST_FIXTURE(tx_file_contents, read_fails_when_not_permitted) {
   auto tx = fdb->tx_begin(earnest::isolation::repeatable_read, earnest::tx_mode::write_only);
   bool callback_called = false;
@@ -131,6 +145,24 @@ TEST_FIXTURE(tx_file_contents, cannot_modify_file_past_eof) {
   ioctx.run();
 
   CHECK(callback_called);
+}
+
+TEST_FIXTURE(tx_file_contents, cannot_modify_nonexistent_file) {
+  using namespace std::literals;
+
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  auto f = tx[earnest::file_id("", "non_existent_file.txt")];
+
+  bool write_callback_called = false;
+  std::string contents;
+  asio::async_write_at(f, 4, asio::buffer("xxx"sv),
+      [&](std::error_code ec, [[maybe_unused]] std::size_t nbytes) {
+        CHECK_EQUAL(make_error_code(earnest::file_db_errc::file_erased), ec);
+        write_callback_called = true;
+      });
+  ioctx.run();
+
+  CHECK(write_callback_called);
 }
 
 TEST_FIXTURE(tx_file_contents, modifications_are_local) {
@@ -231,6 +263,21 @@ TEST_FIXTURE(tx_file_contents, truncate_lengthen) {
   ioctx.run();
 
   CHECK_EQUAL(text + " 1 2 3", contents);
+}
+
+TEST_FIXTURE(tx_file_contents, cannot_truncate_non_existant_file) {
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  bool callback_called = false;
+  auto f = tx[earnest::file_id("", "does_not_exist.txt")];
+  f.async_truncate(text.size() + 6u,
+      [&](std::error_code ec) {
+        CHECK_EQUAL(make_error_code(earnest::file_db_errc::file_erased), ec);
+        callback_called = true;
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  CHECK(callback_called);
 }
 
 tx_file_contents::tx_file_contents() {

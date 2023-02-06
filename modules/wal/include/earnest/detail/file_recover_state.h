@@ -91,7 +91,7 @@ struct file_recover_state {
   public:
   replacement_map<fd_type, allocator_type> replacements;
   std::optional<bool> exists = std::nullopt;
-  std::optional<std::uint64_t> file_size = 0;
+  std::optional<std::uint64_t> file_size = std::nullopt;
 };
 
 

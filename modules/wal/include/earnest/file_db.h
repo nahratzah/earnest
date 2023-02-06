@@ -946,11 +946,12 @@ class transaction {
                   result_map_ptr result;
                   auto iter = repl_maps->fr.find(id);
                   if (iter == repl_maps->fr.end()) {
-                    result = nullptr;
-                  } else if (!iter->second.exists.value_or(true))
-                    ec = make_error_code(std::errc::no_such_file_or_directory);
-                  else
+                    result = std::allocate_shared<typename file_replacements::mapped_type>(allocator, allocator);
+                  } else {
                     result = result_map_ptr(repl_maps, &iter->second);
+                    if (!iter->second.exists.value_or(true))
+                      ec = make_error_code(std::errc::no_such_file_or_directory);
+                  }
                   std::invoke(wrapped_handler, std::move(ec), std::move(result));
                 }
               },
@@ -967,6 +968,7 @@ class transaction {
           return detail::deferred_on_executor<void(std::error_code, std::shared_ptr<const underlying_fd>, std::shared_ptr<const typename file_replacements::mapped_type>)>(
               [id](std::error_code ec, std::shared_ptr<const file_db> fdb, std::shared_ptr<const typename file_replacements::mapped_type> state, auto allocator) {
                 assert(fdb->strand_.running_in_this_thread());
+                assert(!!ec || state != nullptr);
 
                 if (!ec && state != nullptr && !state->exists.value_or(true)) [[unlikely]]
                   ec = std::make_error_code(std::errc::no_such_file_or_directory);
@@ -985,12 +987,18 @@ class transaction {
         })
     | asio::deferred(
         [](std::error_code ec, std::shared_ptr<const underlying_fd> ufd, std::shared_ptr<const typename file_replacements::mapped_type> state) {
-          typename raw_reader_type::size_type filesize = (ufd != nullptr && ufd->is_open() ? ufd->size() : 0u);
+          typename raw_reader_type::size_type filesize = 0u;
           std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>> replacements;
 
-          if (state != nullptr) {
-            if (state->file_size.has_value()) filesize = state->file_size.value();
+          if (!ec) {
+            assert(ufd != nullptr);
+            assert(state != nullptr);
+
+            const bool exists = state->exists.value_or(ufd->is_open());
+            filesize = state->file_size.value_or(ufd->is_open() ? ufd->size() : 0u);
             replacements = std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>>(state, &state->replacements);
+
+            if (!exists) ec = make_error_code(file_db_errc::file_erased);
           }
 
           return asio::deferred.values(
@@ -1000,83 +1008,111 @@ class transaction {
   }
 
   auto get_reader_op_(file_id id) const {
-    return get_raw_reader_op_(id)
+    return asio::deferred.values(read_permitted(this->m_) ? std::error_code{} : make_error_code(file_db_errc::read_not_permitted))
     | asio::deferred(
-        [ writes_mon=this->writes_mon_,
-          wmap=this->writes_map_,
-          allocator=this->alloc_,
-          m=this->m_,
-          id
+        [get_raw_reader=get_raw_reader_op_(id)](std::error_code ec) mutable {
+          return asio::deferred.when(!ec)
+              .then(std::move(get_raw_reader))
+              .otherwise(asio::deferred.values(ec, raw_reader_type{}));
+        })
+    | asio::deferred(
+        [ writes_mon=this->writes_mon_
         ](std::error_code ec, raw_reader_type raw_reader) mutable {
-          return asio::async_initiate<decltype(asio::deferred), void(typename monitor_type::shared_lock, std::error_code, reader_type)>(
-              [allocator, m](auto handler, std::error_code ec, raw_reader_type raw_reader, auto writes_mon, std::shared_ptr<const writes_map> wmap, file_id id) {
-                if (!read_permitted(m)) ec = make_error_code(file_db_errc::read_not_permitted);
+          return asio::deferred.when(!ec || ec == make_error_code(file_db_errc::file_erased))
+              .then(writes_mon.async_shared(asio::append(asio::deferred, ec, std::move(raw_reader))))
+              .otherwise(asio::deferred.values(typename monitor_type::shared_lock(), ec, raw_reader_type()));
+        })
+    | asio::deferred(
+        [ wmap=this->writes_map_,
+          allocator=this->alloc_,
+          id
+        ](typename monitor_type::shared_lock lock, std::error_code ec, raw_reader_type raw_reader) {
+          std::shared_ptr<writes_map_element> tx_writes;
+          typename reader_type::size_type filesize = 0;
+          if (!ec || ec == make_error_code(file_db_errc::file_erased)) {
+            const auto writes_iter = wmap->find(id);
+            if (writes_iter != wmap->end()) {
+              tx_writes = writes_iter->second;
+              if (tx_writes->erased)
+                ec = make_error_code(file_db_errc::file_erased);
+              else if (tx_writes->created)
+                ec.clear();
+              filesize = tx_writes->file_size.value_or(raw_reader.size());
+            } else {
+              filesize = raw_reader.size();
+            }
+          }
 
-                writes_mon.async_shared(
-                    detail::completion_wrapper<void(typename monitor_type::shared_lock)>(
-                        std::move(handler),
-                        [ ec, allocator, wmap,
-                          id=std::move(id),
-                          raw_reader=std::move(raw_reader)
-                        ](auto handler, typename monitor_type::shared_lock lock) mutable {
-                          std::shared_ptr<writes_map_element> tx_writes;
-                          auto writes_iter = wmap->find(id);
-                          if (writes_iter != wmap->end()) tx_writes = writes_iter->second;
-
-                          auto file_size = tx_writes == nullptr ? raw_reader.size() : tx_writes->file_size.value_or(raw_reader.size());
-                          std::invoke(handler,
-                              std::move(lock),
-                              ec,
-                              reader_type(
-                                  std::allocate_shared<raw_reader_type>(allocator, std::move(raw_reader)),
-                                  std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>(tx_writes, &tx_writes->replacements),
-                                  file_size));
-                        }));
-              },
-              asio::deferred, ec, std::move(raw_reader), std::move(writes_mon), std::move(wmap), std::move(id));
+          return asio::deferred.when(!ec)
+              .then(
+                  asio::deferred.values(
+                      std::move(lock),
+                      ec,
+                      reader_type(
+                          std::allocate_shared<raw_reader_type>(allocator, std::move(raw_reader)),
+                          std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>(tx_writes, &tx_writes->replacements),
+                          filesize)))
+              .otherwise(
+                  asio::deferred.values(
+                      typename monitor_type::shared_lock(),
+                      ec,
+                      reader_type()));
         });
   }
 
   auto get_writer_op_(file_id id) {
-    return get_raw_reader_op_(id)
+    return asio::deferred.values(write_permitted(this->m_) ? std::error_code{} : make_error_code(file_db_errc::read_not_permitted))
     | asio::deferred(
-        [ writes_mon=this->writes_mon_,
-          wmap=this->writes_map_,
-          allocator=this->alloc_,
-          m=this->m_,
-          id
+        [get_raw_reader=get_raw_reader_op_(id)](std::error_code ec) mutable {
+          return asio::deferred.when(!ec)
+              .then(std::move(get_raw_reader))
+              .otherwise(asio::deferred.values(ec, raw_reader_type{}));
+        })
+    | asio::deferred(
+        [ writes_mon=this->writes_mon_
         ](std::error_code ec, raw_reader_type raw_reader) mutable {
-          return asio::async_initiate<decltype(asio::deferred), void(typename monitor_type::exclusive_lock, std::error_code, std::shared_ptr<writes_map_element>, typename raw_reader_type::size_type)>(
-              [allocator, m](auto handler, std::error_code ec, raw_reader_type raw_reader, auto writes_mon, std::shared_ptr<writes_map> wmap, file_id id) {
-                if (!write_permitted(m)) ec = make_error_code(file_db_errc::write_not_permitted);
+          return asio::deferred.when(!ec || ec == make_error_code(file_db_errc::file_erased))
+              .then(writes_mon.async_exclusive(asio::append(asio::deferred, ec, std::move(raw_reader))))
+              .otherwise(asio::deferred.values(typename monitor_type::exclusive_lock(), ec, raw_reader_type()));
+        })
+    | asio::deferred(
+        [ wmap=this->writes_map_,
+          allocator=this->alloc_,
+          id
+        ](typename monitor_type::exclusive_lock lock, std::error_code ec, raw_reader_type raw_reader) {
+          std::shared_ptr<writes_map_element> tx_writes;
+          typename reader_type::size_type filesize = 0;
+          if (!ec || ec == make_error_code(file_db_errc::file_erased)) {
+            auto writes_iter = wmap->find(id);
+            if (writes_iter == wmap->end()) {
+              bool inserted;
+              std::tie(writes_iter, inserted) = wmap->emplace(
+                  std::move(id),
+                  std::allocate_shared<writes_map_element>(allocator, allocator));
+              assert(inserted);
+            }
 
-                writes_mon.async_exclusive(
-                    detail::completion_wrapper<void(typename monitor_type::exclusive_lock)>(
-                        std::move(handler),
-                        [ ec, allocator, wmap,
-                          id=std::move(id),
-                          raw_reader=std::move(raw_reader)
-                        ](auto handler, typename monitor_type::exclusive_lock lock) mutable {
-                          std::shared_ptr<writes_map_element> tx_writes;
-                          auto writes_iter = wmap->find(id);
-                          if (writes_iter == wmap->end()) {
-                            bool inserted;
-                            std::tie(writes_iter, inserted) = wmap->emplace(
-                                std::move(id),
-                                std::allocate_shared<writes_map_element>(allocator, allocator));
-                            assert(inserted);
-                          }
-                          tx_writes = writes_iter->second;
+            tx_writes = writes_iter->second;
+            if (tx_writes->erased)
+              ec = make_error_code(file_db_errc::file_erased);
+            else if (tx_writes->created)
+              ec.clear();
+            filesize = tx_writes->file_size.value_or(raw_reader.size());
+          }
 
-                          auto file_size = tx_writes == nullptr ? raw_reader.size() : tx_writes->file_size.value_or(raw_reader.size());
-                          std::invoke(handler,
-                              std::move(lock),
-                              ec,
-                              std::move(tx_writes),
-                              file_size);
-                        }));
-              },
-              asio::deferred, ec, std::move(raw_reader), std::move(writes_mon), std::move(wmap), std::move(id));
+          return asio::deferred.when(!ec)
+              .then(
+                  asio::deferred.values(
+                      std::move(lock),
+                      ec,
+                      std::move(tx_writes),
+                      filesize))
+              .otherwise(
+                  asio::deferred.values(
+                      typename monitor_type::exclusive_lock(),
+                      ec,
+                      std::shared_ptr<writes_map_element>(),
+                      filesize));
         });
   }
 
