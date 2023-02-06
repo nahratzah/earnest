@@ -14,6 +14,7 @@ enum class file_db_errc {
   write_not_permitted,
   write_past_eof,
   file_erased,
+  file_exists,
   closing,
 };
 
@@ -46,6 +47,8 @@ inline auto file_db_category() -> const std::error_category& {
           return "File-DB write past extends past end-of-file"s;
         case file_db_errc::file_erased:
           return "File-DB file erased";
+        case file_db_errc::file_exists:
+          return "File-DB file exists";
         case file_db_errc::closing:
           return "File-DB closing"s;
       }

@@ -280,6 +280,64 @@ TEST_FIXTURE(tx_file_contents, cannot_truncate_non_existant_file) {
   CHECK(callback_called);
 }
 
+TEST_FIXTURE(tx_file_contents, create_file) {
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  bool callback_called = false;
+  auto f = tx[earnest::file_id("", "does_not_exist.txt")];
+  f.async_create(
+      [&](std::error_code ec) {
+        CHECK_EQUAL(make_error_code(earnest::file_db_errc::file_erased), ec);
+        callback_called = true;
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  CHECK(callback_called);
+  tx.async_file_contents(
+      earnest::file_id("", "does_not_exist.txt"),
+      [&](std::error_code ec, std::vector<std::byte> bytes) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK(bytes.empty());
+      });
+  ioctx.run();
+}
+
+TEST_FIXTURE(tx_file_contents, cannot_create_existing_file) {
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  bool callback_called = false;
+  auto f = tx[testfile];
+  f.async_create(
+      [&](std::error_code ec) {
+        CHECK_EQUAL(make_error_code(earnest::file_db_errc::file_exists), ec);
+        callback_called = true;
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  CHECK(callback_called);
+}
+
+TEST_FIXTURE(tx_file_contents, erase_file) {
+  auto tx = fdb->tx_begin(earnest::isolation::repeatable_read);
+  bool callback_called = false;
+  auto f = tx[testfile];
+  f.async_erase(
+      [&](std::error_code ec) {
+        CHECK_EQUAL(std::error_code(), ec);
+        callback_called = true;
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  CHECK(callback_called);
+  tx.async_file_contents(
+      testfile,
+      [](std::error_code ec, [[maybe_unused]] std::vector<std::byte> bytes) {
+        CHECK_EQUAL(make_error_code(earnest::file_db_errc::file_erased), ec);
+      });
+  ioctx.run();
+}
+
 tx_file_contents::tx_file_contents() {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("tx_file_contents");
   fdb = std::make_shared<earnest::file_db<asio::io_context::executor_type>>(ioctx.get_executor());
