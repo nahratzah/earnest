@@ -11,6 +11,7 @@
 #include <asio/async_result.hpp>
 #include <asio/bind_allocator.hpp>
 #include <asio/bind_executor.hpp>
+#include <asio/deferred.hpp>
 #include <asio/executor_work_guard.hpp>
 #include <asio/write_at.hpp>
 
@@ -380,34 +381,37 @@ inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, cons
 }
 
 template<typename Executor, typename Allocator>
-template<typename Range, typename CompletionToken>
+template<typename Range, typename CompletionToken, typename TransactionValidator>
 #if __cpp_concepts >= 201907L
 requires std::ranges::input_range<std::remove_reference_t<Range>>
 #endif
-inline auto wal_file_entry<Executor, Allocator>::async_append(Range&& records, CompletionToken&& token) {
+inline auto wal_file_entry<Executor, Allocator>::async_append(Range&& records, CompletionToken&& token, TransactionValidator&& transaction_validator) {
   return async_append(
       write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()),
-      std::forward<CompletionToken>(token));
+      std::forward<CompletionToken>(token),
+      std::forward<TransactionValidator>(transaction_validator));
 }
 
 template<typename Executor, typename Allocator>
-template<typename CompletionToken>
-inline auto wal_file_entry<Executor, Allocator>::async_append(write_records_vector records, CompletionToken&& token) {
+template<typename CompletionToken, typename TransactionValidator>
+inline auto wal_file_entry<Executor, Allocator>::async_append(write_records_vector records, CompletionToken&& token, TransactionValidator&& transaction_validator) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
-      [](auto completion_handler, write_records_vector&& records, std::shared_ptr<wal_file_entry> wf, auto on_space_assigned) {
+      [](auto completion_handler, write_records_vector&& records, std::shared_ptr<wal_file_entry> wf, auto on_space_assigned, auto transaction_validator) {
         wf->write_records_to_buffer_(std::move(records),
             completion_wrapper<void(std::error_code, std::vector<std::byte, rebind_alloc<std::byte>>)>(
                 completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
                 [ wf,
-                  on_space_assigned=std::move(on_space_assigned)
+                  on_space_assigned=std::move(on_space_assigned),
+                  transaction_validator=std::move(transaction_validator)
                 ](auto handler, std::error_code ec, auto byte_vector) mutable {
-                  wf->append_bytes_(std::move(byte_vector), std::move(handler).as_unbound_handler(), std::move(on_space_assigned), ec);
+                  wf->append_bytes_(std::move(byte_vector), std::move(handler).as_unbound_handler(), std::move(on_space_assigned), ec, wal_file_entry_state::ready, std::move(transaction_validator));
                 }));
       },
       token,
       write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()),
       this->shared_from_this(),
-      ++seal_barrier_);
+      ++seal_barrier_,
+      std::forward<TransactionValidator>(transaction_validator));
 }
 
 template<typename Executor, typename Allocator>
@@ -599,10 +603,10 @@ inline auto wal_file_entry<Executor, Allocator>::async_records(CompletionToken&&
 }
 
 template<typename Executor, typename Allocator>
-template<typename CompletionToken, typename OnSpaceAssigned>
-inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state) {
+template<typename CompletionToken, typename OnSpaceAssigned, typename TransactionValidator>
+inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state, TransactionValidator&& transaction_validator) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
-      [](auto completion_handler, std::vector<std::byte, rebind_alloc<std::byte>> bytes, auto space_assigned_event, std::error_code ec, wal_file_entry_state expected_state, std::shared_ptr<wal_file_entry> wf) {
+      [](auto completion_handler, std::vector<std::byte, rebind_alloc<std::byte>> bytes, auto space_assigned_event, std::error_code ec, wal_file_entry_state expected_state, std::shared_ptr<wal_file_entry> wf, auto transaction_validator) {
         // When we're done, we'll either have assigned space, or we'll have decided there will be no space assigned.
         // In both cases, the write_offset_ will have been updated, satisfying the space_assigned_event.
         on_scope_exit space_assigned_completion{[&space_assigned_event]() { std::invoke(space_assigned_event, std::error_code()); }};
@@ -640,6 +644,13 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::
         auto barrier = make_completion_barrier(f, wf->get_executor());
         wf->link_done_event_.async_on_ready(++barrier);
 
+        const auto bound_transaction_validator = []([[maybe_unused]] auto& lde, [[maybe_unused]] TransactionValidator&& transaction_validator) {
+                                                   if constexpr(std::is_same_v<std::nullptr_t, std::remove_cvref_t<TransactionValidator>>)
+                                                     return asio::deferred.values(std::error_code());
+                                                   else
+                                                     return lde.async_on_ready(asio::deferred) | asio::deferred(std::move(transaction_validator));
+                                                 };
+
         wf->append_bytes_at_(wf->write_offset_, std::move(bytes), std::move(completion_handler),
             completion_wrapper<void(std::error_code)>(
                 std::move(barrier),
@@ -653,49 +664,60 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::
                   if (!ec) [[likely]] wf->link_offset_ += bytes_size;
                   std::invoke(f, ec);
                 }),
-            f);
+            f,
+            bound_transaction_validator(wf->link_done_event_, std::move(transaction_validator)));
 
         // Update offsets.
         wf->link_done_event_ = std::move(f); // Never throws.
         wf->write_offset_ += bytes_size; // Never throws.
       },
-      token, std::move(bytes), std::forward<OnSpaceAssigned>(space_assigned_event), ec, expected_state, this->shared_from_this());
+      token, std::move(bytes), std::forward<OnSpaceAssigned>(space_assigned_event), ec, expected_state, this->shared_from_this(), std::forward<TransactionValidator>(transaction_validator));
 }
 
 template<typename Executor, typename Allocator>
-template<typename CompletionToken, typename Barrier, typename Fanout>
+template<typename CompletionToken, typename Barrier, typename Fanout, typename DeferredTransactionValidator>
 inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
     typename fd_type::offset_type write_offset,
-    std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, Barrier&& barrier, Fanout&& f) {
+    std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, Barrier&& barrier, Fanout&& f, DeferredTransactionValidator&& deferred_transaction_validator) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
-      [](auto completion_handler, auto write_offset, std::vector<std::byte, rebind_alloc<std::byte>> bytes, Barrier&& barrier, Fanout&& f, std::shared_ptr<wal_file_entry> wf) {
+      [](auto completion_handler, auto write_offset, std::vector<std::byte, rebind_alloc<std::byte>> bytes, Barrier&& barrier, Fanout&& f, std::shared_ptr<wal_file_entry> wf, auto deferred_transaction_validator) {
+        // Commit barrier completes when the transaction validator and the write both complete.
+        auto commit_barrier = make_completion_barrier(
+            completion_wrapper<void(std::error_code)>(
+                completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                [ wf, write_offset,
+                  barrier=std::forward<Barrier>(barrier),
+                  f=std::forward<Fanout>(f),
+                  bytes_size=bytes.size(),
+                  link=std::array<std::byte, 4>{ bytes[0], bytes[1], bytes[2], bytes[3] }
+                ](auto completion_handler, std::error_code ec) mutable {
+                  if (ec) {
+                    wf->write_skip_record_(write_offset, bytes_size - 4u, std::move(barrier));
+
+                    // Complete the callback, since we know the error-code of its failure.
+                    std::invoke(completion_handler, ec);
+                  } else {
+                    f.async_on_ready(std::move(completion_handler).as_unbound_handler());
+                    wf->write_link_(write_offset, link, std::move(barrier));
+                  }
+                }),
+            wf->get_executor());
+        // Attach the validator.
+        std::move(deferred_transaction_validator) | ++commit_barrier;
+
         auto bytes_buf = asio::buffer(bytes);
         asio::async_write_at(
             wf->file,
             write_offset,
             bytes_buf + 4u,
             completion_wrapper<void(std::error_code, std::size_t)>(
-                completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
-                [ wf, write_offset,
-                  bytes=std::move(bytes),
-                  barrier=std::forward<Barrier>(barrier),
-                  f=std::forward<Fanout>(f)
-                ](auto completion_handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-                  if (ec) {
-                    wf->write_skip_record_(write_offset, bytes.size() - 4u,
-                        std::move(barrier));
-
-                    // Complete the callback, since we know the error-code of its failure.
-                    std::invoke(completion_handler, ec);
-                  } else {
-                    f.async_on_ready(std::move(completion_handler).as_unbound_handler());
-                    wf->write_link_(write_offset,
-                        std::array<std::byte, 4>{ bytes[0], bytes[1], bytes[2], bytes[3] },
-                        std::move(barrier));
-                  }
+                std::move(commit_barrier),
+                [bytes=std::move(bytes)](auto completion_handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                  bytes.clear();
+                  std::invoke(completion_handler, ec);
                 }));
       },
-      token, write_offset, std::move(bytes), std::forward<Barrier>(barrier), std::forward<Fanout>(f), this->shared_from_this());
+      token, write_offset, std::move(bytes), std::forward<Barrier>(barrier), std::forward<Fanout>(f), this->shared_from_this(), std::forward<DeferredTransactionValidator>(deferred_transaction_validator));
 }
 
 template<typename Executor, typename Allocator>

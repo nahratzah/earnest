@@ -27,6 +27,7 @@
 #include <earnest/detail/completion_wrapper.h>
 #include <earnest/detail/deferred_on_executor.h>
 #include <earnest/detail/file_recover_state.h>
+#include <earnest/detail/forward_deferred.h>
 #include <earnest/detail/monitor.h>
 #include <earnest/detail/namespace_map.h>
 #include <earnest/detail/positional_stream_adapter.h>
@@ -860,7 +861,7 @@ class transaction {
         std::invoke(read_barrier_, std::error_code(), nullptr);
         break;
       case isolation::repeatable_read:
-        compute_replacements_map_op_(fdb, std::move(fileset), allocator) | read_barrier_;
+        compute_replacements_map_op_(fdb, std::move(fileset), !read_permitted(m), allocator) | read_barrier_;
         break;
     }
   }
@@ -876,6 +877,11 @@ class transaction {
     return async_file_contents(std::move(id), std::allocator<std::byte>(), std::forward<CompletionToken>(token));
   }
 
+  template<typename CompletionToken>
+  auto async_commit(CompletionToken&& token) {
+    return commit_op_() | std::forward<CompletionToken>(token);
+  }
+
   auto get_allocator() const -> allocator_type { return alloc_; }
   auto get_executor() const -> executor_type { return fdb_->get_executor(); }
 
@@ -884,14 +890,15 @@ class transaction {
   }
 
   private:
-  auto compute_replacements_map_op_(std::shared_ptr<file_db> fdb, std::optional<std::unordered_set<file_id>> fileset, allocator_type allocator) {
+  static auto compute_replacements_map_op_(std::shared_ptr<file_db> fdb, std::optional<std::unordered_set<file_id>> fileset, bool omit_reads, allocator_type allocator) {
     auto repl_map = std::allocate_shared<locked_file_replacements>(allocator, allocator);
     return fdb->async_tx(
-        [fdb, repl_map, fileset=std::move(fileset), ex=fdb->get_executor(), allocator](const auto& record) -> std::error_code {
+        [fdb, repl_map, omit_reads, fileset=std::move(fileset), ex=fdb->get_executor(), allocator](const auto& record) -> std::error_code {
           return std::visit(
               [&](const auto& r) -> std::error_code {
                 if (!fileset.has_value() || fileset->contains(r.file)) {
                   auto [iter, inserted] = repl_map->fr.try_emplace(r.file, allocator);
+                  if (inserted) iter->second.omit_reads = omit_reads;
                   return iter->second.apply(r);
                 } else {
                   return {};
@@ -1152,7 +1159,7 @@ class transaction {
                     0,
                     asio::buffer(state_ref.bytes),
                     detail::completion_wrapper<void(std::error_code, std::size_t)>(
-                        std::move(handler),
+                        detail::completion_handler_fun(std::move(handler), fdb_ex),
                         [lock, state_ptr=std::move(state_ptr)](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
                           assert(ec || nbytes == state_ptr->bytes.size());
                           lock.reset(); // No longer need the lock.
@@ -1192,7 +1199,8 @@ class transaction {
                         }));
               },
               asio::deferred, ec, offset, std::move(buffers), std::move(lock), std::move(r), fdb->get_executor());
-        });
+        })
+    | detail::forward_deferred(get_executor());
   }
 
   template<typename MB>
@@ -1227,7 +1235,8 @@ class transaction {
         [wfw=++this->wait_for_writes_](std::error_code ec, std::size_t nbytes) mutable {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec, nbytes);
-        });
+        })
+    | detail::forward_deferred(get_executor());
   }
 
   auto async_truncate_op_(file_id id, std::uint64_t new_size) {
@@ -1255,7 +1264,8 @@ class transaction {
         [wfw=++this->wait_for_writes_](std::error_code ec) mutable {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec);
-        });
+        })
+    | detail::forward_deferred(get_executor());
   }
 
   auto async_create_file_op_(file_id id) {
@@ -1264,9 +1274,11 @@ class transaction {
         [id](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, [[maybe_unused]] auto filesize) mutable {
           if (ec == make_error_code(file_db_errc::file_erased)) {
             assert(replacements->replacements.empty());
+            if (replacements->erased)
+              replacements->erased = false;
+            else
+              replacements->created = true;
             replacements->file_size = 0u;
-            replacements->created = true;
-            replacements->erased = false;
           } else if (!ec) {
             ec = make_error_code(file_db_errc::file_exists);
           }
@@ -1278,7 +1290,8 @@ class transaction {
         [wfw=++this->wait_for_writes_](std::error_code ec) mutable {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec);
-        });
+        })
+    | detail::forward_deferred(get_executor());
   }
 
   auto async_erase_file_op_(file_id id) {
@@ -1287,9 +1300,13 @@ class transaction {
         [id](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, [[maybe_unused]] auto filesize) mutable {
           if (!ec) {
             replacements->replacements.clear();
-            replacements->file_size = std::nullopt;
-            replacements->created = false;
-            replacements->erased = true;
+            if (replacements->created) {
+              replacements->created = false;
+              replacements->file_size = std::nullopt;
+            } else {
+              replacements->file_size = std::nullopt;
+              replacements->erased = true;
+            }
           }
 
           lock.reset();
@@ -1299,7 +1316,128 @@ class transaction {
         [wfw=++this->wait_for_writes_](std::error_code ec) mutable {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec);
+        })
+    | detail::forward_deferred(get_executor());
+  }
+
+  auto commit_op_() {
+    std::invoke(writes_mon_, std::error_code()); // Complete the writes (further write attempts will now throw an exception).
+    return writes_mon_.async_on_ready(asio::deferred)
+    | asio::deferred(
+        [writes_mon=this->writes_mon_](std::error_code ec) mutable {
+          return asio::deferred.when(!ec)
+              .then(writes_mon.async_shared(asio::append(asio::deferred, ec)))
+              .otherwise(asio::deferred.values(typename monitor_type::shared_lock{}, ec));
+        })
+    | asio::deferred(
+        [ wmap=this->writes_map_,
+          fdb=this->fdb_,
+          allocator=this->alloc_
+        ](typename monitor_type::shared_lock lock, std::error_code ec) {
+          auto writes = std::vector<typename file_db::wal_type::write_variant_type, rebind_alloc<typename file_db::wal_type::write_variant_type>>(allocator);
+          if (!ec) {
+            std::for_each(
+                wmap->cbegin(), wmap->cend(),
+                [&writes](const auto& wmap_pair) {
+                  commit_elems_(wmap_pair.first, *wmap_pair.second, std::back_inserter(writes));
+                });
+          }
+
+          return asio::deferred.when(!ec)
+              .then(
+                  fdb->wal->async_append(
+                      std::move(writes),
+                      asio::append(asio::deferred, lock),
+                      [fdb, wmap]() {
+                        return can_commit_op_(fdb, wmap, allocator);
+                      }))
+              .otherwise(asio::deferred.values(ec, lock));
+        })
+    | asio::deferred(
+        // We carry lock foward to here, so that all preceding operations will have held the lock.
+        // And now we drop it, since we no longer need it.
+        [](std::error_code ec, [[maybe_unused]] typename monitor_type::shared_lock lock) {
+          return asio::deferred.values(ec);
+        })
+    | detail::forward_deferred(get_executor());
+  }
+
+  static auto can_commit_op_(std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap, allocator_type allocator) -> bool {
+    return asio::deferred(
+        [fdb, wmap]() {
+          std::unordered_set<file_id> id_set;
+          std::transform(
+              wmap.begin(), wmap.end(),
+              std::inserter(id_set, id_set.end()),
+              [](const auto& wmap_pair) -> const file_id& {
+                return wmap_pair.first;
+              });
+          return asio::deferred.values(std::move(id_set));
+        })
+    | asio::deferred(
+        [fdb, allocator](std::unordered_set<file_id> id_set) {
+          return compute_replacements_map_op_(fdb, std::move(id_set), true, allocator);
+        })
+    | asio::deferred(
+        [fdb, wmap](std::error_code ec, std::shared_ptr<locked_file_replacements> fr_map) mutable {
+          return detail::deferred_on_executor<void(std::error_code)>(
+              [](std::error_code ec, std::shared_ptr<locked_file_replacements> fr_map, std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap) {
+                if (!ec) {
+                  const bool writes_are_valid = std::all_of(
+                      wmap->begin(), wmap->end(),
+                      [&](const auto& wmap_entry) {
+                        const auto files_iter = fdb->files.find(wmap_entry.first);
+                        const bool files_iter_is_end = (files_iter == fdb->files.end());
+                        const bool files_iter_exists = (files_iter_is_end ? false : files_iter->second.fd->is_open());
+                        const auto files_iter_f_size = (files_iter_is_end || !files_iter_exists ? 0u : files_iter->second.fd->size());
+
+                        const auto fr_iter = fr_map->fr.find(wmap_entry.first);
+                        const auto fr_iter_is_end = (fr_iter == fr_map->fr.end());
+                        const bool exists = (fr_iter_is_end ? files_iter_exists : fr_iter->second.exists.value_or(files_iter_exists));
+                        const auto f_size = (fr_iter_is_end ? files_iter_f_size : fr_iter->second.file_size.value_or(files_iter_f_size));
+
+                        if (wmap_entry.second->created && exists) return false; // Double file-creation.
+                        if (wmap_entry.second->erased && !exists) return false; // Double file-erasure.
+
+                        if (wmap_entry.file_size.has_value()) return true; // All writes must meet the resize constraint.
+                        if (wmap_entry.replacements.empty()) return true; // No writes are outside the file-size.
+                        if (std::prev(wmap_entry.replacements.end())->end_offset() > f_size) return false; // Write past EOF.
+
+                        return true;
+                      });
+                  if (!writes_are_valid) ec = make_error_code(file_db_errc::cannot_commit);
+                }
+
+                return asio::deferred.values(ec);
+              },
+              fdb->strand_, ec, std::move(fr_map), std::move(fdb), std::move(wmap));
         });
+  }
+
+  template<typename InsertIter>
+  static auto commit_elems_(const file_id& id, const writes_map_element& elems, InsertIter insert_iter) -> void {
+    using detail::wal_record_erase_file;
+    using detail::wal_record_create_file;
+    using detail::wal_record_truncate_file;
+    using detail::wal_record_modify_file_write32;
+
+    if (elems.erased)
+      insert_iter++ = wal_record_erase_file{ .file=id };
+    if (elems.created)
+      insert_iter++ = wal_record_create_file{ .file=id };
+    if (elems.file_size.has_value())
+      insert_iter++ = wal_record_truncate_file{ .file=id, .new_size=elems.file_size.value() };
+
+    for (const auto& replacement : elems.replacements) {
+      insert_iter++ = wal_record_modify_file_write32{
+        .file=id,
+        .file_offset=replacement.offset(),
+        .data{
+            replacement.wal_file().begin() + replacement.wal_offset(),
+            replacement.wal_file().begin() + replacement.wal_offset() + replacement.size()
+        }
+      };
+    }
   }
 
   std::shared_ptr<FileDB> fdb_;

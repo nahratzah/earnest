@@ -77,7 +77,7 @@ struct file_recover_state {
       return make_error_code(file_db_errc::unrecoverable);
     }
 
-    replacements.insert(record);
+    if (!omit_reads) replacements.insert(record);
     return {};
   }
 
@@ -92,6 +92,7 @@ struct file_recover_state {
   replacement_map<fd_type, allocator_type> replacements;
   std::optional<bool> exists = std::nullopt;
   std::optional<std::uint64_t> file_size = std::nullopt;
+  bool omit_reads = false;
 };
 
 

@@ -83,10 +83,10 @@ class wal_file
     : file(std::move(file))
     {}
 
-    template<typename Range, typename CompletionToken>
-    auto async_append(Range&& records, CompletionToken&& token) {
+    template<typename Range, typename CompletionToken, typename... TransactionValidation>
+    auto async_append(Range&& records, CompletionToken&& token, TransactionValidation&&... transaction_validation) {
       return asio::async_initiate<CompletionToken, void(std::error_code)>(
-          [](auto handler, std::shared_ptr<entry> self, typename entry_type::write_records_vector records) {
+          [](auto handler, std::shared_ptr<entry> self, typename entry_type::write_records_vector records, auto... transaction_validation) {
             self->file->async_append(
                 std::move(records),
                 completion_wrapper<void(std::error_code)>(
@@ -94,9 +94,10 @@ class wal_file
                     [self](auto handler, std::error_code ec) {
                       if (!ec) self->on_change_();
                       std::invoke(handler, ec);
-                    }));
+                    }),
+                std::move(transaction_validation)...);
           },
-          token, this->shared_from_this(), typename entry_type::write_records_vector(std::ranges::begin(records), std::ranges::end(records), file->get_allocator()));
+          token, this->shared_from_this(), typename entry_type::write_records_vector(std::ranges::begin(records), std::ranges::end(records), file->get_allocator()), std::forward<TransactionValidation>(transaction_validation)...);
     }
 
     template<typename Acceptor, typename CompletionToken>
@@ -253,28 +254,58 @@ class wal_file
   auto async_append(Range&& records, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, std::shared_ptr<wal_file> wf, auto records) {
+          asio::dispatch(
+              completion_wrapper<void()>(
+                  completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                  [wf, records=std::move(records)](auto handler) mutable {
+                    assert(wf->strand_.running_in_this_thread());
 
-        asio::dispatch(
-            completion_wrapper<void()>(
-                completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
-                [wf, records=std::move(records)](auto handler) mutable {
-                  assert(wf->strand_.running_in_this_thread());
+                    if (wf->active == nullptr) [[unlikely]] {
+                      handler.dispatch(make_error_code(wal_errc::bad_state));
+                      return;
+                    }
 
-                  if (wf->active == nullptr) [[unlikely]] {
-                    handler.dispatch(make_error_code(wal_errc::bad_state));
-                    return;
-                  }
-
-                  // Note: we don't need to hold a tx_lock,
-                  // because:
-                  // 1. the seal operation will create one of those when required
-                  // 2. the seal operation will maintain its own lock until the seal is confirmed written out
-                  // 3. the seal won't complete writing out until all writes preceding it are completed
-                  //    (which includes this write)
-                  wf->active->async_append(std::move(records), std::move(handler).inner_handler());
-                }));
+                    // Note: we don't need to hold a tx_lock,
+                    // because:
+                    // 1. the seal operation will create one of those when required
+                    // 2. the seal operation will maintain its own lock until the seal is confirmed written out
+                    // 3. the seal won't complete writing out until all writes preceding it are completed
+                    //    (which includes this write)
+                    wf->active->async_append(std::move(records), std::move(handler).inner_handler());
+                  }));
         },
         token, this->shared_from_this(), write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()));
+  }
+
+  template<typename Range, typename CompletionToken, typename TransactionValidation>
+  requires std::ranges::input_range<std::remove_reference_t<Range>>
+  auto async_append(Range&& records, CompletionToken&& token, TransactionValidation&& transaction_validation) {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<wal_file> wf, auto records, auto transaction_validation) {
+          asio::dispatch(
+              completion_wrapper<void()>(
+                  completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                  [ wf,
+                    records=std::move(records),
+                    transaction_validation=std::move(transaction_validation)
+                  ](auto handler) mutable {
+                    assert(wf->strand_.running_in_this_thread());
+
+                    if (wf->active == nullptr) [[unlikely]] {
+                      handler.dispatch(make_error_code(wal_errc::bad_state));
+                      return;
+                    }
+
+                    // Note: we don't need to hold a tx_lock,
+                    // because:
+                    // 1. the seal operation will create one of those when required
+                    // 2. the seal operation will maintain its own lock until the seal is confirmed written out
+                    // 3. the seal won't complete writing out until all writes preceding it are completed
+                    //    (which includes this write)
+                    wf->active->async_append(std::move(records), std::move(handler).inner_handler(), std::move(transaction_validation));
+                  }));
+        },
+        token, this->shared_from_this(), write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()), std::forward<TransactionValidation>(transaction_validation));
   }
 
   template<typename CompletionToken>

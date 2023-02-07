@@ -89,14 +89,14 @@ class wal_file_entry
   template<typename CompletionToken>
   auto async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token);
 
-  template<typename Range, typename CompletionToken>
+  template<typename Range, typename CompletionToken, typename TransactionValidator = std::nullptr_t>
 #if __cpp_concepts >= 201907L
   requires std::ranges::input_range<std::remove_reference_t<Range>>
 #endif
-  auto async_append(Range&& records, CompletionToken&& token);
+  auto async_append(Range&& records, CompletionToken&& token, TransactionValidator&& transaction_validator = nullptr);
 
-  template<typename CompletionToken>
-  auto async_append(write_records_vector records, CompletionToken&& token);
+  template<typename CompletionToken, typename TransactionValidator = std::nullptr_t>
+  auto async_append(write_records_vector records, CompletionToken&& token, TransactionValidator&& transaction_validator = nullptr);
 
   template<typename CompletionToken>
   auto async_seal(CompletionToken&& token);
@@ -116,15 +116,16 @@ class wal_file_entry
   auto async_records(CompletionToken&& token) const;
 
   private:
-  template<typename CompletionToken, typename OnSpaceAssigned>
-  auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state = wal_file_entry_state::ready);
+  template<typename CompletionToken, typename OnSpaceAssigned, typename TransactionValidator = std::nullptr_t>
+  auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state = wal_file_entry_state::ready, TransactionValidator&& transaction_validator = nullptr);
 
-  template<typename CompletionToken, typename Barrier, typename Fanout>
+  template<typename CompletionToken, typename Barrier, typename Fanout, typename DeferredTransactionValidator>
   auto append_bytes_at_(
       typename fd_type::offset_type write_offset,
       std::vector<std::byte, rebind_alloc<std::byte>>&& bytes,
       CompletionToken&& token,
-      Barrier&& barrier, Fanout&& f);
+      Barrier&& barrier, Fanout&& f,
+      DeferredTransactionValidator&& deferred_transaction_validator);
 
   template<typename CompletionToken>
   auto write_skip_record_(
