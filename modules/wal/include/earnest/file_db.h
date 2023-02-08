@@ -1274,6 +1274,7 @@ class transaction {
         [id](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, [[maybe_unused]] auto filesize) mutable {
           if (ec == make_error_code(file_db_errc::file_erased)) {
             assert(replacements->replacements.empty());
+            ec.clear();
             if (replacements->erased)
               replacements->erased = false;
             else
@@ -1321,8 +1322,8 @@ class transaction {
   }
 
   auto commit_op_() {
-    std::invoke(writes_mon_, std::error_code()); // Complete the writes (further write attempts will now throw an exception).
-    return writes_mon_.async_on_ready(asio::deferred)
+    std::invoke(this->wait_for_writes_, std::error_code()); // Complete the writes (further write attempts will now throw an exception).
+    return this->wait_for_writes_.async_on_ready(asio::deferred)
     | asio::deferred(
         [writes_mon=this->writes_mon_](std::error_code ec) mutable {
           return asio::deferred.when(!ec)
@@ -1348,9 +1349,7 @@ class transaction {
                   fdb->wal->async_append(
                       std::move(writes),
                       asio::append(asio::deferred, lock),
-                      [fdb, wmap]() {
-                        return can_commit_op_(fdb, wmap, allocator);
-                      }))
+                      can_commit_op_(fdb, wmap, allocator)))
               .otherwise(asio::deferred.values(ec, lock));
         })
     | asio::deferred(
@@ -1362,26 +1361,19 @@ class transaction {
     | detail::forward_deferred(get_executor());
   }
 
-  static auto can_commit_op_(std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap, allocator_type allocator) -> bool {
-    return asio::deferred(
-        [fdb, wmap]() {
-          std::unordered_set<file_id> id_set;
-          std::transform(
-              wmap.begin(), wmap.end(),
-              std::inserter(id_set, id_set.end()),
-              [](const auto& wmap_pair) -> const file_id& {
-                return wmap_pair.first;
-              });
-          return asio::deferred.values(std::move(id_set));
-        })
+  static auto can_commit_op_(std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap, allocator_type allocator) {
+    std::unordered_set<file_id> id_set;
+    std::transform(
+        wmap->begin(), wmap->end(),
+        std::inserter(id_set, id_set.end()),
+        [](const auto& wmap_pair) -> const file_id& {
+          return wmap_pair.first;
+        });
+    return compute_replacements_map_op_(fdb, std::move(id_set), true, allocator)
     | asio::deferred(
-        [fdb, allocator](std::unordered_set<file_id> id_set) {
-          return compute_replacements_map_op_(fdb, std::move(id_set), true, allocator);
-        })
-    | asio::deferred(
-        [fdb, wmap](std::error_code ec, std::shared_ptr<locked_file_replacements> fr_map) mutable {
+        [fdb, wmap](std::error_code ec, std::shared_ptr<const locked_file_replacements> fr_map) mutable {
           return detail::deferred_on_executor<void(std::error_code)>(
-              [](std::error_code ec, std::shared_ptr<locked_file_replacements> fr_map, std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap) {
+              [](std::error_code ec, std::shared_ptr<const locked_file_replacements> fr_map, std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap) {
                 if (!ec) {
                   const bool writes_are_valid = std::all_of(
                       wmap->begin(), wmap->end(),
@@ -1399,9 +1391,9 @@ class transaction {
                         if (wmap_entry.second->created && exists) return false; // Double file-creation.
                         if (wmap_entry.second->erased && !exists) return false; // Double file-erasure.
 
-                        if (wmap_entry.file_size.has_value()) return true; // All writes must meet the resize constraint.
-                        if (wmap_entry.replacements.empty()) return true; // No writes are outside the file-size.
-                        if (std::prev(wmap_entry.replacements.end())->end_offset() > f_size) return false; // Write past EOF.
+                        if (wmap_entry.second->file_size.has_value()) return true; // All writes must meet the resize constraint.
+                        if (wmap_entry.second->replacements.empty()) return true; // No writes are outside the file-size.
+                        if (std::prev(wmap_entry.second->replacements.end())->end_offset() > f_size) return false; // Write past EOF.
 
                         return true;
                       });
@@ -1433,8 +1425,8 @@ class transaction {
         .file=id,
         .file_offset=replacement.offset(),
         .data{
-            replacement.wal_file().begin() + replacement.wal_offset(),
-            replacement.wal_file().begin() + replacement.wal_offset() + replacement.size()
+            replacement.wal_file().cdata().begin() + replacement.wal_offset(),
+            replacement.wal_file().cdata().begin() + replacement.wal_offset() + replacement.size()
         }
       };
     }

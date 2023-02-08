@@ -286,7 +286,7 @@ TEST_FIXTURE(tx_file_contents, create_file) {
   auto f = tx[earnest::file_id("", "does_not_exist.txt")];
   f.async_create(
       [&](std::error_code ec) {
-        CHECK_EQUAL(make_error_code(earnest::file_db_errc::file_erased), ec);
+        CHECK_EQUAL(std::error_code(), ec);
         callback_called = true;
       });
   ioctx.run();

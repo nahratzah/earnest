@@ -645,10 +645,18 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::
         wf->link_done_event_.async_on_ready(++barrier);
 
         const auto bound_transaction_validator = []([[maybe_unused]] auto& lde, [[maybe_unused]] TransactionValidator&& transaction_validator) {
-                                                   if constexpr(std::is_same_v<std::nullptr_t, std::remove_cvref_t<TransactionValidator>>)
+                                                   if constexpr(std::is_same_v<std::nullptr_t, std::remove_cvref_t<TransactionValidator>>) {
                                                      return asio::deferred.values(std::error_code());
-                                                   else
-                                                     return lde.async_on_ready(asio::deferred) | asio::deferred(std::move(transaction_validator));
+                                                   } else {
+                                                     return lde.async_on_ready(asio::deferred)
+                                                     | asio::deferred(
+                                                         [ transaction_validator=std::forward<TransactionValidator>(transaction_validator)
+                                                         ](std::error_code ec) mutable {
+                                                           return asio::deferred.when(!ec)
+                                                               .then(std::move(transaction_validator))
+                                                               .otherwise(asio::deferred.values(ec));
+                                                         });
+                                                   }
                                                  };
 
         wf->append_bytes_at_(wf->write_offset_, std::move(bytes), std::move(completion_handler),
