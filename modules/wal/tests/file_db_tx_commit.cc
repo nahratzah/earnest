@@ -87,6 +87,70 @@ TEST_FIXTURE(tx_commit, cannot_commit_twice) {
       std::logic_error);
 }
 
+TEST_FIXTURE(tx_commit, cannot_create_the_same_file_twice) {
+  using namespace std::literals;
+
+  auto tx1 = make_tx();
+  auto tx2 = make_tx();
+  {
+    auto f = tx1[new_file];
+    f.async_create(asio::deferred)
+    | asio::deferred(
+        [&](std::error_code ec) {
+          CHECK_EQUAL(std::error_code(), ec);
+          return f.async_truncate(4, asio::deferred);
+        })
+    | asio::deferred(
+        [&](std::error_code ec) {
+          CHECK_EQUAL(std::error_code(), ec);
+          return asio::async_write_at(f, 0, asio::buffer("abba"sv), asio::deferred);
+        })
+    | asio::deferred(
+        [&](std::error_code ec, std::size_t nbytes) {
+          CHECK_EQUAL(std::error_code(), ec);
+          CHECK_EQUAL(4u, nbytes);
+          return tx1.async_commit(asio::deferred);
+        })
+    | [](std::error_code ec) {
+        CHECK_EQUAL(std::error_code(), ec);
+      };
+  }
+  {
+    auto f = tx2[new_file];
+    f.async_create(asio::deferred)
+    | asio::deferred(
+        [&](std::error_code ec) {
+          CHECK_EQUAL(std::error_code(), ec);
+          return f.async_truncate(4, asio::deferred);
+        })
+    | asio::deferred(
+        [&](std::error_code ec) {
+          CHECK_EQUAL(std::error_code(), ec);
+          return asio::async_write_at(f, 0, asio::buffer("abba"sv), asio::deferred);
+        })
+    | [](std::error_code ec, std::size_t nbytes) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK_EQUAL(4u, nbytes);
+      };
+  }
+  ioctx.run();
+  ioctx.restart();
+
+  // At this point, tx1 is commited, but tx2 is not.
+  // both create the same file with the same contents.
+  bool callback_called = false;
+  tx2.async_commit(
+      [&](std::error_code ec) {
+        CHECK_EQUAL(make_error_code(earnest::file_db_errc::cannot_commit), ec);
+        callback_called = true;
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  CHECK(callback_called);
+  CHECK_EQUAL("abba"s, get_file_contents(new_file));
+}
+
 tx_commit::tx_commit() {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("tx_commit");
   fdb = std::make_shared<earnest::file_db<asio::io_context::executor_type>>(ioctx.get_executor());
