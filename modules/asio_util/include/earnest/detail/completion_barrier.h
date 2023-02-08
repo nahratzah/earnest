@@ -36,7 +36,7 @@ class completion_barrier {
 
     void update(std::error_code ec) {
       std::unique_lock<std::mutex> lck(mtx_);
-      assert(await_ > 0);
+      if (await_ == 0) [[unlikely]] throw std::logic_error("fanout_barrier: too many invocations");
 
       // Memorize the first failure (and discard further failures).
       if (!ec_) ec_ = ec;

@@ -44,7 +44,7 @@ class fanout_barrier {
 
     auto update(std::error_code ec) -> void {
       std::unique_lock lck{mtx_};
-      assert(await_ > 0);
+      if (await_ == 0) [[unlikely]] throw std::logic_error("fanout_barrier: too many invocations");
 
       // Memorize the first failure (and discard further failures).
       if (!ec_) ec_ = ec;

@@ -79,6 +79,14 @@ TEST_FIXTURE(tx_commit, commit) {
   CHECK_EQUAL("abba"s, get_file_contents(new_file));
 }
 
+TEST_FIXTURE(tx_commit, cannot_commit_twice) {
+  auto tx = make_tx();
+  tx.async_commit([](std::error_code ec) { CHECK_EQUAL(std::error_code(), ec); });
+  CHECK_THROW(
+      tx.async_commit([](std::error_code ec) { CHECK_EQUAL(std::error_code(), ec); }),
+      std::logic_error);
+}
+
 tx_commit::tx_commit() {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("tx_commit");
   fdb = std::make_shared<earnest::file_db<asio::io_context::executor_type>>(ioctx.get_executor());
