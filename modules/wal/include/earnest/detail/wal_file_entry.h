@@ -33,6 +33,9 @@ enum class wal_file_entry_state {
 auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::ostream&;
 
 
+struct no_transaction_validation {};
+
+
 template<typename Executor, typename Allocator>
 class wal_file_entry
 : public std::enable_shared_from_this<wal_file_entry<Executor, Allocator>>
@@ -89,14 +92,14 @@ class wal_file_entry
   template<typename CompletionToken>
   auto async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token);
 
-  template<typename Range, typename CompletionToken, typename TransactionValidator = std::nullptr_t>
+  template<typename Range, typename CompletionToken, typename TransactionValidator = no_transaction_validation>
 #if __cpp_concepts >= 201907L
   requires std::ranges::input_range<std::remove_reference_t<Range>>
 #endif
-  auto async_append(Range&& records, CompletionToken&& token, TransactionValidator&& transaction_validator = nullptr);
+  auto async_append(Range&& records, CompletionToken&& token, TransactionValidator&& transaction_validator = no_transaction_validation());
 
-  template<typename CompletionToken, typename TransactionValidator = std::nullptr_t>
-  auto async_append(write_records_vector records, CompletionToken&& token, TransactionValidator&& transaction_validator = nullptr);
+  template<typename CompletionToken, typename TransactionValidator = no_transaction_validation>
+  auto async_append(write_records_vector records, CompletionToken&& token, TransactionValidator&& transaction_validator = no_transaction_validation());
 
   template<typename CompletionToken>
   auto async_seal(CompletionToken&& token);
@@ -116,8 +119,8 @@ class wal_file_entry
   auto async_records(CompletionToken&& token) const;
 
   private:
-  template<typename CompletionToken, typename OnSpaceAssigned, typename TransactionValidator = std::nullptr_t>
-  auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state = wal_file_entry_state::ready, TransactionValidator&& transaction_validator = nullptr);
+  template<typename CompletionToken, typename OnSpaceAssigned, typename TransactionValidator = no_transaction_validation>
+  auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state = wal_file_entry_state::ready, TransactionValidator&& transaction_validator = no_transaction_validation());
 
   template<typename CompletionToken, typename Barrier, typename Fanout, typename DeferredTransactionValidator>
   auto append_bytes_at_(

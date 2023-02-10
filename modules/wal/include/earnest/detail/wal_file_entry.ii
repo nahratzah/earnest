@@ -645,8 +645,8 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::
         wf->link_done_event_.async_on_ready(++barrier);
 
         const auto bound_transaction_validator = []([[maybe_unused]] auto& lde, [[maybe_unused]] TransactionValidator&& transaction_validator) {
-                                                   if constexpr(std::is_same_v<std::nullptr_t, std::remove_cvref_t<TransactionValidator>>) {
-                                                     return nullptr;
+                                                   if constexpr(std::is_same_v<no_transaction_validation, std::remove_cvref_t<TransactionValidator>>) {
+                                                     return transaction_validator;
                                                    } else {
                                                      return lde.async_on_ready(asio::deferred)
                                                      | asio::deferred(
@@ -718,7 +718,7 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
                     }
                   });
 
-              if constexpr(std::is_same_v<std::nullptr_t, std::remove_cvref_t<DeferredTransactionValidator>>) {
+              if constexpr(std::is_same_v<no_transaction_validation, std::remove_cvref_t<DeferredTransactionValidator>>) {
                 return wrapper;
               } else {
                 // Commit barrier completes when the transaction validator and the write both complete.
