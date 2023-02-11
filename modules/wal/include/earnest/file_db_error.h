@@ -47,11 +47,11 @@ inline auto file_db_category() -> const std::error_category& {
         case file_db_errc::write_past_eof:
           return "File-DB write past extends past end-of-file"s;
         case file_db_errc::file_erased:
-          return "File-DB file erased";
+          return "File-DB file erased"s;
         case file_db_errc::file_exists:
-          return "File-DB file exists";
+          return "File-DB file exists"s;
         case file_db_errc::cannot_commit:
-          return "File-DB cannot commit";
+          return "File-DB cannot commit"s;
         case file_db_errc::closing:
           return "File-DB closing"s;
       }
@@ -62,7 +62,7 @@ inline auto file_db_category() -> const std::error_category& {
   return impl;
 }
 
-inline auto make_error_code(file_db_errc e) -> std::error_code {
+inline auto make_error_code(file_db_errc e) noexcept -> std::error_code {
   return std::error_code(static_cast<int>(e), file_db_category());
 }
 

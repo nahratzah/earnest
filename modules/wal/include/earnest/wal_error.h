@@ -59,7 +59,7 @@ inline auto earnest_category() -> const std::error_category& {
   return impl;
 }
 
-inline auto make_error_code(wal_errc e) -> std::error_code {
+inline auto make_error_code(wal_errc e) noexcept -> std::error_code {
   return std::error_code(static_cast<int>(e), earnest_category());
 }
 

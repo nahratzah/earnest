@@ -25,7 +25,7 @@ target_sources(wal
 
 find_package(Boost REQUIRED)
 target_include_directories(wal INTERFACE ${Boost_INCLUDE_DIR})
-target_link_libraries(wal INTERFACE asio asio_util xdr io)
+target_link_libraries(wal INTERFACE asio asio_util xdr io util)
 
 find_package(UnitTest++)
 if (UnitTest++_FOUND)

@@ -4,3 +4,6 @@
 [submodule "modules/cycle_ptr"]
 	path = modules/cycle_ptr
 	url = https://github.com/nahratzah/cycle_ptr.git
+[submodule "modules/libhoard"]
+	path = modules/libhoard
+	url = https://github.com/nahratzah/libhoard.git
