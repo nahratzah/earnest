@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+#include <functional>
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
@@ -29,6 +30,7 @@
 #include <earnest/detail/file_recover_state.h>
 #include <earnest/detail/forward_deferred.h>
 #include <earnest/detail/monitor.h>
+#include <earnest/detail/move_only_function.h>
 #include <earnest/detail/namespace_map.h>
 #include <earnest/detail/positional_stream_adapter.h>
 #include <earnest/detail/replacement_map.h>
@@ -39,6 +41,49 @@
 #include <earnest/file_id.h>
 #include <earnest/isolation.h>
 #include <earnest/tx_mode.h>
+
+namespace earnest::detail {
+
+
+template<typename Alloc>
+class on_commit_events {
+  private:
+  using function_type = move_only_function<void()>;
+
+  public:
+  using allocator_type = Alloc;
+
+  explicit on_commit_events(allocator_type alloc)
+  : events_(std::move(alloc))
+  {}
+
+  auto get_allocator() const -> allocator_type {
+    return events_.get_allocator();
+  }
+
+  template<typename Fn>
+  auto add(Fn&& fn) -> void {
+    std::lock_guard lck{mtx_};
+    events_.emplace_back(std::forward<Fn>(fn));
+  }
+
+  auto run() {
+    std::lock_guard lck{mtx_};
+    std::for_each(
+        events_.begin(), events_.end(),
+        [](const auto& event_fn) {
+          std::invoke(event_fn);
+        });
+    events_.clear();
+  }
+
+  private:
+  std::mutex mtx_;
+  std::vector<std::function<void()>, typename std::allocator_traits<Alloc>::template rebind_alloc<std::function<void()>>> events_;
+};
+
+
+} /* namespace earnest::detail */
 
 namespace earnest {
 
@@ -832,9 +877,10 @@ class transaction {
 
   using reader_type = detail::replacement_map_reader<raw_reader_type, writes_buffer_type, allocator_type>;
   using monitor_type = detail::monitor<executor_type, allocator_type>;
-  class file;
 
   public:
+  class file;
+
   transaction(const transaction&) = default;
   transaction(transaction&&) = default;
 
@@ -847,7 +893,8 @@ class transaction {
     writes_map_(std::allocate_shared<writes_map>(allocator, allocator)),
     read_barrier_(fdb->get_executor(), allocator),
     writes_mon_(fdb->get_executor(), allocator),
-    wait_for_writes_(fdb->get_executor(), allocator)
+    wait_for_writes_(fdb->get_executor(), allocator),
+    on_commit_events_(std::allocate_shared<detail::on_commit_events<allocator_type>>(allocator, allocator))
   {
     switch (i_) {
       default:
@@ -880,6 +927,11 @@ class transaction {
   template<typename CompletionToken>
   auto async_commit(CompletionToken&& token) {
     return commit_op_() | std::forward<CompletionToken>(token);
+  }
+
+  template<typename Fn>
+  auto on_commit(Fn&& fn) {
+    return on_commit_events_->add(std::forward<Fn>(fn));
   }
 
   auto get_allocator() const -> allocator_type { return alloc_; }
@@ -1239,6 +1291,16 @@ class transaction {
     | detail::forward_deferred(get_executor());
   }
 
+  auto async_file_size_op_(file_id id) const {
+    return get_raw_reader_op_(std::move(id))
+    | asio::deferred(
+        [](std::error_code ec, raw_reader_type raw_reader) {
+          const typename raw_reader_type::size_type file_size = (!ec ? raw_reader.size() : 0u);
+          return asio::deferred.values(ec, file_size);
+        })
+    | detail::forward_deferred(get_executor());
+  }
+
   auto async_truncate_op_(file_id id, std::uint64_t new_size) {
     return get_writer_op_(std::move(id))
     | asio::deferred(
@@ -1358,6 +1420,12 @@ class transaction {
         [](std::error_code ec, [[maybe_unused]] typename monitor_type::shared_lock lock) {
           return asio::deferred.values(ec);
         })
+    | asio::deferred(
+        [ on_commit_events=this->on_commit_events_
+        ](std::error_code ec) {
+          if (!ec) on_commit_events->run();
+          return asio::deferred.values(ec);
+        })
     | detail::forward_deferred(get_executor());
   }
 
@@ -1440,6 +1508,7 @@ class transaction {
   mutable detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
   mutable monitor_type writes_mon_;
   detail::fanout_barrier<executor_type, allocator_type> wait_for_writes_;
+  std::shared_ptr<detail::on_commit_events<allocator_type>> on_commit_events_;
 };
 
 
@@ -1485,6 +1554,11 @@ class transaction<FileDB, Allocator>::file {
   template<typename MB, typename CompletionToken>
   auto async_write_some_at(std::uint64_t offset, MB&& mb, CompletionToken&& token) {
     return tx_.async_file_write_some_op_(id_, offset, std::forward<MB>(mb)) | std::forward<CompletionToken>(token);
+  }
+
+  template<typename CompletionToken>
+  auto async_file_size(CompletionToken&& token) const {
+    return tx_.async_file_size_op_(id_) | std::forward<CompletionToken>(token);
   }
 
   private:

@@ -3896,7 +3896,7 @@ inline auto manual_holder<Fn, Lead, LeadSpec, Temporary>::with_temporary() const
 
 template<typename Fn, typename LeadSpec, typename Temporary>
 template<typename NewLead, typename NewLeadSpec>
-inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec(NewLeadSpec lead_spec) && -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary> {
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_lead(NewLeadSpec lead_spec) && -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary> {
   return manual_holder<Fn, NewLead, NewLeadSpec, Temporary>{
     .fn = std::move(fn),
     .spec = std::move(lead_spec)
@@ -3905,7 +3905,7 @@ inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec(NewLeadSpec 
 
 template<typename Fn, typename LeadSpec, typename Temporary>
 template<typename NewLead, typename NewLeadSpec>
-inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec(NewLeadSpec lead_spec) const & -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary> {
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_lead(NewLeadSpec lead_spec) const & -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary> {
   return manual_holder<Fn, NewLead, NewLeadSpec, Temporary>{
     .fn = fn,
     .spec = lead_spec
@@ -3914,7 +3914,7 @@ inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec(NewLeadSpec 
 
 template<typename Fn, typename LeadSpec, typename Temporary>
 template<typename NewLead>
-inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec() && -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary> {
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_lead() && -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary> {
   return manual_holder<Fn, NewLead, xdr_identity_t, Temporary>{
     .fn = std::move(fn),
     .spec = xdr_identity
@@ -3923,7 +3923,7 @@ inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec() && -> manu
 
 template<typename Fn, typename LeadSpec, typename Temporary>
 template<typename NewLead>
-inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_spec() const & -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary> {
+inline auto manual_holder<Fn, void, LeadSpec, Temporary>::with_lead() const & -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary> {
   return manual_holder<Fn, NewLead, xdr_identity_t, Temporary>{
     .fn = fn,
     .spec = xdr_identity
@@ -3969,9 +3969,9 @@ inline auto operator&(xdr<xdr_reader::reader<X...>>&& x, manual_holder<Fn, Lead,
     } else {
       return add_raw(std::move(x), make_decoder<temporary_with_spec<Lead, LeadSpec>>(
               [fn=std::move(h.fn)]<typename... Args>(temporary_with_spec<Lead, LeadSpec>& tmp, Args&&... args) mutable {
-                std::invoke(tmp.value, std::forward<Args>(args)...);
+                std::invoke(fn, tmp.value, std::forward<Args>(args)...);
               },
-              temporary_with_spec<Lead, LeadSpec>(std::move(h.lead_spec))));
+              temporary_with_spec<Lead, LeadSpec>(std::move(h.spec))));
     }
   }
 }

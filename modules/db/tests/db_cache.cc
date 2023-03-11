@@ -16,7 +16,7 @@ class db_cache_fixture {
   : private cycle_ptr::cycle_base
   {
     public:
-    cache_wrapper(db_type::executor_type ex, db_type::allocator_type alloc)
+    cache_wrapper(db_type::executor_type ex, std::allocator<std::byte> alloc)
     : cache_(*this, ex, alloc)
     {}
 

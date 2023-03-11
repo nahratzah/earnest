@@ -2528,13 +2528,13 @@ struct manual_holder<Fn, void, LeadSpec, Temporary> {
   LeadSpec spec;
 
   template<typename NewLead, typename NewLeadSpec>
-  auto with_spec(NewLeadSpec lead_spec) && -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary>;
+  auto with_lead(NewLeadSpec lead_spec) && -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary>;
   template<typename NewLead, typename NewLeadSpec>
-  auto with_spec(NewLeadSpec lead_spec) const & -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary>;
+  auto with_lead(NewLeadSpec lead_spec) const & -> manual_holder<Fn, NewLead, NewLeadSpec, Temporary>;
   template<typename NewLead>
-  auto with_spec() && -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary>;
+  auto with_lead() && -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary>;
   template<typename NewLead>
-  auto with_spec() const & -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary>;
+  auto with_lead() const & -> manual_holder<Fn, NewLead, xdr_identity_t, Temporary>;
 
   template<typename NewTemporary, bool Enabled = std::is_void_v<Temporary>>
   auto with_temporary() && -> std::enable_if_t<Enabled, manual_holder<Fn, void, LeadSpec, NewTemporary>>;

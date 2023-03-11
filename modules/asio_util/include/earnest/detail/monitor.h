@@ -153,8 +153,8 @@ class monitor {
   };
 
   private:
-  using exclusive_function = move_only_function<void(exclusive_lock)>;
-  using shared_function = move_only_function<void(shared_lock)>;
+  using exclusive_function = move_only_function<void(exclusive_lock, bool)>;
+  using shared_function = move_only_function<void(shared_lock, bool)>;
 
   public:
   explicit monitor(executor_type ex, allocator_type alloc = allocator_type())
@@ -165,7 +165,13 @@ class monitor {
   auto async_shared(CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(shared_lock)>(
         [](auto handler, std::shared_ptr<state> state_) {
-          state_->add(shared_function(completion_handler_fun(std::move(handler), state_->get_executor())));
+          state_->add(
+              shared_function(
+                  completion_wrapper<void(shared_lock, bool)>(
+                      completion_handler_fun(std::move(handler), state_->get_executor()),
+                      [](auto handler, shared_lock lock, [[maybe_unused]] bool immediate) {
+                        std::invoke(handler, std::move(lock));
+                      })));
         },
         token, state_);
   }
@@ -174,7 +180,49 @@ class monitor {
   auto async_exclusive(CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(exclusive_lock)>(
         [](auto handler, std::shared_ptr<state> state_) {
-          state_->add(exclusive_function(completion_handler_fun(std::move(handler), state_->get_executor())));
+          state_->add(
+              exclusive_function(
+                  completion_wrapper<void(exclusive_lock, bool)>(
+                      completion_handler_fun(std::move(handler), state_->get_executor()),
+                      [](auto handler, exclusive_lock lock, [[maybe_unused]] bool immediate) {
+                        std::invoke(handler, std::move(lock));
+                      })));
+        },
+        token, state_);
+  }
+
+  template<typename CompletionToken>
+  auto dispatch_shared(CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(shared_lock)>(
+        [](auto handler, std::shared_ptr<state> state_) {
+          state_->add(
+              shared_function(
+                  completion_wrapper<void(shared_lock, bool)>(
+                      completion_handler_fun(std::move(handler), state_->get_executor()),
+                      [](auto handler, shared_lock lock, bool immediate) {
+                        if (immediate)
+                          std::invoke(handler.inner_handler(), std::move(lock));
+                        else
+                          std::invoke(handler, std::move(lock));
+                      })));
+        },
+        token, state_);
+  }
+
+  template<typename CompletionToken>
+  auto dispatch_exclusive(CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(exclusive_lock)>(
+        [](auto handler, std::shared_ptr<state> state_) {
+          state_->add(
+              exclusive_function(
+                  completion_wrapper<void(exclusive_lock, bool)>(
+                      completion_handler_fun(std::move(handler), state_->get_executor()),
+                      [](auto handler, exclusive_lock lock, bool immediate) {
+                        if (immediate)
+                          std::invoke(handler.inner_handler(), std::move(lock));
+                        else
+                          std::invoke(handler, std::move(lock));
+                      })));
         },
         token, state_);
   }
@@ -233,14 +281,14 @@ class monitor<Executor, Allocator>::state
       ++lock_count_;
       s_ = state_t::shared;
       lck.unlock();
-      std::invoke(fn, std::move(mon_lck));
+      std::invoke(fn, std::move(mon_lck), true);
     } else if (s_ == state_t::shared) {
       assert(lock_count_ > 0);
       assert(q_.empty());
       auto mon_lck = shared_lock(this->shared_from_this());
       ++lock_count_;
       lck.unlock();
-      std::invoke(fn, std::move(mon_lck));
+      std::invoke(fn, std::move(mon_lck), true);
     } else {
       assert(lock_count_ > 0);
       sh_fn_.push_back(std::move(fn));
@@ -264,7 +312,7 @@ class monitor<Executor, Allocator>::state
       ++lock_count_;
       s_ = state_t::waiting;
       lck.unlock();
-      std::invoke(fn, std::move(mon_lck));
+      std::invoke(fn, std::move(mon_lck), true);
     } else {
       assert(lock_count_ > 0);
       q_.push(std::move(fn));
@@ -287,7 +335,7 @@ class monitor<Executor, Allocator>::state
       auto fn = std::get<exclusive_function>(std::move(q_.front()));
       q_.pop();
       lck.unlock();
-      std::invoke(fn, std::move(mon_lck));
+      std::invoke(fn, std::move(mon_lck), false);
     } else {
       auto mon_lck = shared_lock(this->shared_from_this());
       ++lock_count_;
@@ -297,7 +345,7 @@ class monitor<Executor, Allocator>::state
       shared_is_enqueued_ = false;
       if (q_.empty()) s_ = state_t::shared;
       lck.unlock();
-      for (auto& fn : functions) std::invoke(fn, std::move(mon_lck));
+      for (auto& fn : functions) std::invoke(fn, std::move(mon_lck), false);
     }
   }
 
