@@ -155,6 +155,13 @@ enum class bplus_tree_leaf_use_element : std::uint8_t {
 };
 
 
+struct bplus_tree_versions {
+  using type = std::uint64_t;
+
+  type page_split = 0, page_merge = 0, augment = 0;
+};
+
+
 struct bplus_tree_value_spec {
   bool byte_equality_enabled, byte_order_enabled;
   std::size_t bytes;
@@ -670,7 +677,7 @@ class bplus_tree_page
 
   public:
   const db_address address;
-  std::uint64_t version = 0u; // Incremented each time the page is split or merged.
+  bplus_tree_versions versions;
 
   protected:
   const cycle_ptr::cycle_weak_ptr<raw_db_type> raw_db;
@@ -1337,20 +1344,24 @@ class bplus_tree
 
     template<typename PageType>
     struct versioned_page {
-      versioned_page() noexcept = default;
+      constexpr versioned_page() noexcept = default;
 
-      versioned_page(cycle_ptr::cycle_gptr<PageType> page, std::uint64_t version) noexcept
+      explicit versioned_page(cycle_ptr::cycle_gptr<PageType> page) noexcept
       : page(std::move(page)),
-        version(std::move(version))
+        versions(this->page->versions)
       {}
 
+      auto assign(cycle_ptr::cycle_gptr<PageType> page) noexcept -> void {
+        *this = versioned_page(std::move(page));
+      }
+
       cycle_ptr::cycle_gptr<PageType> page;
-      std::uint64_t version = 0;
+      bplus_tree_versions versions;
     };
 
     tree_path() = default;
 
-    tree_path(cycle_ptr::cycle_gptr<bplus_tree> tree, allocator_type alloc = allocator_type())
+    explicit tree_path(cycle_ptr::cycle_gptr<bplus_tree> tree, allocator_type alloc = allocator_type())
     : tree(std::move(tree)),
       interior_pages(std::move(alloc))
     {}
@@ -1645,8 +1656,7 @@ class bplus_tree
                     parent_lock=std::move(parent_lock)
                   ](auto page_lock) mutable -> void {
                     std::visit([](auto& lock) { lock.reset(); }, parent_lock); // No longer needed, now that `page_lock` is locked.
-                    path.leaf_page.page = page;
-                    path.leaf_page.version = page->version;
+                    path.leaf_page.assign(page);
                     self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
                   };
               if constexpr(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock>) {
@@ -1665,7 +1675,7 @@ class bplus_tree
                     parent_lock=std::move(parent_lock)
                   ](auto page_lock) mutable -> void {
                     std::visit([](auto& lock) { lock.reset(); }, parent_lock); // No longer needed, now that `page_lock` is locked.
-                    path.interior_pages.emplace_back(page, page->version);
+                    path.interior_pages.emplace_back(page);
                     self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
                   });
             }
@@ -1676,7 +1686,7 @@ class bplus_tree
             }
 
             auto search_with_page_locked(tree_path<TxAlloc> path, cycle_ptr::cycle_gptr<intr_type> intr, monitor_shlock_type page_lock) -> void {
-              auto intr_version = intr->version;
+              auto intr_version = intr->versions.page_split;
               db_address child_page_address;
               cycle_ptr::cycle_gptr<raw_db_type> raw_db;
               {
@@ -1727,7 +1737,7 @@ class bplus_tree
                   intr, intr_version
                 ](monitor_shlock_type intr_lock, std::error_code ec, page_variant child_page) mutable -> void {
                   if (!ec) [[likely]] {
-                    if (intr->erased_ || intr->version != intr_version) {
+                    if (intr->erased_ || intr->versions.page_split != intr_version) {
                       ec = make_error_code(bplus_tree_errc::restart);
                     } else {
                       std::visit(
@@ -1786,7 +1796,7 @@ class bplus_tree
                     path=std::move(path)
                   ](monitor_shlock_type last_page_lock) mutable -> void {
                     auto& last_page = path.interior_pages.back();
-                    if (last_page.page->erased_ || last_page.page->version != last_page.version) {
+                    if (last_page.page->erased_ || last_page.page->versions.page_split != last_page.versions.page_split) {
                       // We want to restart the search from the most recent page that hasn't been split/merged since we last observed it.
                       path.interior_pages.pop_back();
                       self_op.restart(std::move(path));
