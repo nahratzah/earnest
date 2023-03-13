@@ -17,7 +17,6 @@
 #include <asio/read_at.hpp>
 #include <boost/intrusive/set.hpp>
 
-#include <earnest/detail/aio/reactor.h>
 #include <earnest/detail/wal_records.h>
 #include <earnest/fd.h>
 
