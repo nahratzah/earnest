@@ -134,7 +134,10 @@ class temporaries_factory {
   // That way, the compiler informs us if we introduce a bug. :)
   class prevent_copy_and_move {
     public:
+    struct tag {};
+
     constexpr prevent_copy_and_move() noexcept = default;
+    constexpr prevent_copy_and_move([[maybe_unused]] tag t) noexcept {};
     prevent_copy_and_move(const prevent_copy_and_move&) = delete;
     prevent_copy_and_move(prevent_copy_and_move&&) = delete;
     prevent_copy_and_move& operator=(const prevent_copy_and_move&) = delete;
@@ -1586,37 +1589,37 @@ template<std::size_t Bytes>
 struct xdr_raw_bytes_t {
   template<typename T, typename Alloc>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(std::vector<T, Alloc>& buf) const -> constant_size_mutable_buffer<Bytes>;
 
   template<typename T, typename Alloc>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(const std::vector<T, Alloc>& buf) const -> constant_size_const_buffer<Bytes>;
 
   template<typename T, typename CharT, typename Alloc>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(std::basic_string<T, CharT, Alloc>& buf) const -> constant_size_mutable_buffer<Bytes>;
 
   template<typename T, typename CharT, typename Alloc>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(const std::basic_string<T, CharT, Alloc>& buf) const -> constant_size_const_buffer<Bytes>;
 
   template<typename T, std::size_t N>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(std::array<T, N>& buf) const -> constant_size_mutable_buffer<Bytes>;
 
   template<typename T, std::size_t N>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(const std::array<T, N>& buf) const -> constant_size_const_buffer<Bytes>;
 
@@ -1636,15 +1639,15 @@ inline constexpr xdr_raw_bytes_t<Bytes> xdr_raw_bytes;
 
 template<typename ContiguousCollection>
 #if __cpp_concepts >= 201907L
-requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+requires (std::is_standard_layout_v<typename ContiguousCollection::value_type> && std::is_trivial_v<typename ContiguousCollection::value_type>)
 #endif
 class sized_buffer {
-  static_assert(std::is_pod_v<typename ContiguousCollection::value_type>,
+  static_assert(std::is_standard_layout_v<typename ContiguousCollection::value_type> && std::is_trivial_v<typename ContiguousCollection::value_type>,
       "sized-buffer may only be used with collection-of-POD types");
 
   template<typename OtherCollection>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<typename OtherCollection::value_type>)
+  requires (std::is_standard_layout_v<typename OtherCollection::value_type> && std::is_trivial_v<typename OtherCollection::value_type>)
 #endif
   friend class sized_const_buffer;
 
@@ -1661,10 +1664,10 @@ class sized_buffer {
 
 template<typename ContiguousCollection>
 #if __cpp_concepts >= 201907L
-requires (std::is_pod_v<typename ContiguousCollection::value_type>)
+requires (std::is_standard_layout_v<typename ContiguousCollection::value_type> && std::is_trivial_v<typename ContiguousCollection::value_type>)
 #endif
 class sized_const_buffer {
-  static_assert(std::is_pod_v<typename ContiguousCollection::value_type>,
+  static_assert(std::is_standard_layout_v<typename ContiguousCollection::value_type> && std::is_trivial_v<typename ContiguousCollection::value_type>,
       "sized-buffer may only be used with collection-of-POD types");
 
   public:
@@ -1693,25 +1696,25 @@ auto operator&(xdr<xdr_writer::writer<X...>>&& x, const sized_buffer<ContiguousC
 struct xdr_bytes_t {
   template<typename T, typename Alloc>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(std::vector<T, Alloc>& v, std::size_t max_size = std::numeric_limits<std::size_t>::max()) const -> sized_buffer<std::vector<T, Alloc>>;
 
   template<typename T, typename Alloc>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(const std::vector<T, Alloc>& v, std::size_t max_size = std::numeric_limits<std::size_t>::max()) const -> sized_const_buffer<std::vector<T, Alloc>>;
 
   template<typename T, typename CharT, typename Alloc>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(std::basic_string<T, CharT, Alloc>& v, std::size_t max_size = std::numeric_limits<std::size_t>::max()) const -> sized_buffer<std::basic_string<T, CharT, Alloc>>;
 
   template<typename T, typename CharT, typename Alloc>
 #if __cpp_concepts >= 201907L
-  requires (std::is_pod_v<T>)
+  requires (std::is_standard_layout_v<T> && std::is_trivial_v<T>)
 #endif
   auto operator()(const std::basic_string<T, CharT, Alloc>& v, std::size_t max_size = std::numeric_limits<std::size_t>::max()) const -> sized_const_buffer<std::basic_string<T, CharT, Alloc>>;
 };
