@@ -92,21 +92,24 @@ TEST_FIXTURE(tx_commit, cannot_create_the_same_file_twice) {
 
   auto tx1 = make_tx();
   auto tx2 = make_tx();
+  ioctx.run();
+  ioctx.restart();
+
   {
     auto f = tx1[new_file];
     f.async_create(asio::deferred)
     | asio::deferred(
-        [&](std::error_code ec) {
+        [f](std::error_code ec) mutable {
           CHECK_EQUAL(std::error_code(), ec);
           return f.async_truncate(4, asio::deferred);
         })
     | asio::deferred(
-        [&](std::error_code ec) {
+        [f](std::error_code ec) mutable {
           CHECK_EQUAL(std::error_code(), ec);
           return asio::async_write_at(f, 0, asio::buffer("abba"sv), asio::deferred);
         })
     | asio::deferred(
-        [&](std::error_code ec, std::size_t nbytes) {
+        [&tx1](std::error_code ec, std::size_t nbytes) mutable {
           CHECK_EQUAL(std::error_code(), ec);
           CHECK_EQUAL(4u, nbytes);
           return tx1.async_commit(asio::deferred);
@@ -119,12 +122,12 @@ TEST_FIXTURE(tx_commit, cannot_create_the_same_file_twice) {
     auto f = tx2[new_file];
     f.async_create(asio::deferred)
     | asio::deferred(
-        [&](std::error_code ec) {
+        [f](std::error_code ec) mutable {
           CHECK_EQUAL(std::error_code(), ec);
           return f.async_truncate(4, asio::deferred);
         })
     | asio::deferred(
-        [&](std::error_code ec) {
+        [f](std::error_code ec) mutable {
           CHECK_EQUAL(std::error_code(), ec);
           return asio::async_write_at(f, 0, asio::buffer("abba"sv), asio::deferred);
         })
