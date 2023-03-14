@@ -533,7 +533,7 @@ inline auto monitor<Executor, Allocator>::async_upgrade(CompletionToken&& token)
   return asio::async_initiate<CompletionToken, void(upgrade_lock)>(
       [](auto handler, std::shared_ptr<state> state_) {
         state_->add(
-            shared_function(
+            upgrade_function(
                 completion_wrapper<void(upgrade_lock, bool)>(
                     completion_handler_fun(std::move(handler), state_->get_executor()),
                     [](auto handler, upgrade_lock lock, [[maybe_unused]] bool immediate) {
@@ -584,7 +584,7 @@ inline auto monitor<Executor, Allocator>::dispatch_upgrade(CompletionToken&& tok
   return asio::async_initiate<CompletionToken, void(upgrade_lock)>(
       [](auto handler, std::shared_ptr<state> state_) {
         state_->add(
-            shared_function(
+            upgrade_function(
                 completion_wrapper<void(upgrade_lock, bool)>(
                     completion_handler_fun(std::move(handler), state_->get_executor()),
                     [](auto handler, upgrade_lock lock, bool immediate) {
@@ -620,10 +620,10 @@ inline auto monitor<Executor, Allocator>::dispatch_exclusive(CompletionToken&& t
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
 inline auto monitor<Executor, Allocator>::upgrade_lock::async_exclusive(CompletionToken&& token) const & {
-  if (state_ == nullptr) throw std::logic_error("lock not held");
-
   return asio::async_initiate<CompletionToken, void(exclusive_lock)>(
       [](auto handler, upgrade_lock self) {
+        if (self.state_ == nullptr) throw std::logic_error("lock not held");
+
         self.state_->add_upgrade(
             exclusive_function(
                 completion_wrapper<void(exclusive_lock, bool)>(
