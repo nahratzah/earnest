@@ -1,6 +1,6 @@
 #include <earnest/detail/completion_wrapper.h>
 
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 #include <asio/io_context.hpp>
 #include <asio/strand.hpp>

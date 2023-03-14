@@ -1,4 +1,5 @@
 #include <earnest/detail/bplus_tree_page.h>
+
 #include <UnitTest++/UnitTest++.h>
 
 #include <asio/deferred.hpp>
@@ -137,10 +138,14 @@ fixture::fixture(std::string_view name)
         auto tx = this->raw_db->fdb_tx_begin(earnest::isolation::read_commited);
         auto f = tx[tree_address.file];
         auto creation_bytes = bplus_tree::creation_bytes();
+
+        using tx_type = decltype(tx);
+        using f_type = decltype(f);
+        using creation_bytes_type = decltype(creation_bytes);
         struct state_t {
-          decltype(tx) tx;
-          decltype(f) f;
-          decltype(creation_bytes) creation_bytes;
+          tx_type tx;
+          f_type f;
+          creation_bytes_type creation_bytes;
         };
         auto state = std::make_shared<state_t>(state_t{
               .tx=std::move(tx),

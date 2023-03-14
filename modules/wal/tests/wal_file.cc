@@ -1,5 +1,6 @@
 #include "wal_file.h"
-#include "UnitTest++/UnitTest++.h"
+
+#include <UnitTest++/UnitTest++.h>
 
 #include <iostream>
 #include <earnest/dir.h>

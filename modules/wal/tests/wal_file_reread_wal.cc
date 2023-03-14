@@ -1,7 +1,7 @@
 #include <earnest/detail/wal_file.h>
 
 #include "wal_file.h"
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 #include <iostream>
 #include <algorithm>

@@ -1,7 +1,7 @@
 #include <earnest/file_db.h>
 
 #include "file_db.h"
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 #include <algorithm>
 #include <cstddef>

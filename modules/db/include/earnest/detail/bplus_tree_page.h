@@ -309,7 +309,7 @@ class bplus_tree_page
 
   public:
   static inline constexpr std::uint64_t nil_page = -1;
-  using raw_db_type = raw_db<Executor, Allocator>;
+  using raw_db_type = class raw_db<Executor, Allocator>;
   using executor_type = typename raw_db_type::executor_type;
   using allocator_type = typename raw_db_type::cache_allocator_type;
 
@@ -634,7 +634,7 @@ class bplus_tree_page
           acceptance_predicate_fn=std::move(acceptance_predicate_fn)
         ](target_lock_type lock, std::error_code ec, ptr_type ptr) mutable {
           const bool need_restart = std::visit(
-              [ec](const auto& ptr) -> bool {
+              [ec, &acceptance_predicate_fn, &self](const auto& ptr) -> bool {
                 if (!ec && ptr != nullptr) {
                   if (ptr->erased_)
                     return true;
@@ -1114,7 +1114,7 @@ class bplus_tree_leaf
         [self=this->shared_from_this(this), for_write, lock]() mutable {
           return self->next_page_op(std::move(for_write), std::move(lock));
         })
-    | variant_to_pointer_op<bplus_tree_leaf>();
+    | bplus_tree_page<Executor, Allocator>::template variant_to_pointer_op<bplus_tree_leaf>();
   }
 
   // Accepts a completion-handler of the form:
@@ -1188,7 +1188,7 @@ class bplus_tree_leaf
                 return self->nextprev_page_op_(std::move(for_write), std::move(get_addr_fn), std::move(inverse_get_addr_fn));
               });
         })
-    | variant_to_pointer_op<bplus_tree_leaf>();
+    | bplus_tree_page<Executor, Allocator>::template variant_to_pointer_op<bplus_tree_leaf>();
   }
 
   auto use_list_offset() const noexcept -> std::size_t { return 0u; }
@@ -1307,7 +1307,7 @@ class bplus_tree
 {
   public:
   static inline constexpr std::uint32_t magic = bplus_tree_header::magic;
-  using raw_db_type = raw_db<Executor, Allocator>;
+  using raw_db_type = class raw_db<Executor, Allocator>;
   using executor_type = typename raw_db_type::executor_type;
   using allocator_type = typename raw_db_type::cache_allocator_type;
 
@@ -1596,9 +1596,8 @@ class bplus_tree
     using page_variant = std::variant<cycle_ptr::cycle_gptr<intr_type>, cycle_ptr::cycle_gptr<leaf_type>>;
 
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, page_variant, lock_variant /*tree_lock*/)>(
-        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> self, TxAlloc tx_alloc) -> void {
-          auto wrapped_handler = completion_handler_fun(std::move(handler), self->get_executor());
-          using handler_type = decltype(wrapped_handler);
+        []<typename HandlerType>(HandlerType handler, cycle_ptr::cycle_gptr<bplus_tree> self, TxAlloc tx_alloc) -> void {
+          using handler_type = decltype(completion_handler_fun(std::declval<HandlerType>(), std::declval<executor_type>()));
 
           struct op {
             explicit op(cycle_ptr::cycle_gptr<bplus_tree> tree, handler_type handler, TxAlloc tx_alloc)
@@ -1636,7 +1635,7 @@ class bplus_tree
             cycle_ptr::cycle_gptr<bplus_tree> tree;
           };
 
-          std::invoke(op(std::move(self), std::move(wrapped_handler), std::move(tx_alloc)));
+          std::invoke(op(self, completion_handler_fun(std::move(handler), self->get_executor()), std::move(tx_alloc)));
         },
         asio::deferred, this->shared_from_this(this), std::move(tx_alloc));
   }

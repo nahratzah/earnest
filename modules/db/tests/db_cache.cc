@@ -1,5 +1,6 @@
 #include <earnest/db_cache.h>
-#include "UnitTest++/UnitTest++.h"
+
+#include <UnitTest++/UnitTest++.h>
 
 #include <asio/io_context.hpp>
 #include <asio/deferred.hpp>

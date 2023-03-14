@@ -1,6 +1,6 @@
 #include <earnest/detail/array_cat.h>
 
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 using earnest::detail::array_cat;
 

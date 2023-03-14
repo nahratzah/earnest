@@ -1,7 +1,7 @@
 #include <earnest/detail/wal_file.h>
 
 #include "wal_file.h"
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 #include <iostream>
 #include <algorithm>
@@ -58,6 +58,10 @@ TEST(can_recover_from_interrupted_rollover) {
   CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->file->state());
   CHECK_EQUAL(0u, w->entries.size());
 
-  auto wdir = w->get_dir();
-  CHECK_EQUAL(0u, std::count_if(wdir.begin(), wdir.end(), [](const auto& entry) { return entry.path() == "0000000000000001.wal"; }));
+  bool contains_0000000000000001_wal = false;
+  for (const auto& entry : w->get_dir()) {
+    if (entry.path() == "0000000000000001.wal")
+      contains_0000000000000001_wal = true;
+  }
+  CHECK_EQUAL(0u, contains_0000000000000001_wal);
 }

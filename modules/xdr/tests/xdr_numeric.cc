@@ -1,6 +1,6 @@
 #include <earnest/xdr.h>
 
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 #include <asio/io_context.hpp>
 #include <earnest/detail/byte_stream.h>

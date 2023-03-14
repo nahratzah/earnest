@@ -1,6 +1,6 @@
 #include <earnest/detail/wal_file_entry.h>
 
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 #include <iomanip>
 #include <iostream>

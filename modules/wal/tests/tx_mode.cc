@@ -1,6 +1,6 @@
 #include <earnest/tx_mode.h>
 
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 namespace earnest {
 

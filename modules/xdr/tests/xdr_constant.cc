@@ -1,6 +1,6 @@
 #include <earnest/xdr.h>
 
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 #include <list>
 #include <map>

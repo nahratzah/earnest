@@ -1,6 +1,6 @@
 #include <earnest/detail/replacement_map.h>
 
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 #include <earnest/detail/byte_positional_stream.h>
 

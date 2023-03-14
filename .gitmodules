@@ -7,3 +7,6 @@
 [submodule "modules/libhoard"]
 	path = modules/libhoard
 	url = https://github.com/nahratzah/libhoard.git
+[submodule "modules/unittest-cpp"]
+	path = modules/unittest-cpp
+	url = https://github.com/unittest-cpp/unittest-cpp.git

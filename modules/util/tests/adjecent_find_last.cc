@@ -1,6 +1,6 @@
 #include <earnest/detail/adjecent_find_last.h>
 
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 #include <array>
 #include <vector>

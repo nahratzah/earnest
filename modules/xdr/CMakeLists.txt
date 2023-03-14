@@ -20,22 +20,18 @@ find_package(Boost REQUIRED)
 target_include_directories(xdr INTERFACE ${Boost_INCLUDE_DIR})
 target_link_libraries(xdr INTERFACE asio util)
 
-find_package(UnitTest++)
-if (UnitTest++_FOUND)
-  add_executable(xdr_test)
-  target_include_directories(xdr_test PRIVATE ${UTPP_INCLUDE_DIRS})
-  target_link_libraries(xdr_test PUBLIC xdr asio_util UnitTest++)
-  target_sources(xdr_test PRIVATE
-      tests/xdr_bool.cc
-      tests/xdr_bytes.cc
-      tests/xdr_collection.cc
-      tests/xdr_constant.cc
-      tests/xdr_numeric.cc
-      tests/xdr_optional.cc
-      tests/xdr_padding.cc
-      tests/xdr_processor.cc
-      tests/xdr_tuple.cc
-      tests/xdr_variant.cc
-      tests/xdr.cc)
-  add_test(NAME xdr COMMAND xdr_test)
-endif ()
+add_executable(xdr_test)
+target_link_libraries(xdr_test PUBLIC xdr asio_util UnitTest++)
+target_sources(xdr_test PRIVATE
+    tests/xdr_bool.cc
+    tests/xdr_bytes.cc
+    tests/xdr_collection.cc
+    tests/xdr_constant.cc
+    tests/xdr_numeric.cc
+    tests/xdr_optional.cc
+    tests/xdr_padding.cc
+    tests/xdr_processor.cc
+    tests/xdr_tuple.cc
+    tests/xdr_variant.cc
+    tests/xdr.cc)
+add_test(NAME xdr COMMAND xdr_test)

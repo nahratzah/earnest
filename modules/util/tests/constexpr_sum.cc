@@ -2,7 +2,7 @@
 
 #include <type_traits>
 
-#include "UnitTest++/UnitTest++.h"
+#include <UnitTest++/UnitTest++.h>
 
 using earnest::detail::constexpr_sum;
 
