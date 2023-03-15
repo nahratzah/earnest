@@ -10,3 +10,6 @@
 [submodule "modules/unittest-cpp"]
 	path = modules/unittest-cpp
 	url = https://github.com/unittest-cpp/unittest-cpp.git
+[submodule "modules/prometheus-cpp"]
+	path = modules/prometheus-cpp
+	url = https://github.com/jupp0r/prometheus-cpp.git

@@ -9,6 +9,8 @@ set(UTPP_INCLUDE_TESTS_IN_BUILD "NO" CACHE STRING "")
 set(UTPP_AMPLIFY_WARNINGS "NO" CACHE STRING "")
 add_subdirectory(unittest-cpp)
 
+add_subdirectory(prometheus-cpp)
+
 add_subdirectory(cycle_ptr)
 add_subdirectory(libhoard)
 add_subdirectory(util)

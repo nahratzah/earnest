@@ -4,6 +4,7 @@
 #include <utility>
 
 #include <cycle_ptr.h>
+#include <prometheus/registry.h>
 
 #include <earnest/db_cache.h>
 #include <earnest/dir.h>
@@ -25,9 +26,13 @@ class raw_db
   template<typename T> using key_type = typename db_cache<executor_type, allocator_type>::template key_type<T>;
   template<typename TxAllocator> using fdb_transaction = transaction<file_db_type, TxAllocator>;
 
-  explicit raw_db(executor_type ex, allocator_type alloc = allocator_type())
+  explicit raw_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view prom_db_name, allocator_type alloc = allocator_type())
   : fdb_(std::allocate_shared<file_db_type>(alloc, ex, alloc)),
-    cache_(*this, ex, alloc)
+    cache_(*this, prom_registry, prom_db_name, ex, alloc)
+  {}
+
+  explicit raw_db(executor_type ex, allocator_type alloc = allocator_type())
+  : raw_db(std::move(ex), nullptr, std::string_view(), std::move(alloc))
   {}
 
   template<typename CompletionToken>

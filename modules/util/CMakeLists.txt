@@ -7,6 +7,7 @@ target_sources(util
     BASE_DIRS include
     FILES include/earnest/detail/array_cat.h include/earnest/detail/missing_stl.h)
 target_compile_features(util INTERFACE cxx_std_17)
+target_link_libraries(util INTERFACE prometheus-cpp::core)
 
 add_executable(array_cat_test)
 target_link_libraries(array_cat_test PUBLIC util UnitTest++)

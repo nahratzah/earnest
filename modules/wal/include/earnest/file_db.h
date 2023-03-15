@@ -22,6 +22,8 @@
 #include <asio/strand.hpp>
 #include <asio/write.hpp>
 #include <asio/write_at.hpp>
+#include <prometheus/counter.h>
+#include <prometheus/registry.h>
 
 #include <earnest/detail/byte_positional_stream.h>
 #include <earnest/detail/completion_handler_fun.h>
@@ -124,18 +126,29 @@ class file_db
   };
 
   struct file {
+    file(file_db& fdb, [[maybe_unused]] const file_id& id, bool exists_logically = false)
+    : fd(std::allocate_shared<fd_type>(fdb.get_allocator(), fdb.get_executor())),
+      exists_logically(exists_logically)
+    {}
+
     std::shared_ptr<fd_type> fd;
     bool exists_logically = false;
     std::uint64_t file_size = 0;
   };
 
   public:
-  explicit file_db(executor_type ex, allocator_type alloc = allocator_type())
+  explicit file_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view db_name, allocator_type alloc = allocator_type())
   : alloc_(alloc),
     wal(),
     namespaces(alloc),
     files(alloc),
-    strand_(std::move(ex))
+    strand_(std::move(ex)),
+    successful_commits_(build_commit_metric_(prom_registry, db_name, "success")),
+    failed_commits_(build_commit_metric_(prom_registry, db_name, "fail"))
+  {}
+
+  explicit file_db(executor_type ex, allocator_type alloc = allocator_type())
+  : file_db(std::move(ex), nullptr, std::string_view(), std::move(alloc))
   {}
 
   auto get_executor() const -> executor_type { return strand_.get_inner_executor(); }
@@ -517,10 +530,7 @@ class file_db
                       [fdb](const file_id& id) {
                         auto result = std::make_pair(
                             id,
-                            file{
-                              .fd=std::allocate_shared<fd_type>(fdb->get_allocator(), fdb->get_executor()),
-                              .exists_logically=true,
-                            });
+                            file(*fdb, id, true));
 
                         if (id.ns.empty()) {
                           try {
@@ -662,7 +672,7 @@ class file_db
         if (update.exists.value()) {
           if (!files_found) {
             bool inserted;
-            std::tie(files_iter, inserted) = files.emplace(id, file{ .fd=std::allocate_shared<fd_type>(get_allocator(), get_executor()) });
+            std::tie(files_iter, inserted) = files.emplace(id, file(*this, id));
             assert(inserted);
             files_found = true;
           }
@@ -826,6 +836,21 @@ class file_db
         });
   }
 
+  static auto build_commit_metric_(std::shared_ptr<prometheus::Registry> prom_registry, std::string_view db_name, std::string_view success_or_fail) -> std::shared_ptr<prometheus::Counter> {
+    if (prom_registry == nullptr) return std::make_shared<prometheus::Counter>();
+
+    return std::shared_ptr<prometheus::Counter>(
+        prom_registry,
+        &prometheus::BuildCounter()
+            .Name("earnest_file_db_commits")
+            .Help("Count the number of file-db commits")
+            .Register(*prom_registry)
+            .Add({
+                  {"db_name", std::string(db_name)},
+                  {"success", std::string(success_or_fail)},
+                }));
+  }
+
   allocator_type alloc_;
 
   public:
@@ -835,6 +860,8 @@ class file_db
 
   private:
   asio::strand<executor_type> strand_;
+  std::shared_ptr<prometheus::Counter> successful_commits_;
+  std::shared_ptr<prometheus::Counter> failed_commits_;
 };
 
 
@@ -1453,6 +1480,14 @@ class transaction {
         [ on_commit_events=this->on_commit_events_
         ](std::error_code ec) {
           if (!ec) on_commit_events->run();
+          return asio::deferred.values(ec);
+        })
+    | asio::deferred(
+        [fdb=this->fdb_](std::error_code ec) {
+          if (!ec)
+            fdb->successful_commits_->Increment();
+          else
+            fdb->failed_commits_->Increment();
           return asio::deferred.values(ec);
         })
     | detail::forward_deferred(get_executor());

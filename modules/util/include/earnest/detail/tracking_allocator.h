@@ -68,6 +68,15 @@ class tracking_allocator
     return ptr;
   }
 
+#if __cpp_lib_allocate_at_least >= 202106L
+  auto allocate_at_least(size_type n) -> std::allocation_result<typename std::allocator_traits<Alloc>::pointer, typename std::allocator_traits<Alloc>::size_type> {
+    auto alloc_result = std::allocator_traits<Alloc>::allocate_at_least(*this, n);
+    if (t_ != nullptr)
+      t_->inc(alloc_result.count * sizeof(typename std::allocator_traits<Alloc>::value_type));
+    return alloc_result;
+  }
+#endif
+
   auto deallocate(typename std::allocator_traits<Alloc>::pointer ptr, size_type n) -> void {
     std::allocator_traits<Alloc>::deallocate(*this, ptr, n);
     if (t_ != nullptr)

@@ -16,12 +16,15 @@
 #include <libhoard/cache.h>
 #include <libhoard/policies.h>
 #include <libhoard/asio/resolver_policy.h>
+#include <prometheus/registry.h>
+#include <prometheus/counter.h>
 
-#include <earnest/file_id.h>
 #include <earnest/db_error.h>
-#include <earnest/detail/hash_combine.h>
 #include <earnest/detail/completion_wrapper.h>
+#include <earnest/detail/hash_combine.h>
+#include <earnest/detail/prom_allocator.h>
 #include <earnest/detail/tracking_allocator.h>
+#include <earnest/file_id.h>
 
 namespace earnest {
 namespace detail {
@@ -100,6 +103,63 @@ class max_mem_policy {
 };
 
 
+class prom_metrics_policy {
+  public:
+  prom_metrics_policy() = default;
+
+  prom_metrics_policy(std::shared_ptr<prometheus::Registry> prom_registry, std::string_view prom_db_name)
+  : prom_registry(std::move(prom_registry)),
+    prom_db_name(std::move(prom_db_name))
+  {}
+
+  private:
+  class table_base_impl {
+    public:
+    template<typename Allocator>
+    explicit table_base_impl(const prom_metrics_policy& p, const Allocator& alloc) noexcept
+    : cache_hit_(build_cache_hit_miss_counter_(p, "hit", alloc)),
+      cache_miss_(build_cache_hit_miss_counter_(p, "miss", alloc))
+    {}
+
+    auto on_hit_([[maybe_unused]] void* vptr) noexcept -> void {
+      cache_hit_->Increment();
+    }
+
+    auto on_miss_([[maybe_unused]] void* vptr) noexcept -> void {
+      cache_miss_->Increment();
+    }
+
+    private:
+    template<typename Alloc>
+    static auto build_cache_hit_miss_counter_(const prom_metrics_policy& p, std::string_view hit_or_miss, Alloc alloc) -> std::shared_ptr<prometheus::Counter> {
+      if (p.prom_registry == nullptr) return std::allocate_shared<prometheus::Counter>(alloc);
+
+      return std::shared_ptr<prometheus::Counter>(
+          p.prom_registry,
+          &prometheus::BuildCounter()
+              .Name("earnest_db_cache_lookup")
+              .Help("Number of cache lookups")
+              .Register(*p.prom_registry)
+              .Add({
+                    {"db_name", std::string(p.prom_db_name)},
+                    {"hit_miss", std::string(hit_or_miss)},
+                  }));
+    }
+
+    std::shared_ptr<prometheus::Counter> cache_hit_;
+    std::shared_ptr<prometheus::Counter> cache_miss_;
+  };
+
+  public:
+  template<typename HashTable, typename ValueType, typename Allocator>
+  using table_base = table_base_impl;
+
+  private:
+  std::shared_ptr<prometheus::Registry> prom_registry = nullptr;
+  std::string prom_db_name;
+};
+
+
 } /* namespace earnest::detail */
 
 
@@ -114,7 +174,7 @@ class db_cache {
   public:
   static inline constexpr std::size_t default_max_mem = 1024ull * 1024ull * 1024ull;
   using executor_type = Executor;
-  using allocator_type = detail::tracking_allocator<Allocator>;
+  using allocator_type = detail::prom_allocator<detail::tracking_allocator<Allocator>>;
   using offset_type = std::uint64_t;
 
   private:
@@ -234,14 +294,19 @@ class db_cache {
   };
 
   public:
-  explicit db_cache(cycle_ptr::cycle_base& owner, executor_type ex, Allocator alloc = Allocator())
+  explicit db_cache(cycle_ptr::cycle_base& owner, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view prom_db_name, executor_type ex, Allocator alloc = Allocator())
   : tracker_(std::allocate_shared<detail::alloc_tracker>(alloc)),
-    alloc_(this->tracker_, alloc),
+    alloc_(prom_registry, "earnest_db_cache", prometheus::Labels{{"db_name", std::string(prom_db_name)}}, this->tracker_, alloc),
     impl_(
       std::allocator_arg, this->alloc_,
       libhoard::asio_resolver_policy<resolver_functor, executor_type>(resolver_functor(), ex),
       libhoard::pointer_policy<cycle_ptr::cycle_weak_ptr<db_cache_value>, cycle_ptr::cycle_member_ptr<db_cache_value>, mk_member_pointer_>(mk_member_pointer_(owner)),
-      detail::max_mem_policy(default_max_mem))
+      detail::max_mem_policy(default_max_mem),
+      detail::prom_metrics_policy(prom_registry, prom_db_name))
+  {}
+
+  explicit db_cache(cycle_ptr::cycle_base& owner, executor_type ex, Allocator alloc = Allocator())
+  : db_cache(owner, nullptr, std::string_view(), std::move(ex), std::move(alloc))
   {}
 
   template<typename T>
@@ -306,6 +371,7 @@ class db_cache {
       libhoard::weaken_policy,
       libhoard::error_policy<std::error_code>,
       detail::max_mem_policy,
+      detail::prom_metrics_policy,
       libhoard::pointer_policy<cycle_ptr::cycle_weak_ptr<db_cache_value>, cycle_ptr::cycle_member_ptr<db_cache_value>, mk_member_pointer_>>;
 
   std::shared_ptr<detail::alloc_tracker> tracker_;
