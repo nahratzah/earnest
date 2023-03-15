@@ -12,10 +12,10 @@
 namespace earnest::detail {
 
 
-template<typename Executor, typename Allocator>
+template<typename RawDbType>
 class file_grow_allocator {
   public:
-  using raw_db_type = raw_db<Executor, Allocator>;
+  using raw_db_type = RawDbType;
   using executor_type = typename raw_db_type::executor_type;
   using allocator_type = typename raw_db_type::allocator_type;
 

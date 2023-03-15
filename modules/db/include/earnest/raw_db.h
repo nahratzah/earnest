@@ -19,19 +19,27 @@ class raw_db
 {
   public:
   using executor_type = Executor;
-  using allocator_type = Allocator;
+  using allocator_type = detail::prom_allocator<Allocator>;
   using file_db_type = file_db<executor_type, allocator_type>;
-  using cache_type = db_cache<executor_type, allocator_type>;
+  using cache_type = db_cache<executor_type, Allocator>;
   using cache_allocator_type = typename cache_type::allocator_type;
-  template<typename T> using key_type = typename db_cache<executor_type, allocator_type>::template key_type<T>;
+  template<typename T> using key_type = typename cache_type::template key_type<T>;
   template<typename TxAllocator> using fdb_transaction = transaction<file_db_type, TxAllocator>;
 
-  explicit raw_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view prom_db_name, allocator_type alloc = allocator_type())
-  : fdb_(std::allocate_shared<file_db_type>(alloc, ex, alloc)),
+  private:
+  explicit raw_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view prom_db_name, Allocator alloc, allocator_type prom_alloc)
+  : fdb_(std::allocate_shared<file_db_type>(prom_alloc, ex, prom_alloc)),
     cache_(*this, prom_registry, prom_db_name, ex, alloc)
   {}
 
-  explicit raw_db(executor_type ex, allocator_type alloc = allocator_type())
+  public:
+  explicit raw_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view prom_db_name, Allocator alloc = Allocator())
+  : raw_db(
+      std::move(ex), prom_registry, prom_db_name, alloc,
+      allocator_type(prom_registry, "earnest_db_memory", prometheus::Labels{{"db_name", std::string(prom_db_name)}}, alloc))
+  {}
+
+  explicit raw_db(executor_type ex, Allocator alloc = Allocator())
   : raw_db(std::move(ex), nullptr, std::string_view(), std::move(alloc))
   {}
 

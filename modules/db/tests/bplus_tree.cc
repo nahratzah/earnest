@@ -35,8 +35,8 @@ class fixture {
   static const earnest::db_address tree_address;
 
   using raw_db_type = earnest::raw_db<asio::io_context::executor_type>;
-  using db_allocator = earnest::detail::file_grow_allocator<raw_db_type::executor_type, raw_db_type::allocator_type>;
-  using bplus_tree = earnest::detail::bplus_tree<raw_db_type::executor_type, db_allocator, raw_db_type::allocator_type>;
+  using db_allocator = earnest::detail::file_grow_allocator<raw_db_type>;
+  using bplus_tree = earnest::detail::bplus_tree<raw_db_type, db_allocator>;
 
   protected:
   explicit fixture(std::string_view name);

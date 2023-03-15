@@ -239,10 +239,10 @@ struct bplus_tree_spec {
 };
 
 
-template<typename Executor, typename Allocator> class bplus_tree_page;
-template<typename Executor, typename Allocator> class bplus_tree_intr;
-template<typename Executor, typename Allocator> class bplus_tree_leaf;
-template<typename Executor, typename DBAllocator, typename Allocator> class bplus_tree;
+template<typename RawDbType> class bplus_tree_page;
+template<typename RawDbType> class bplus_tree_intr;
+template<typename RawDbType> class bplus_tree_leaf;
+template<typename RawDbType, typename DBAllocator> class bplus_tree;
 
 
 template<typename PageType>
@@ -299,23 +299,23 @@ struct bplus_tree_siblings {
 };
 
 
-template<typename Executor, typename Allocator>
+template<typename RawDbType>
 class bplus_tree_page
 : public db_cache_value,
   protected cycle_ptr::cycle_base
 {
   template<typename> friend struct bplus_tree_siblings;
-  template<typename, typename, typename> friend class bplus_tree;
+  template<typename, typename> friend class bplus_tree;
 
   public:
   static inline constexpr std::uint64_t nil_page = -1;
-  using raw_db_type = class raw_db<Executor, Allocator>;
+  using raw_db_type = RawDbType;
   using executor_type = typename raw_db_type::executor_type;
   using allocator_type = typename raw_db_type::cache_allocator_type;
 
   private:
-  using intr_type = bplus_tree_intr<Executor, Allocator>;
-  using leaf_type = bplus_tree_leaf<Executor, Allocator>;
+  using intr_type = bplus_tree_intr<RawDbType>;
+  using leaf_type = bplus_tree_leaf<RawDbType>;
 
   public:
   explicit bplus_tree_page(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, std::uint64_t parent_offset = nil_page) noexcept(std::is_nothrow_move_constructible_v<db_address>)
@@ -593,8 +593,8 @@ class bplus_tree_page
     using ptr_type = std::variant<bplus_tree_intr_ptr, bplus_tree_leaf_ptr>;
     using target_lock_type = std::conditional_t<
         ForWrite,
-        typename monitor<Executor, Allocator>::upgrade_lock,
-        typename monitor<Executor, Allocator>::shared_lock>;
+        typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock,
+        typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock>;
 
     cycle_ptr::cycle_gptr<raw_db_type> raw_db = this->raw_db.lock();
     std::error_code ec;
@@ -706,24 +706,24 @@ class bplus_tree_page
  * - elements in child[0..N] (inclusive) have keys <= key[N]
  * - elements in child[N..size-1] have keys >= key[N]
  */
-template<typename Executor, typename Allocator>
+template<typename RawDbType>
 class bplus_tree_intr
-: public bplus_tree_page<Executor, Allocator>
+: public bplus_tree_page<RawDbType>
 {
-  template<typename, typename> friend class bplus_tree_page;
+  template<typename> friend class bplus_tree_page;
 
   public:
   static inline constexpr std::uint32_t magic = 0x237d'bf9aU;
-  using raw_db_type = typename bplus_tree_page<Executor, Allocator>::raw_db_type;
-  using executor_type = typename bplus_tree_page<Executor, Allocator>::executor_type;
-  using allocator_type = typename bplus_tree_page<Executor, Allocator>::allocator_type;
+  using raw_db_type = typename bplus_tree_page<RawDbType>::raw_db_type;
+  using executor_type = typename bplus_tree_page<RawDbType>::executor_type;
+  using allocator_type = typename bplus_tree_page<RawDbType>::allocator_type;
 
   private:
   template<typename T> using rebind_alloc = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
 
   public:
-  bplus_tree_intr(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, std::uint64_t parent_offset = bplus_tree_page<Executor, Allocator>::nil_page)
-  : bplus_tree_page<Executor, Allocator>(spec, std::move(raw_db), std::move(address), parent_offset),
+  bplus_tree_intr(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, std::uint64_t parent_offset = bplus_tree_page<RawDbType>::nil_page)
+  : bplus_tree_page<RawDbType>(spec, std::move(raw_db), std::move(address), parent_offset),
     bytes_(spec->payload_bytes_per_intr(), this->get_allocator())
   {
     assert(spec->payload_bytes_per_intr() == key_offset(spec->child_pages_per_intr - 1u));
@@ -743,7 +743,7 @@ class bplus_tree_intr
       CompletionToken&& token) {
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
     using stream_type = positional_stream_adapter<tx_file_type>;
-    using page_type = bplus_tree_page<Executor, Allocator>;
+    using page_type = bplus_tree_page<RawDbType>;
 
     return asio::async_initiate<CompletionToken, void(std::error_code, cycle_ptr::cycle_gptr<bplus_tree_intr>)>(
         [](auto handler, typename raw_db_type::template fdb_transaction<TxAlloc> tx, DbAlloc db_alloc, std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, std::uint64_t parent_offset, std::uint64_t child_offset, std::span<const std::byte> child_augment) -> void {
@@ -942,17 +942,17 @@ class bplus_tree_intr
 };
 
 
-template<typename Executor, typename Allocator>
+template<typename RawDbType>
 class bplus_tree_leaf
-: public bplus_tree_page<Executor, Allocator>
+: public bplus_tree_page<RawDbType>
 {
-  template<typename, typename> friend class bplus_tree_page;
+  template<typename> friend class bplus_tree_page;
 
   public:
   static inline constexpr std::uint32_t magic = 0x65cc'612dU;
-  using raw_db_type = typename bplus_tree_page<Executor, Allocator>::raw_db_type;
-  using executor_type = typename bplus_tree_page<Executor, Allocator>::executor_type;
-  using allocator_type = typename bplus_tree_page<Executor, Allocator>::allocator_type;
+  using raw_db_type = typename bplus_tree_page<RawDbType>::raw_db_type;
+  using executor_type = typename bplus_tree_page<RawDbType>::executor_type;
+  using allocator_type = typename bplus_tree_page<RawDbType>::allocator_type;
 
   private:
   template<typename T> using rebind_alloc = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
@@ -982,8 +982,8 @@ class bplus_tree_leaf
       cycle_ptr::cycle_allocator<rebind_alloc<element_ptr>>>;
 
   public:
-  bplus_tree_leaf(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, std::uint64_t parent_offset = bplus_tree_page<Executor, Allocator>::nil_page, std::uint64_t predecessor_offset = bplus_tree_page<Executor, Allocator>::nil_page, std::uint64_t successor_offset = bplus_tree_page<Executor, Allocator>::nil_page)
-  : bplus_tree_page<Executor, Allocator>(spec, std::move(raw_db), std::move(address), parent_offset),
+  bplus_tree_leaf(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, std::uint64_t parent_offset = bplus_tree_page<RawDbType>::nil_page, std::uint64_t predecessor_offset = bplus_tree_page<RawDbType>::nil_page, std::uint64_t successor_offset = bplus_tree_page<RawDbType>::nil_page)
+  : bplus_tree_page<RawDbType>(spec, std::move(raw_db), std::move(address), parent_offset),
     bytes_(spec->payload_bytes_per_leaf(), this->get_allocator()),
     elements_(cycle_ptr::cycle_allocator<rebind_alloc<element>>(*this, this->get_allocator())),
     hdr_{
@@ -1010,7 +1010,7 @@ class bplus_tree_leaf
       CompletionToken&& token) {
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
     using stream_type = positional_stream_adapter<tx_file_type>;
-    using page_type = bplus_tree_page<Executor, Allocator>;
+    using page_type = bplus_tree_page<RawDbType>;
 
     return asio::async_initiate<CompletionToken, void(std::error_code, cycle_ptr::cycle_gptr<bplus_tree_leaf>)>(
         [](auto handler, typename raw_db_type::template fdb_transaction<TxAlloc> tx, DbAlloc db_alloc, std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, std::uint64_t parent_offset, std::uint64_t pred_sibling, std::uint64_t succ_sibling, bool create_before_first_and_after_last) -> void {
@@ -1104,7 +1104,7 @@ class bplus_tree_leaf
                   [](const bplus_tree_leaf& leaf, const auto& self_ptr) {
                     return leaf.prev_page_address() == self_ptr->address;
                   },
-                  []([[maybe_unused]] const bplus_tree_intr<Executor, Allocator>& intr, [[maybe_unused]] const auto& self_ptr) {
+                  []([[maybe_unused]] const bplus_tree_intr<RawDbType>& intr, [[maybe_unused]] const auto& self_ptr) {
                     return true; // It's actually the wrong type, but that page (intr) was loaded while this page (self_ptr) was locked, so we know it was the actual pointer.
                                  // Next, the variant_to_pointer_op will cause this to be rejected.
                   }),
@@ -1114,7 +1114,7 @@ class bplus_tree_leaf
         [self=this->shared_from_this(this), for_write, lock]() mutable {
           return self->next_page_op(std::move(for_write), std::move(lock));
         })
-    | bplus_tree_page<Executor, Allocator>::template variant_to_pointer_op<bplus_tree_leaf>();
+    | bplus_tree_page<RawDbType>::template variant_to_pointer_op<bplus_tree_leaf>();
   }
 
   // Accepts a completion-handler of the form:
@@ -1177,7 +1177,7 @@ class bplus_tree_leaf
                         [&inverse_get_addr_fn](const bplus_tree_leaf& leaf, const auto& self_ptr) -> bool {
                           return std::invoke(inverse_get_addr_fn, &leaf) == self_ptr->address;
                         },
-                        []([[maybe_unused]] const bplus_tree_intr<Executor, Allocator>& intr, [[maybe_unused]] const auto& self_ptr) -> bool {
+                        []([[maybe_unused]] const bplus_tree_intr<RawDbType>& intr, [[maybe_unused]] const auto& self_ptr) -> bool {
                           return true; // It's actually the wrong type, but that page (intr) was loaded while this page (self_ptr) was locked, so we know it was the actual pointer.
                                        // Next, the variant_to_pointer_op will cause this to be rejected.
                         }),
@@ -1188,7 +1188,7 @@ class bplus_tree_leaf
                 return self->nextprev_page_op_(std::move(for_write), std::move(get_addr_fn), std::move(inverse_get_addr_fn));
               });
         })
-    | bplus_tree_page<Executor, Allocator>::template variant_to_pointer_op<bplus_tree_leaf>();
+    | bplus_tree_page<RawDbType>::template variant_to_pointer_op<bplus_tree_leaf>();
   }
 
   auto use_list_offset() const noexcept -> std::size_t { return 0u; }
@@ -1300,21 +1300,21 @@ class bplus_tree_leaf
 };
 
 
-template<typename Executor, typename DBAllocator, typename Allocator>
+template<typename RawDbType, typename DBAllocator>
 class bplus_tree
 : public db_cache_value,
   private cycle_ptr::cycle_base
 {
   public:
   static inline constexpr std::uint32_t magic = bplus_tree_header::magic;
-  using raw_db_type = class raw_db<Executor, Allocator>;
+  using raw_db_type = RawDbType;
   using executor_type = typename raw_db_type::executor_type;
   using allocator_type = typename raw_db_type::cache_allocator_type;
 
   private:
-  using page_type = bplus_tree_page<Executor, Allocator>;
-  using intr_type = bplus_tree_intr<Executor, Allocator>;
-  using leaf_type = bplus_tree_leaf<Executor, Allocator>;
+  using page_type = bplus_tree_page<RawDbType>;
+  using intr_type = bplus_tree_intr<RawDbType>;
+  using leaf_type = bplus_tree_leaf<RawDbType>;
 
   public:
   using element = typename leaf_type::element;
@@ -1357,7 +1357,7 @@ class bplus_tree
   template<typename BytesAllocator = std::allocator<std::byte>>
   static auto creation_bytes(BytesAllocator allocator = BytesAllocator()) -> std::vector<std::byte, typename std::allocator_traits<BytesAllocator>::template rebind_alloc<std::byte>> {
     asio::io_context ioctx;
-    auto stream = byte_stream<asio::io_context::executor_type, typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>>(ioctx.get_executor(), allocator);
+    auto stream = byte_stream<asio::io_context::executor_type, typename std::allocator_traits<BytesAllocator>::template rebind_alloc<std::byte>>(ioctx.get_executor(), allocator);
     std::error_code error;
     async_write(
         stream,

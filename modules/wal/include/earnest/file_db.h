@@ -333,7 +333,7 @@ class file_db
     using ::earnest::detail::wal_record_create_file;
     using ::earnest::detail::wal_record_modify_file_write32;
     using ::earnest::detail::wal_record_truncate_file;
-    using byte_vector = std::vector<std::byte, rebind_alloc<std::byte>>;
+    using byte_vector = std::vector<std::byte>;
 
     return asio::deferred.values()
     | asio::deferred(

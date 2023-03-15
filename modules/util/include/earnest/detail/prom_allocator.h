@@ -27,8 +27,8 @@ class prom_allocator
   using is_always_equal = std::false_type;
 
   template<typename T>
-  struct rebind_alloc {
-    using type = prom_allocator<typename alloc_traits::template rebind_alloc<T>>;
+  struct rebind {
+    using other = prom_allocator<typename alloc_traits::template rebind_alloc<T>>;
   };
 
   prom_allocator() noexcept(std::is_nothrow_default_constructible_v<Allocator>) = default;
