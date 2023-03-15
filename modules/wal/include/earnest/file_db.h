@@ -29,6 +29,7 @@
 #include <earnest/detail/deferred_on_executor.h>
 #include <earnest/detail/file_recover_state.h>
 #include <earnest/detail/forward_deferred.h>
+#include <earnest/detail/handler_traits.h>
 #include <earnest/detail/monitor.h>
 #include <earnest/detail/move_only_function.h>
 #include <earnest/detail/namespace_map.h>
@@ -140,12 +141,12 @@ class file_db
   auto get_executor() const -> executor_type { return strand_.get_inner_executor(); }
   auto get_allocator() const -> allocator_type { return alloc_; }
 
-  template<typename CompletionToken>
-  auto async_create(dir d, CompletionToken&& token) {
+  private:
+  auto async_create_impl_(dir d, detail::move_only_function<void(std::error_code)> handler) -> void {
     using ::earnest::detail::completion_handler_fun;
     using ::earnest::detail::completion_wrapper;
 
-    return detail::deferred_on_executor<void(std::error_code, std::shared_ptr<file_db>)>(
+    detail::deferred_on_executor<void(std::error_code, std::shared_ptr<file_db>)>(
         [](std::shared_ptr<file_db> fdb, dir d) {
           assert(fdb->strand_.running_in_this_thread());
 
@@ -179,11 +180,25 @@ class file_db
           return asio::deferred.values(ec);
         })
     | undo_on_fail_op_()
-    | std::forward<CompletionToken>(token);
+    | std::move(handler);
   }
 
+  public:
   template<typename CompletionToken>
-  auto async_open(dir d, CompletionToken&& token) {
+  auto async_create(dir d, CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<file_db> self, dir d) -> void {
+          if constexpr(detail::handler_has_executor_v<decltype(handler)>) {
+            self->async_create_impl_(std::move(d), completion_handler_fun(std::move(handler), self->get_executor()));
+          } else {
+            self->async_create_impl_(std::move(d), std::move(handler));
+          }
+        },
+        token, this->shared_from_this(), std::move(d));
+  }
+
+  private:
+  auto async_open_impl_(dir d, detail::move_only_function<void(std::error_code)> handler) -> void {
     using ::earnest::detail::completion_handler_fun;
     using ::earnest::detail::completion_wrapper;
 
@@ -215,7 +230,21 @@ class file_db
           return asio::deferred.values(ec);
         })
     | undo_on_fail_op_()
-    | std::forward<CompletionToken>(token);
+    | std::move(handler);
+  }
+
+  public:
+  template<typename CompletionToken>
+  auto async_open(dir d, CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<file_db> self, dir d) -> void {
+          if constexpr(detail::handler_has_executor_v<decltype(handler)>) {
+            self->async_open_impl_(std::move(d), completion_handler_fun(std::move(handler), self->get_executor()));
+          } else {
+            self->async_open_impl_(std::move(d), std::move(handler));
+          }
+        },
+        token, this->shared_from_this(), std::move(d));
   }
 
   template<typename Acceptor, typename CompletionToken>

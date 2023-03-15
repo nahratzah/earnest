@@ -1655,215 +1655,228 @@ class bplus_tree
         asio::deferred, this->shared_from_this(this), std::move(tx_alloc));
   }
 
-  template<typename LeafLockType = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock, typename AddressSelectorFn, typename TxAlloc, typename CompletionToken>
-  requires std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>
-  auto tree_walk_(AddressSelectorFn address_selector_fn, TxAlloc tx_alloc, CompletionToken&& token) {
+  template<typename LeafLockType = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock, typename TxAlloc>
+  requires std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>
+  auto tree_walk_impl_(move_only_function<std::variant<db_address, std::error_code>(cycle_ptr::cycle_gptr<intr_type> intr)> address_selector_fn, TxAlloc tx_alloc, move_only_function<void(std::error_code, tree_path<TxAlloc>, LeafLockType)> handler) -> void {
+    using address_selector_fn_type = move_only_function<std::variant<db_address, std::error_code>(cycle_ptr::cycle_gptr<intr_type> intr)>;
     using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
     using lock_variant = std::variant<monitor_uplock_type, monitor_shlock_type>;
     using page_variant = std::variant<cycle_ptr::cycle_gptr<intr_type>, cycle_ptr::cycle_gptr<leaf_type>>;
+    using handler_type = move_only_function<void(std::error_code, tree_path<TxAlloc>, LeafLockType)>;
 
-    return asio::async_initiate<CompletionToken, void(std::error_code, tree_path<TxAlloc>, LeafLockType)>(
-        [](auto handler, AddressSelectorFn address_selector_fn, TxAlloc tx_alloc, cycle_ptr::cycle_gptr<bplus_tree> self) {
-          using handler_type = decltype(handler);
+    struct op {
+      explicit op(address_selector_fn_type address_selector_fn, handler_type handler, TxAlloc tx_alloc)
+      : tx_alloc(std::move(tx_alloc)),
+        handler(std::move(handler)),
+        address_selector_fn(std::move(address_selector_fn))
+      {}
 
-          struct op {
-            explicit op(AddressSelectorFn address_selector_fn, handler_type handler, TxAlloc tx_alloc)
-            : tx_alloc(std::move(tx_alloc)),
-              handler(std::move(handler)),
-              address_selector_fn(std::move(address_selector_fn))
-            {}
-
-            auto start(cycle_ptr::cycle_gptr<bplus_tree> tree) -> void {
-              TxAlloc tx_alloc = this->tx_alloc; // Copy, because we'll move *this.
-              tree->install_or_get_root_page_op_(std::move(tx_alloc))
-              | [ self_op=std::move(*this),
-                  tree
-                ](std::error_code ec, page_variant page, lock_variant parent_lock) mutable -> void {
-                  if (ec) {
-                    self_op.error_invoke_(ec);
-                  } else {
-                    std::visit(
-                        [&](auto page) -> void {
-                          self_op.search(tree_path<TxAlloc>(std::move(tree), self_op.tx_alloc), std::move(page), std::move(parent_lock));
-                        },
-                        std::move(page));
-                  }
-                };
+      auto start(cycle_ptr::cycle_gptr<bplus_tree> tree) -> void {
+        TxAlloc tx_alloc = this->tx_alloc; // Copy, because we'll move *this.
+        tree->install_or_get_root_page_op_(std::move(tx_alloc))
+        | [ self_op=std::move(*this),
+            tree
+          ](std::error_code ec, page_variant page, lock_variant parent_lock) mutable -> void {
+            if (ec) {
+              self_op.error_invoke_(ec);
+            } else {
+              std::visit(
+                  [&](auto page) -> void {
+                    self_op.search(tree_path<TxAlloc>(std::move(tree), self_op.tx_alloc), std::move(page), std::move(parent_lock));
+                  },
+                  std::move(page));
             }
+          };
+      }
 
-            private:
-            auto search(tree_path<TxAlloc> path, cycle_ptr::cycle_gptr<leaf_type> page, lock_variant parent_lock) -> void {
-              auto callback =
-                  [ self_op=std::move(*this),
-                    path=std::move(path),
-                    page,
-                    parent_lock=std::move(parent_lock)
-                  ](auto page_lock) mutable -> void {
-                    std::visit([](auto& lock) { lock.reset(); }, parent_lock); // No longer needed, now that `page_lock` is locked.
-                    path.leaf_page.assign(page);
-                    self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
-                  };
-              if constexpr(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock>) {
-                page->page_lock.dispatch_shared(std::move(callback));
-              } else if constexpr(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock>) {
-                page->page_lock.dispatch_upgrade(std::move(callback));
-              } else {
-                static_assert(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>);
-                page->page_lock.dispatch_exclusive(std::move(callback));
-              }
-            }
+      private:
+      auto search(tree_path<TxAlloc> path, cycle_ptr::cycle_gptr<leaf_type> page, lock_variant parent_lock) -> void {
+        auto callback =
+            [ self_op=std::move(*this),
+              path=std::move(path),
+              page,
+              parent_lock=std::move(parent_lock)
+            ](auto page_lock) mutable -> void {
+              std::visit([](auto& lock) { lock.reset(); }, parent_lock); // No longer needed, now that `page_lock` is locked.
+              path.leaf_page.assign(page);
+              self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
+            };
+        if constexpr(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock>) {
+          page->page_lock.dispatch_shared(std::move(callback));
+        } else if constexpr(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock>) {
+          page->page_lock.dispatch_upgrade(std::move(callback));
+        } else {
+          static_assert(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>);
+          page->page_lock.dispatch_exclusive(std::move(callback));
+        }
+      }
 
-            auto search(tree_path<TxAlloc> path, cycle_ptr::cycle_gptr<intr_type> page, lock_variant parent_lock) -> void {
-              page->page_lock.dispatch_shared(
-                  [ self_op=std::move(*this),
-                    path=std::move(path),
-                    page,
-                    parent_lock=std::move(parent_lock)
-                  ](auto page_lock) mutable -> void {
-                    std::visit([](auto& lock) { lock.reset(); }, parent_lock); // No longer needed, now that `page_lock` is locked.
-                    path.interior_pages.emplace_back(page);
-                    self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
+      auto search(tree_path<TxAlloc> path, cycle_ptr::cycle_gptr<intr_type> page, lock_variant parent_lock) -> void {
+        page->page_lock.dispatch_shared(
+            [ self_op=std::move(*this),
+              path=std::move(path),
+              page,
+              parent_lock=std::move(parent_lock)
+            ](auto page_lock) mutable -> void {
+              std::visit([](auto& lock) { lock.reset(); }, parent_lock); // No longer needed, now that `page_lock` is locked.
+              path.interior_pages.emplace_back(page);
+              self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
+            });
+      }
+
+      auto search_with_page_locked(tree_path<TxAlloc> path, [[maybe_unused]] cycle_ptr::cycle_gptr<leaf_type> page, LeafLockType page_lock) -> void {
+        assert(path.leaf_page.page == page);
+        std::invoke(handler, std::error_code(), std::move(path), std::move(page_lock));
+      }
+
+      auto search_with_page_locked(tree_path<TxAlloc> path, cycle_ptr::cycle_gptr<intr_type> intr, monitor_shlock_type page_lock) -> void {
+        auto intr_version = intr->versions.page_split;
+        db_address child_page_address;
+        cycle_ptr::cycle_gptr<raw_db_type> raw_db;
+        {
+          std::error_code ec;
+          std::visit(
+              overload(
+                  [&ec](std::error_code addr_selection_ec) {
+                    if (!ec) throw std::logic_error("address selector returned an error without error state");
+                    ec = addr_selection_ec;
+                  },
+                  [&child_page_address](db_address addr) {
+                    child_page_address = std::move(addr);
+                  }),
+              std::invoke(address_selector_fn, intr));
+          page_lock.reset(); // No longer need the lock.
+
+          if (!ec) [[likely]] {
+            raw_db = intr->raw_db.lock();
+            if (raw_db == nullptr) [[unlikely]] ec = make_error_code(db_errc::data_expired);
+          }
+
+          if (ec) {
+            error_invoke_(ec);
+            return;
+          }
+        }
+
+        page_type::async_load_op(
+            intr->spec, std::move(raw_db), child_page_address,
+            [intr, child_page_address]() {
+              return intr->page_lock.dispatch_shared(asio::deferred)
+              | asio::deferred(
+                  [intr, child_page_address]([[maybe_unused]] monitor_shlock_type intr_lock) {
+                    std::error_code ec;
+                    if (!intr->contains(child_page_address))
+                      ec = make_error_code(bplus_tree_errc::restart);
+                    return asio::deferred.values(ec);
                   });
-            }
-
-            auto search_with_page_locked(tree_path<TxAlloc> path, [[maybe_unused]] cycle_ptr::cycle_gptr<leaf_type> page, LeafLockType page_lock) -> void {
-              assert(path.leaf_page.page == page);
-              std::invoke(handler, std::error_code(), std::move(path), std::move(page_lock));
-            }
-
-            auto search_with_page_locked(tree_path<TxAlloc> path, cycle_ptr::cycle_gptr<intr_type> intr, monitor_shlock_type page_lock) -> void {
-              auto intr_version = intr->versions.page_split;
-              db_address child_page_address;
-              cycle_ptr::cycle_gptr<raw_db_type> raw_db;
-              {
-                std::error_code ec;
+            })
+        | asio::deferred(
+            [intr](std::error_code ec, page_variant child_page) {
+              return asio::deferred.when(!ec)
+                  .then(intr->page_lock.dispatch_shared(asio::append(asio::deferred, ec, child_page)))
+                  .otherwise(asio::deferred.values(monitor_shlock_type{}, ec, child_page));
+            })
+        | [ self_op=std::move(*this),
+            path=std::move(path),
+            intr, intr_version
+          ](monitor_shlock_type intr_lock, std::error_code ec, page_variant child_page) mutable -> void {
+            if (!ec) [[likely]] {
+              if (intr->erased_ || intr->versions.page_split != intr_version) {
+                ec = make_error_code(bplus_tree_errc::restart);
+              } else {
                 std::visit(
                     overload(
                         [&ec](std::error_code addr_selection_ec) {
                           if (!ec) throw std::logic_error("address selector returned an error without error state");
                           ec = addr_selection_ec;
                         },
-                        [&child_page_address](db_address addr) {
-                          child_page_address = std::move(addr);
-                        }),
-                    std::invoke(address_selector_fn, intr));
-                page_lock.reset(); // No longer need the lock.
-
-                if (!ec) [[likely]] {
-                  raw_db = intr->raw_db.lock();
-                  if (raw_db == nullptr) [[unlikely]] ec = make_error_code(db_errc::data_expired);
-                }
-
-                if (ec) {
-                  error_invoke_(ec);
-                  return;
-                }
-              }
-
-              page_type::async_load_op(
-                  intr->spec, std::move(raw_db), child_page_address,
-                  [intr, child_page_address]() {
-                    return intr->page_lock.dispatch_shared(asio::deferred)
-                    | asio::deferred(
-                        [intr, child_page_address]([[maybe_unused]] monitor_shlock_type intr_lock) {
-                          std::error_code ec;
-                          if (!intr->contains(child_page_address))
-                            ec = make_error_code(bplus_tree_errc::restart);
-                          return asio::deferred.values(ec);
-                        });
-                  })
-              | asio::deferred(
-                  [intr](std::error_code ec, page_variant child_page) {
-                    return asio::deferred.when(!ec)
-                        .then(intr->page_lock.dispatch_shared(asio::append(asio::deferred, ec, child_page)))
-                        .otherwise(asio::deferred.values(monitor_shlock_type{}, ec, child_page));
-                  })
-              | [ self_op=std::move(*this),
-                  path=std::move(path),
-                  intr, intr_version
-                ](monitor_shlock_type intr_lock, std::error_code ec, page_variant child_page) mutable -> void {
-                  if (!ec) [[likely]] {
-                    if (intr->erased_ || intr->versions.page_split != intr_version) {
-                      ec = make_error_code(bplus_tree_errc::restart);
-                    } else {
-                      std::visit(
-                          overload(
-                              [&ec](std::error_code addr_selection_ec) {
-                                if (!ec) throw std::logic_error("address selector returned an error without error state");
-                                ec = addr_selection_ec;
+                        [&ec, &child_page](const db_address& addr) {
+                          const db_address& child_address = std::visit<const db_address&>(
+                              [](const auto& child_ptr) -> const db_address& {
+                                return child_ptr->address;
                               },
-                              [&ec, &child_page](const db_address& addr) {
-                                const db_address& child_address = std::visit<const db_address&>(
-                                    [](const auto& child_ptr) -> const db_address& {
-                                      return child_ptr->address;
-                                    },
-                                    child_page);
-                                if (addr != child_address) [[unlikely]]
-                                  ec = make_error_code(bplus_tree_errc::restart);
-                              }),
-                          std::invoke(self_op.address_selector_fn, intr));
-                    }
-                  }
-
-                  if (ec == make_error_code(bplus_tree_errc::restart)) {
-                    self_op.restart(std::move(path));
-                  } else if (ec) {
-                    self_op.error_invoke_(std::move(ec));
-                  } else {
-                    std::visit(
-                        [&](auto page) -> void {
-                          self_op.search(std::move(path), std::move(page), std::move(intr_lock));
-                        },
-                        std::move(child_page));
-                  }
-                };
-            }
-
-            auto restart(tree_path<TxAlloc> path) -> void {
-              if (path.interior_pages.empty()) {
-                auto tx_alloc = path.get_allocator();
-                path.tree->install_or_get_root_page_op_(tx_alloc)
-                | [ self_op=std::move(*this),
-                    path=std::move(path)
-                  ](std::error_code ec, page_variant page, lock_variant parent_lock) mutable -> void {
-                    if (ec) {
-                      self_op.error_invoke_(std::move(ec));
-                    } else {
-                      std::visit(
-                          [&](auto page) -> void {
-                            self_op.search(std::move(path), std::move(page), std::move(parent_lock));
-                          },
-                          std::move(page));
-                    }
-                  };
-              } else { // !path.interior_pages.empty()
-                path.interior_pages.back().page->page_lock.dispatch_shared(asio::deferred)
-                | [ self_op=std::move(*this),
-                    path=std::move(path)
-                  ](monitor_shlock_type last_page_lock) mutable -> void {
-                    auto& last_page = path.interior_pages.back();
-                    if (last_page.page->erased_ || last_page.page->versions.page_split != last_page.versions.page_split) {
-                      // We want to restart the search from the most recent page that hasn't been split/merged since we last observed it.
-                      path.interior_pages.pop_back();
-                      self_op.restart(std::move(path));
-                    } else {
-                      self_op.search_with_page_locked(std::move(path), path.interior_pages.back().page, std::move(last_page_lock));
-                    }
-                  };
+                              child_page);
+                          if (addr != child_address) [[unlikely]]
+                            ec = make_error_code(bplus_tree_errc::restart);
+                        }),
+                    std::invoke(self_op.address_selector_fn, intr));
               }
             }
 
-            auto error_invoke_(std::error_code ec) -> void {
-              std::invoke(handler, ec, tree_path<TxAlloc>(nullptr, std::move(tx_alloc)), LeafLockType{});
+            if (ec == make_error_code(bplus_tree_errc::restart)) {
+              self_op.restart(std::move(path));
+            } else if (ec) {
+              self_op.error_invoke_(std::move(ec));
+            } else {
+              std::visit(
+                  [&](auto page) -> void {
+                    self_op.search(std::move(path), std::move(page), std::move(intr_lock));
+                  },
+                  std::move(child_page));
             }
-
-            TxAlloc tx_alloc;
-            handler_type handler;
-            AddressSelectorFn address_selector_fn;
           };
+      }
 
-          op(std::move(address_selector_fn), std::move(handler), std::move(tx_alloc)).start(std::move(self));
+      auto restart(tree_path<TxAlloc> path) -> void {
+        if (path.interior_pages.empty()) {
+          auto tx_alloc = path.get_allocator();
+          path.tree->install_or_get_root_page_op_(tx_alloc)
+          | [ self_op=std::move(*this),
+              path=std::move(path)
+            ](std::error_code ec, page_variant page, lock_variant parent_lock) mutable -> void {
+              if (ec) {
+                self_op.error_invoke_(std::move(ec));
+              } else {
+                std::visit(
+                    [&](auto page) -> void {
+                      self_op.search(std::move(path), std::move(page), std::move(parent_lock));
+                    },
+                    std::move(page));
+              }
+            };
+        } else { // !path.interior_pages.empty()
+          path.interior_pages.back().page->page_lock.dispatch_shared(asio::deferred)
+          | [ self_op=std::move(*this),
+              path=std::move(path)
+            ](monitor_shlock_type last_page_lock) mutable -> void {
+              auto& last_page = path.interior_pages.back();
+              if (last_page.page->erased_ || last_page.page->versions.page_split != last_page.versions.page_split) {
+                // We want to restart the search from the most recent page that hasn't been split/merged since we last observed it.
+                path.interior_pages.pop_back();
+                self_op.restart(std::move(path));
+              } else {
+                self_op.search_with_page_locked(std::move(path), path.interior_pages.back().page, std::move(last_page_lock));
+              }
+            };
+        }
+      }
+
+      auto error_invoke_(std::error_code ec) -> void {
+        std::invoke(handler, ec, tree_path<TxAlloc>(nullptr, std::move(tx_alloc)), LeafLockType{});
+      }
+
+      TxAlloc tx_alloc;
+      handler_type handler;
+      address_selector_fn_type address_selector_fn;
+    };
+
+    op(std::move(address_selector_fn), std::move(handler), std::move(tx_alloc)).start(this->shared_from_this(this));
+  }
+
+  template<typename LeafLockType = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock, typename TxAlloc, typename CompletionToken>
+  requires std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>
+  auto tree_walk_(move_only_function<std::variant<db_address, std::error_code>(cycle_ptr::cycle_gptr<intr_type> intr)> address_selector_fn, TxAlloc tx_alloc, CompletionToken&& token) {
+    using address_selector_fn_type = move_only_function<std::variant<db_address, std::error_code>(cycle_ptr::cycle_gptr<intr_type> intr)>;
+    using handler_type = move_only_function<void(std::error_code, tree_path<TxAlloc>, LeafLockType)>;
+
+    return asio::async_initiate<CompletionToken, void(std::error_code, tree_path<TxAlloc>, LeafLockType)>(
+        [](auto handler, address_selector_fn_type address_selector_fn, TxAlloc tx_alloc, cycle_ptr::cycle_gptr<bplus_tree> self) -> void {
+          if constexpr(detail::handler_has_executor_v<decltype(handler)>) {
+            self->template tree_walk_impl_<LeafLockType>(std::move(address_selector_fn), std::move(tx_alloc), handler_type(completion_handler_fun(std::move(handler), self->get_executor())));
+          } else {
+            self->template tree_walk_impl_<LeafLockType>(std::move(address_selector_fn), std::move(tx_alloc), handler_type(std::move(handler)));
+          }
         },
         token, std::move(address_selector_fn), std::move(tx_alloc), this->shared_from_this(this));
   }
@@ -2262,8 +2275,9 @@ class bplus_tree
 
   auto TEST_FN() {
     using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
+    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
-    using lock_variant = std::variant<monitor_exlock_type, monitor_shlock_type>;
+    using lock_variant = std::variant<monitor_exlock_type, monitor_uplock_type, monitor_uplock_type, monitor_shlock_type>;
 
     find_leaf_page_for_insert_op_(std::allocator<std::byte>(), std::span<const std::byte>())
     | [self=this->shared_from_this(this)](std::error_code ec, tree_path<std::allocator<std::byte>> path, [[maybe_unused]] lock_variant parent_lock) {
