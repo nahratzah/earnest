@@ -397,21 +397,37 @@ template<typename CompletionToken, typename TransactionValidator>
 inline auto wal_file_entry<Executor, Allocator>::async_append(write_records_vector records, CompletionToken&& token, TransactionValidator&& transaction_validator) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, write_records_vector&& records, std::shared_ptr<wal_file_entry> wf, auto on_space_assigned, auto transaction_validator) {
-        wf->write_records_to_buffer_(std::move(records),
-            completion_wrapper<void(std::error_code, std::vector<std::byte, rebind_alloc<std::byte>>)>(
-                completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
-                [ wf,
-                  on_space_assigned=std::move(on_space_assigned),
-                  transaction_validator=std::move(transaction_validator)
-                ](auto handler, std::error_code ec, auto byte_vector) mutable {
-                  wf->append_bytes_(std::move(byte_vector), std::move(handler).as_unbound_handler(), std::move(on_space_assigned), ec, wal_file_entry_state::ready, std::move(transaction_validator));
-                }));
+        wf->async_append_impl_(
+            std::move(records),
+            completion_handler_fun(std::move(completion_handler), wf->get_executor()),
+            std::move(on_space_assigned),
+            std::move(transaction_validator));
       },
       token,
       write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()),
       this->shared_from_this(),
       ++seal_barrier_,
       std::forward<TransactionValidator>(transaction_validator));
+}
+
+template<typename Executor, typename Allocator>
+template<typename OnSpaceAssigned, typename TransactionValidator>
+inline auto wal_file_entry<Executor, Allocator>::async_append_impl_(write_records_vector records, move_only_function<void(std::error_code)>&& completion_handler, OnSpaceAssigned&& on_space_assigned, TransactionValidator&& transaction_validator) -> void {
+  write_records_to_buffer_(
+      std::move(records),
+      asio::bind_executor(
+          strand_,
+          completion_wrapper<void(std::error_code, std::vector<std::byte, rebind_alloc<std::byte>>)>(
+              asio::bind_allocator(
+                  get_allocator(),
+                  std::move(completion_handler)),
+              [ wf=this->shared_from_this(),
+                on_space_assigned=std::forward<OnSpaceAssigned>(on_space_assigned),
+                transaction_validator=std::forward<TransactionValidator>(transaction_validator)
+              ](auto handler, std::error_code ec, auto byte_vector) mutable {
+                assert(wf->strand_.running_in_this_thread());
+                wf->append_bytes_(std::move(byte_vector), std::move(handler), std::move(on_space_assigned), ec, wal_file_entry_state::ready, std::move(transaction_validator));
+              })));
 }
 
 template<typename Executor, typename Allocator>

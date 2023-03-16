@@ -101,6 +101,11 @@ class wal_file_entry
   template<typename CompletionToken, typename TransactionValidator = no_transaction_validation>
   auto async_append(write_records_vector records, CompletionToken&& token, TransactionValidator&& transaction_validator = no_transaction_validation());
 
+  private:
+  template<typename OnSpaceAssigned, typename TransactionValidator>
+  auto async_append_impl_(write_records_vector records, move_only_function<void(std::error_code)>&& completion_handler, OnSpaceAssigned&& on_space_assigned, TransactionValidator&& transaction_validator) -> void;
+
+  public:
   template<typename CompletionToken>
   auto async_seal(CompletionToken&& token);
 
