@@ -5,6 +5,10 @@
 #include <type_traits>
 #include <utility>
 
+#if __cpp_concepts >= 201907L
+# include <concepts>
+#endif
+
 namespace earnest::detail {
 
 
@@ -43,6 +47,11 @@ class move_only_function<R(Args...)> {
 
   public:
   template<typename Fn>
+#if __cpp_concepts >= 201907L
+  requires requires(Fn fn, Args... args) {
+    { std::invoke(fn, std::forward<Args>(args)...) } -> std::convertible_to<R>;
+  }
+#endif
   move_only_function(Fn&& fn)
   : fn_(std::make_unique<impl<std::remove_cvref_t<Fn>>>(std::forward<Fn>(fn)))
   {}
