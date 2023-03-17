@@ -982,7 +982,14 @@ class transaction {
 
   template<typename CompletionToken>
   auto async_commit(CompletionToken&& token) {
-    return commit_op_() | std::forward<CompletionToken>(token);
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, transaction self) {
+          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
+            self.commit_op_(detail::completion_handler_fun(std::move(handler), self.get_executor()));
+          else
+            self.commit_op_(std::move(handler));
+        },
+        token, *this);
   }
 
   template<typename Fn>
@@ -1235,56 +1242,81 @@ class transaction {
   auto async_file_contents_op_(file_id id, Alloc alloc) const {
     using bytes_vec = std::vector<std::byte, typename std::allocator_traits<Alloc>::template rebind_alloc<std::byte>>;
 
+    return asio::async_initiate<decltype(asio::deferred), void(std::error_code, bytes_vec)>(
+        [](auto handler, transaction self, file_id id, Alloc alloc) {
+          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
+            self.async_file_contents_op_impl_(std::move(id), std::move(alloc), detail::completion_handler_fun(std::move(handler), self.get_executor()));
+          else
+            self.async_file_contents_op_impl_(std::move(id), std::move(alloc), std::move(handler));
+        },
+        asio::deferred, *this, std::move(id), std::move(alloc));
+  }
+
+  template<typename Alloc>
+  auto async_file_contents_op_impl_(file_id id, Alloc alloc, detail::move_only_function<void(std::error_code, std::vector<std::byte, typename std::allocator_traits<Alloc>::template rebind_alloc<std::byte>>)> handler) const -> void {
+    using bytes_vec = std::vector<std::byte, typename std::allocator_traits<Alloc>::template rebind_alloc<std::byte>>;
+
     return get_reader_op_(std::move(id))
-    | asio::deferred(
-        [alloc=std::move(alloc), fdb=this->fdb_](typename monitor_type::shared_lock lock, std::error_code ec, reader_type r) mutable {
-          return asio::async_initiate<decltype(asio::deferred), void(std::error_code, bytes_vec)>(
-              [](auto handler, auto alloc, std::error_code ec, reader_type r, auto fdb_ex, typename monitor_type::shared_lock lock) {
-                if (ec) {
-                  std::invoke(
-                      detail::completion_handler_fun(handler, fdb_ex),
-                      ec, bytes_vec(std::move(alloc)));
-                  return;
-                }
+    | completion_wrapper<void(typename monitor_type::shared_lock, std::error_code, reader_type)>(
+        std::move(handler),
+        [alloc=std::move(alloc)](auto handler, typename monitor_type::shared_lock lock, std::error_code ec, reader_type r) mutable {
+          if (ec) {
+            std::invoke(handler, ec, bytes_vec(std::move(alloc)));
+            return;
+          }
 
-                struct state {
-                  state(reader_type&& r, Alloc alloc)
-                  : r(std::move(r)),
-                    bytes(std::move(alloc))
-                  {
-                    this->bytes.resize(this->r.size());
-                  }
+          struct state {
+            state(reader_type&& r, Alloc alloc)
+            : r(std::move(r)),
+              bytes(std::move(alloc))
+            {
+              this->bytes.resize(this->r.size());
+            }
 
-                  reader_type r;
-                  bytes_vec bytes;
-                };
+            reader_type r;
+            bytes_vec bytes;
+          };
 
-                auto state_ptr = std::make_unique<state>(std::move(r), alloc);
-                auto& state_ref = *state_ptr;
+          auto state_ptr = std::make_unique<state>(std::move(r), alloc);
+          auto& state_ref = *state_ptr;
 
-                asio::async_read_at(
-                    state_ref.r,
-                    0,
-                    asio::buffer(state_ref.bytes),
-                    detail::completion_wrapper<void(std::error_code, std::size_t)>(
-                        detail::completion_handler_fun(std::move(handler), fdb_ex),
-                        [lock, state_ptr=std::move(state_ptr)](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-                          assert(ec || nbytes == state_ptr->bytes.size());
-                          lock.reset(); // No longer need the lock.
-                                        // And we want the compiler to not complain, so we must use the variable.
-                          std::invoke(handler, ec, std::move(state_ptr->bytes));
-                        }));
-              },
-              asio::deferred, std::move(alloc), std::move(ec), std::move(r), fdb->get_executor(), lock);
+          asio::async_read_at(
+              state_ref.r,
+              0,
+              asio::buffer(state_ref.bytes),
+              detail::completion_wrapper<void(std::error_code, std::size_t)>(
+                  std::move(handler),
+                  [lock, state_ptr=std::move(state_ptr)](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                    assert(ec || nbytes == state_ptr->bytes.size());
+                    lock.reset(); // No longer need the lock.
+                                  // And we want the compiler to not complain, so we must use the variable.
+                    std::invoke(handler, ec, std::move(state_ptr->bytes));
+                  }));
         });
   }
 
   template<typename MB>
   auto async_file_read_some_op_(file_id id, std::uint64_t offset, MB&& buffers) const {
+    auto buffer_vec = std::vector<asio::mutable_buffer, rebind_alloc<asio::mutable_buffer>>(
+        asio::buffer_sequence_begin(buffers),
+        asio::buffer_sequence_end(buffers),
+        get_allocator());
+
+    return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
+        [](auto handler, transaction self, file_id id, std::uint64_t offset, std::vector<asio::mutable_buffer, rebind_alloc<asio::mutable_buffer>> buffers) {
+          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
+            self.async_file_read_some_op_impl_(std::move(id), std::move(offset), std::move(buffers), detail::completion_handler_fun(std::move(handler), self.get_executor()));
+          else
+            self.async_file_read_some_op_impl_(std::move(id), std::move(offset), std::move(buffers), std::move(handler));
+        },
+        asio::deferred, *this, std::move(id), std::move(offset), std::move(buffer_vec));
+  }
+
+  auto async_file_read_some_op_impl_(file_id id, std::uint64_t offset, std::vector<asio::mutable_buffer, rebind_alloc<asio::mutable_buffer>> buffers, detail::move_only_function<void(std::error_code, std::size_t)> handler) const -> void {
     return get_reader_op_(std::move(id))
     | asio::deferred(
         [ fdb=this->fdb_,
-          buffers=std::forward<MB>(buffers),
+          buffers=std::move(buffers),
           offset
         ](typename monitor_type::shared_lock lock, std::error_code ec, reader_type r) mutable {
           return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
@@ -1308,7 +1340,7 @@ class transaction {
               },
               asio::deferred, ec, offset, std::move(buffers), std::move(lock), std::move(r), fdb->get_executor());
         })
-    | detail::forward_deferred(get_executor());
+    | std::move(handler);
   }
 
   template<typename MB>
@@ -1317,11 +1349,21 @@ class transaction {
     std::error_code ec;
     asio::write_at(*buffer, 0, std::forward<MB>(buffers), asio::transfer_all(), ec);
 
+    return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
+        [](auto handler, transaction self, file_id id, std::uint64_t offset, std::error_code ec, std::shared_ptr<writes_buffer_type> buffer) {
+          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
+            self.async_file_write_some_op_impl_(std::move(id), std::move(offset), std::move(ec), std::move(buffer), detail::completion_handler_fun(std::move(handler), self.get_executor()));
+          else
+            self.async_file_write_some_op_impl_(std::move(id), std::move(offset), std::move(ec), std::move(buffer), std::move(handler));
+        },
+        asio::deferred, *this, std::move(id), std::move(offset), std::move(ec), std::move(buffer));
+  }
+
+  auto async_file_write_some_op_impl_(file_id id, std::uint64_t offset, std::error_code write_ec, std::shared_ptr<writes_buffer_type>&& buffer, detail::move_only_function<void(std::error_code, std::size_t)> handler) -> void {
     return get_writer_op_(std::move(id))
     | asio::deferred(
         [ buffer=std::move(buffer),
-          write_ec=std::move(ec),
-          offset
+          write_ec, offset
         ](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) mutable {
           if (!ec) ec = write_ec;
 
@@ -1344,7 +1386,7 @@ class transaction {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec, nbytes);
         })
-    | detail::forward_deferred(get_executor());
+    | std::move(handler);
   }
 
   auto async_file_size_op_(file_id id) const {
@@ -1439,7 +1481,7 @@ class transaction {
     | detail::forward_deferred(get_executor());
   }
 
-  auto commit_op_() {
+  auto commit_op_(detail::move_only_function<void(std::error_code)> handler) {
     std::invoke(this->wait_for_writes_, std::error_code()); // Complete the writes (further write attempts will now throw an exception).
     return this->wait_for_writes_.async_on_ready(asio::deferred)
     | asio::deferred(
@@ -1490,7 +1532,7 @@ class transaction {
             fdb->failed_commits_->Increment();
           return asio::deferred.values(ec);
         })
-    | detail::forward_deferred(get_executor());
+    | std::move(handler);
   }
 
   static auto can_commit_op_(std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap, allocator_type allocator) {
