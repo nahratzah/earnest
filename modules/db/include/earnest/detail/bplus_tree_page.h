@@ -9,6 +9,7 @@
 #include <iterator>
 #include <memory>
 #include <numeric>
+#include <scoped_allocator>
 #include <span>
 #include <system_error>
 #include <type_traits>
@@ -118,6 +119,7 @@ struct bplus_tree_header {
 
 struct bplus_tree_page_header {
   static constexpr std::size_t augment_propagation_required_offset = 4u;
+  static constexpr std::size_t parent_offset = 24u;
 
   std::uint32_t magic;
   bool augment_propagation_required = false;
@@ -404,6 +406,24 @@ class bplus_tree_page
             }));
   }
 
+  // Write parent address to disk, but don't update in-memory representation.
+  template<typename TxAlloc, typename CompletionToken>
+  auto async_set_parent_diskonly_op(typename raw_db_type::template fdb_transaction<TxAlloc> tx, std::uint64_t parent, CompletionToken&& token) {
+    using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
+    using stream_type = positional_stream_adapter<tx_file_type>;
+
+    std::shared_ptr<stream_type> fptr = std::allocate_shared<stream_type>(tx.get_allocator(), tx[address.file], address.offset + bplus_tree_page_header::parent_offset);
+    async_write(
+        *fptr,
+        ::earnest::xdr_writer<>() & xdr_constant(parent).as(xdr_uint64),
+        completion_wrapper<void(std::error_code)>(
+            std::forward<CompletionToken>(token),
+            [fptr](auto handler, std::error_code ec) mutable {
+              fptr.reset();
+              return std::invoke(handler, ec);
+            }));
+  }
+
   private:
   template<typename Stream>
   static auto raw_load_op(Stream& stream, std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address) {
@@ -574,6 +594,10 @@ class bplus_tree_page
           return self->async_compute_page_augments_impl_(std::move(handler));
         },
         token, this->shared_from_this(this));
+  }
+
+  auto async_fix_augment_background() {
+    // XXX implement
   }
 
   private:
@@ -1266,6 +1290,81 @@ class bplus_tree_leaf
     return nextprev_page_op_(std::move(for_write), &bplus_tree_leaf::prev_page_address, &bplus_tree_leaf::next_page_address);
   }
 
+  static constexpr std::size_t xdr_page_hdr_bytes = std::remove_cvref_t<decltype(::earnest::xdr_reader<>() & std::declval<bplus_tree_page_header&>())>::bytes.value();
+  static constexpr std::size_t xdr_hdr_bytes = std::remove_cvref_t<decltype(::earnest::xdr_reader<>() & std::declval<bplus_tree_leaf_header&>())>::bytes.value();
+
+  // Write header to disk, but don't update in-memory representation.
+  template<typename TxAlloc, typename CompletionToken>
+  auto async_set_hdr_diskonly_op(typename raw_db_type::template fdb_transaction<TxAlloc> tx, bplus_tree_leaf_header hdr, CompletionToken&& token) {
+    using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
+    using stream_type = positional_stream_adapter<tx_file_type>;
+
+    std::shared_ptr<stream_type> fptr = std::allocate_shared<stream_type>(tx.get_allocator(), tx[this->address.file], this->address.offset + xdr_page_hdr_bytes);
+    async_write(
+        *fptr,
+        ::earnest::xdr_writer<>() & xdr_constant(std::move(hdr)),
+        completion_wrapper<void(std::error_code)>(
+            std::forward<CompletionToken>(token),
+            [fptr](auto handler, std::error_code ec) mutable {
+              fptr.reset();
+              return std::invoke(handler, ec);
+            }));
+  }
+
+  template<typename TxAlloc, typename CompletionToken>
+  auto async_set_use_list_diskonly_op(typename raw_db_type::template fdb_transaction<TxAlloc> tx, std::size_t offset, bplus_tree_leaf_use_element type, CompletionToken&& token) {
+    using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
+    struct state {
+      state(tx_file_type f, bplus_tree_leaf_use_element type)
+      : f(std::move(f)),
+        type(std::move(type))
+      {}
+
+      tx_file_type f;
+      bplus_tree_leaf_use_element type;
+    };
+
+    if (offset >= this->spec->elements_per_leaf)
+      throw std::invalid_argument("bad offset for element write");
+
+    std::shared_ptr<state> state_ptr = std::allocate_shared<state>(tx.get_allocator(), tx[this->address.file], type);
+    const auto span = std::as_bytes(std::span<bplus_tree_leaf_use_element, 1>(&state_ptr->type, 1));
+    return asio::async_write_at(
+        state_ptr->f,
+        this->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + element_offset(offset),
+        asio::buffer(span),
+        completion_wrapper<void(std::error_code, std::size_t)>(
+            std::forward<CompletionToken>(token),
+            [state_ptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+              if (!ec) assert(nbytes == 1);
+              state_ptr.reset();
+              return std::invoke(handler, ec);
+            }));
+  }
+
+  // Write elements to disk, but don't update in-memory representation.
+  template<typename TxAlloc, typename CompletionToken>
+  auto async_set_elements_diskonly_op(typename raw_db_type::template fdb_transaction<TxAlloc> tx, std::size_t offset, std::span<const std::byte> elements, CompletionToken&& token) {
+    using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
+
+    if (offset >= this->spec->elements_per_leaf)
+      throw std::invalid_argument("bad offset for element write");
+    if (elements.size() > (this->spec->elements_per_leaf - offset) * element_length())
+      throw std::invalid_argument("too many bytes for element write");
+
+    std::shared_ptr<tx_file_type> fptr = std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]);
+    return asio::async_write_at(
+        *fptr,
+        this->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + element_offset(offset),
+        asio::buffer(elements),
+        completion_wrapper<void(std::error_code, std::size_t)>(
+            std::forward<CompletionToken>(token),
+            [fptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+              fptr.reset();
+              return std::invoke(handler, ec);
+            }));
+  }
+
   private:
   template<typename Stream, typename CompletionToken>
   auto continue_load_(Stream& stream, cycle_ptr::cycle_gptr<raw_db_type> raw_db, CompletionToken&& token) {
@@ -1349,6 +1448,18 @@ class bplus_tree_leaf
     assert(bytes_.size() >= use_list_offset() + use_list_length());
     const auto use_list_bytes = std::span<std::byte>(bytes_).subspan(use_list_offset(), use_list_length());
     return {reinterpret_cast<bplus_tree_leaf_use_element*>(use_list_bytes.data()), use_list_bytes.size()};
+  }
+
+  auto element_span(std::size_t idx) const noexcept -> std::span<const std::byte> {
+    assert(idx < this->spec->elements_per_leaf);
+    assert(bytes_.size() >= element_offset(this->spec->elements_per_leaf));
+    return { &bytes_[element_offset(idx)], element_length() };
+  }
+
+  auto element_span(std::size_t idx) noexcept -> std::span<std::byte> {
+    assert(idx < this->spec->elements_per_leaf);
+    assert(bytes_.size() >= element_offset(this->spec->elements_per_leaf));
+    return { &bytes_[element_offset(idx)], element_length() };
   }
 
   auto key_span(std::size_t idx) const noexcept -> std::span<const std::byte> {
@@ -2343,34 +2454,53 @@ class bplus_tree
     using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
     using tx_type = typename raw_db_type::template fdb_transaction<TxAlloc>;
-    using tx_file_type = typename tx_type::file;
     static constexpr std::size_t num_page_locks_needed = (std::is_same_v<PageType, intr_type> ? 3u : 4u);
 
     struct element_rebalancer_for_leaf {
       struct rebalance_item {
-        constexpr rebalance_item() noexcept
+        using allocator_type = typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::byte>;
+
+        explicit rebalance_item(allocator_type tx_alloc)
         : elem(),
           which_page(0),
-          new_index(0)
+          new_index(0),
+          kv_bytes(std::move(tx_alloc))
         {}
 
-        explicit rebalance_item(cycle_ptr::cycle_gptr<typename leaf_type::element> elem)
+        rebalance_item(const rebalance_item& y, allocator_type tx_alloc)
+        : elem(y.elem),
+          uplock(y.uplock),
+          exlock(y.exlock),
+          which_page(y.which_page),
+          new_index(y.new_index),
+          use_type(y.use_type),
+          kv_bytes(y.kv_bytes, std::move(tx_alloc))
+        {}
+
+        rebalance_item(cycle_ptr::cycle_gptr<typename leaf_type::element> elem, allocator_type tx_alloc)
         : elem(std::move(elem)),
           which_page(0),
-          new_index(0)
+          new_index(0),
+          kv_bytes(std::move(tx_alloc))
         {
           if (which_page != this->which_page)
             throw std::out_of_range("bug: wrong page selection during split");
+        }
+
+        auto get_allocator() const -> allocator_type {
+          return kv_bytes.get_allocator();
         }
 
         cycle_ptr::cycle_gptr<typename leaf_type::element> elem;
         monitor_uplock_type uplock;
         monitor_exlock_type exlock;
         std::uint32_t which_page : 1;
-        std::size_t new_index : std::numeric_limits<std::size_t>::digits - 1u;
+        std::size_t new_index : std::numeric_limits<std::size_t>::digits - 9u;
+        bplus_tree_leaf_use_element use_type;
+        std::vector<std::byte, allocator_type> kv_bytes;
       };
 
-      using rebalance_vector = std::vector<rebalance_item, typename std::allocator_traits<TxAlloc>::template rebind_alloc<rebalance_item>>;
+      using rebalance_vector = std::vector<rebalance_item, std::scoped_allocator_adaptor<typename std::allocator_traits<TxAlloc>::template rebind_alloc<rebalance_item>>>;
 
       protected:
       explicit element_rebalancer_for_leaf(const TxAlloc& tx_alloc)
@@ -2381,12 +2511,8 @@ class bplus_tree
 
       public:
       auto populate_rebalance(const leaf_type& leaf) -> void {
-        std::transform(
-            leaf.elements().begin(), leaf.elements().end(),
-            std::back_inserter(rebalance),
-            [](const auto& element_ptr) {
-              return rebalance_item(element_ptr);
-            });
+        for (cycle_ptr::cycle_gptr<typename leaf_type::element> element_ptr : leaf.elements())
+          rebalance.emplace_back(std::move(element_ptr));
       }
 
       protected:
@@ -2422,7 +2548,7 @@ class bplus_tree
               assert(offset < elements_per_leaf);
 
               item.new_index = offset;
-              if (item.new_index != offset)
+              if (item.new_index != offset) // Verify we didn't get a truncation.
                 throw std::out_of_range("bug: wrong index selection during split");
               offset += between;
             });
@@ -2626,8 +2752,10 @@ class bplus_tree
           auto do_elem_lock(move_only_function<void(std::shared_ptr<page_selection>)> handler, [[maybe_unused]] std::size_t idx = 0) -> void {
             if constexpr(std::is_same_v<PageType, intr_type>) {
               invoke_complete(std::move(handler));
+            } else if (idx == ps->rebalance.size()) {
+              invoke_complete(std::move(handler));
             } else {
-              if (idx == ps->rebalance.size()) invoke_complete(std::move(handler));
+              assert(idx < ps->rebalance.size());
 
               cycle_ptr::cycle_gptr<typename leaf_type::element> elem_to_lock = ps->rebalance[idx].elem;
               // We use `async_upgrade` (as opposed to `dispatch_upgrade`),
@@ -2669,7 +2797,12 @@ class bplus_tree
           : ps(std::move(ps))
           {}
 
-          auto operator()(move_only_function<void(std::shared_ptr<page_selection>)> handler, std::size_t idx) -> void {
+          auto operator()(move_only_function<void(std::shared_ptr<page_selection>)> handler) -> void {
+            do_page_lock(std::move(handler), 0);
+          }
+
+          private:
+          auto do_page_lock(move_only_function<void(std::shared_ptr<page_selection>)> handler, std::size_t idx) -> void {
             assert(idx <= ps->uplocks.size());
 
             for (std::size_t i = 0; i < ps->uplocks.size(); ++i) {
@@ -2683,12 +2816,12 @@ class bplus_tree
             }
 
             if (idx == num_page_locks_needed) {
-              std::invoke(handler, std::move(ps));
+              do_elem_lock(std::move(handler), 0);
               return;
             }
 
             if (!ps->uplocks[idx].is_locked()) {
-              std::invoke(*this, std::move(handler), idx + 1u);
+              do_page_lock(std::move(handler), idx + 1u);
             } else {
               auto lck = std::move(ps->uplocks[idx]);
               std::move(lck).dispatch_exclusive(
@@ -2696,12 +2829,38 @@ class bplus_tree
                       std::move(handler),
                       [self_op=std::move(*this), idx](auto handler, monitor_exlock_type lock) mutable {
                         self_op.ps->exlocks[idx] = std::move(lock);
-                        std::invoke(std::move(self_op), std::move(handler), idx + 1u);
+                        self_op.do_page_lock(std::move(handler), idx + 1u);
                       }));
             }
           }
 
-          private:
+          auto do_elem_lock(move_only_function<void(std::shared_ptr<page_selection>)> handler, std::size_t idx) -> void {
+            if constexpr(std::is_same_v<PageType, intr_type>) {
+              invoke_complete(std::move(handler));
+            } else if (idx == ps->rebalance.size()) {
+              invoke_complete(std::move(handler));
+            } else {
+              assert(idx < ps->rebalance.size());
+
+              monitor_uplock_type uplock = std::move(ps->rebalance[idx].uplock);
+              // We use `async_exclusive` (as opposed to `dispatch_upgrade`),
+              // because there could be thousands of page elements,
+              // and dispatch recursion could cause the stack to throw huge.
+              // XXX maybe implement a try-lock that grabs the lock instantly.
+              std::move(uplock).async_exclusive(
+                  completion_wrapper<void(monitor_exlock_type)>(
+                      std::move(handler),
+                      [self_op=*this, idx](auto handler, monitor_exlock_type lock) mutable {
+                        self_op.ps->rebalance[idx].exlock = std::move(lock);
+                        self_op.do_elem_lock(std::move(handler), idx + 1u);
+                      }));
+            }
+          }
+
+          auto invoke_complete(move_only_function<void(std::shared_ptr<page_selection>)> handler) -> void {
+            std::invoke(handler, std::move(ps));
+          }
+
           std::shared_ptr<page_selection> ps;
         };
 
@@ -2715,7 +2874,7 @@ class bplus_tree
 
         return asio::async_initiate<decltype(asio::deferred), void(std::shared_ptr<page_selection>)>(
             [](auto handler, std::shared_ptr<page_selection> ps) -> void {
-              std::invoke(exlock_op(std::move(ps)), move_only_function<void(std::shared_ptr<page_selection>)>(std::move(handler)), 0u);
+              std::invoke(exlock_op(std::move(ps)), move_only_function<void(std::shared_ptr<page_selection>)>(std::move(handler)));
             },
             asio::deferred, std::move(ps));
       }
@@ -2779,6 +2938,15 @@ class bplus_tree
               return;
             }
 
+            if constexpr(std::is_same_v<PageType, leaf_type>) {
+              std::for_each(ps->rebalance.begin(), ps->rebalance.end(),
+                  [ps](auto& rebalance_item) {
+                    const std::span<const std::byte> elem_span = ps->level_pages[0]->element_span(rebalance_item.elem->index);
+                    rebalance_item.kv_bytes.assign(elem_span.begin(), elem_span.end());
+                    rebalance_item.use_type = rebalance_item.elem->type();
+                  });
+            }
+
             self_op.update_disk_representation(std::move(tx), std::move(ps));
           };
       }
@@ -2790,7 +2958,7 @@ class bplus_tree
 
         auto page = this->page; // Make a copy, since we'll move *this.
         auto tree = this->tree; // Make a copy, since we'll move *this.
-        auto tx_alloc = this->tx_alloc; // Make a copy, since we'll move *this.
+        [[maybe_unused]] auto tx_alloc = this->tx_alloc; // Make a copy, since we'll move *this.
         auto get_shift = [page]() -> std::uint32_t {
           if constexpr(std::is_same_v<PageType, intr_type>)
             return page->index_size() / 2u;
@@ -2809,7 +2977,7 @@ class bplus_tree
               if (ec)
                 self_op.error_invoke(ec);
               else
-                self_op.something_something_something(tx, std::move(ps), shift);
+                self_op.commit_to_disk(tx, std::move(ps), shift);
             },
             tree->get_executor());
 
@@ -2861,23 +3029,70 @@ class bplus_tree
           static_assert(std::is_same_v<PageType, leaf_type>);
 
           ps->compute_rebalance(shift);
-          auto txfile_ptr = std::allocate_shared<tx_file_type>(tx_alloc, tx[ps->level_pages[0]->address.file]);
           std::for_each(
               ps->rebalance.begin(), ps->rebalance.end(),
-              [&barrier, txfile_ptr, ps](auto& rebalance_item) {
-                // XXX
+              [&tx, &barrier, ps](auto& rebalance_item) {
+                assert(rebalance_item.kv_bytes.size() == ps->level_pages[0]->spec->element.key.padded_bytes() + ps->level_pages[0]->spec->element.value.padded_bytes());
+                ps->level_pages[rebalance_item.which_page]->async_set_use_list_diskonly_op(tx, rebalance_item.new_index, rebalance_item.elem->type(), ++barrier);
+                ps->level_pages[rebalance_item.which_page]->async_set_elements_diskonly_op(tx, rebalance_item.new_index, std::span<const std::byte>(rebalance_item.kv_bytes), ++barrier);
               });
+
+          { // Use set-difference to decide which elements are to be marked `unused`.
+            auto all_old_indices = std::vector<std::size_t, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::size_t>>(tx_alloc);
+            std::transform(ps->rebalance.begin(), ps->rebalance.end(), std::back_inserter(all_old_indices),
+                [](const auto& rebalance_item) {
+                  return rebalance_item.elem->index;
+                });
+            auto new_indices_on_page_0 = std::vector<std::size_t, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::size_t>>(tx_alloc);
+            std::transform(ps->rebalance.begin(), ps->rebalance.end(), std::back_inserter(new_indices_on_page_0),
+                [](const auto& rebalance_item) {
+                  return rebalance_item.new_index;
+                });
+            auto elems_to_clear = std::vector<std::size_t, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::size_t>>(tx_alloc);
+            std::set_difference(
+                all_old_indices.begin(), all_old_indices.end(),
+                new_indices_on_page_0.begin(), new_indices_on_page_0.end(),
+                std::back_inserter(elems_to_clear));
+            std::for_each(
+                elems_to_clear.begin(), elems_to_clear.end(),
+                [&tx, &barrier, ps](std::size_t index) {
+                  ps->level_pages[0]->async_set_use_list_diskonly_op(tx, index, bplus_tree_leaf_use_element::unused, ++barrier);
+                });
+          }
+
+          { // Update predecessor/successor references.
+            std::array<std::uint64_t, 3> offsets;
+            offsets[0] = ps->level_pages[0]->address.offset;
+            offsets[1] = ps->level_pages[1]->address.offset;
+            offsets[2] = (ps->level_pages[2] != nullptr
+                ? ps->level_pages[2]->address.offset
+                : nil_page);
+            std::array<bplus_tree_leaf_header, 3> h;
+            h[0] = ps->level_pages[0]->hdr_;
+            h[1] = ps->level_pages[1]->hdr_;
+            if (ps->level_pages[2] != nullptr) h[2] = ps->level_pages[2]->hdr_;
+            h[0].successor_page = offsets[1];
+            h[1].predecessor_page = offsets[0];
+            h[1].successor_page = offsets[2];
+            h[2].predecessor_page = offsets[1];
+            ps->level_pages[0]->async_set_hdr_diskonly_op(tx, h[0], ++barrier);
+            ps->level_pages[1]->async_set_hdr_diskonly_op(tx, h[1], ++barrier);
+            if (ps->level_pages[2] != nullptr) ps->level_pages[2]->async_set_hdr_diskonly_op(tx, h[2], ++barrier);
+          }
         }
 
         // Mark both siblings as needing an update to their augmentation.
         ps->level_pages[0]->async_set_augment_propagation_required_diskonly_op(tx, ++barrier);
         ps->level_pages[1]->async_set_augment_propagation_required_diskonly_op(tx, ++barrier);
 
+        // Update parent pointer in our new page.
+        ps->level_pages[1]->async_set_parent_diskonly_op(tx, ps->parent->address.offset, ++barrier);
+
         // All writes have been queued.
         std::invoke(barrier, std::error_code());
       }
 
-      auto something_something_something(tx_type tx, std::shared_ptr<page_selection> ps, std::size_t shift) {
+      auto commit_to_disk(tx_type tx, std::shared_ptr<page_selection> ps, std::size_t shift) {
         tx.async_commit(
             [self_op=std::move(*this), ps=std::move(ps), shift](std::error_code ec) mutable -> void {
               if (ec) {
@@ -2933,11 +3148,38 @@ class bplus_tree
         } else {
           static_assert(std::is_same_v<PageType, leaf_type>);
 
-          // XXX
+          for (const auto& rebalance_item : ps->rebalance) assert(rebalance_item.exlock.is_locked());
+          std::array<std::span<bplus_tree_leaf_use_element>, 2> use_lists{
+            ps->level_pages[0]->use_list_span(),
+            ps->level_pages[1]->use_list_span(),
+          };
+          std::for_each(use_lists.begin(), use_lists.end(),
+              [](auto& l) {
+                std::fill(l.begin(), l.end(), bplus_tree_leaf_use_element::unused);
+              });
+          std::for_each(ps->rebalance.begin(), ps->rebalance.end(),
+              [&use_lists, ps](const auto& rebalance_item) {
+                use_lists[rebalance_item.which_page][rebalance_item.new_index] = rebalance_item.use_type;
+                span_copy(ps->level_pages[rebalance_item.which_page]->element_span(rebalance_item.new_index), rebalance_item.kv_bytes);
+              });
         }
 
         ps->level_pages[0]->augment_propagation_required = true;
         ps->level_pages[1]->augment_propagation_required = true;
+
+        ps->level_pages[1]->parent_offset = ps->parent->address.offset;
+
+        // Update versions.
+        ++ps->level_pages[0]->versions.page_split;
+        ++ps->level_pages[0]->versions.augment;
+        ++ps->level_pages[1]->versions.augment;
+
+        // We're done \o/
+        done_invoke();
+
+        // Althrough we do want the augmentations to start updating, so we'll kick that off too.
+        ps->level_pages[0]->async_fix_augment_background();
+        ps->level_pages[1]->async_fix_augment_background();
       }
 
       auto done_invoke() -> void {
@@ -2961,6 +3203,19 @@ class bplus_tree
             std::move(page_split),
             std::move(tx_alloc),
             std::move(handler)));
+  }
+
+  template<typename PageType, typename TxAlloc>
+  requires (std::is_same_v<PageType, intr_type> || std::is_same_v<PageType, leaf_type>)
+  auto split_page_op_(cycle_ptr::cycle_gptr<PageType> page, bplus_tree_versions::type page_split, TxAlloc tx_alloc) -> void {
+    return asio::async_initiate<decltype(asio::deferred), void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> tree, cycle_ptr::cycle_gptr<PageType> page, bplus_tree_versions::type page_split, TxAlloc tx_alloc) {
+          if constexpr(handler_has_executor_v<decltype(handler)>)
+            tree->split_page_impl_(std::move(page), std::move(page_split), std::move(tx_alloc), completion_handler_fun(std::move(handler), tree->get_executor()));
+          else
+            tree->split_page_impl_(std::move(page), std::move(page_split), std::move(tx_alloc), std::move(handler));
+        },
+        asio::deferred, this->shared_from_this(this), std::move(page), std::move(page_split), std::move(tx_alloc));
   }
 
   public:
@@ -3062,7 +3317,6 @@ class bplus_tree
             if (ec) throw std::system_error(ec, "ensure_parent_op");
           };
 
-#if 0
         self->split_page_impl_(
             path.leaf_page.page, path.leaf_page.versions.page_split, std::allocator<std::byte>(),
             [](std::error_code ec) {
@@ -3071,7 +3325,6 @@ class bplus_tree
 
               if (ec) throw std::system_error(ec, "split_page_impl");
             });
-#endif
       };
 
     async_before_first_element(std::allocator<std::byte>(),
