@@ -559,41 +559,54 @@ inline auto wal_file_entry<Executor, Allocator>::has_unlinked_data() const -> bo
 template<typename Executor, typename Allocator>
 template<typename Acceptor, typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_records(Acceptor&& acceptor, CompletionToken&& token) const {
-  using pos_stream = positional_stream_adapter<const fd_type&>; // XXX add buffer
-
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, std::shared_ptr<const wal_file_entry> wf, std::remove_cvref_t<Acceptor> acceptor) {
-        asio::dispatch(
-            completion_wrapper<void()>(
-                completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
-                [wf, acceptor=std::move(acceptor)](auto completion_handler) mutable {
-                  // If we are not in the correct state, refuse the request.
-                  if (wf->state_ != wal_file_entry_state::ready && wf->state_ != wal_file_entry_state::sealing && wf->state_ != wal_file_entry_state::sealed) [[unlikely]] {
-                    completion_handler.post(make_error_code(wal_errc::bad_state));
-                    return;
-                  }
-
-                  constexpr auto begin_offset = std::remove_cvref_t<decltype(std::declval<wal_file_entry>().header_reader_())>::bytes.value();
-                  std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf->file, begin_offset);
-                  auto& stream = *s;
-
-                  wf->read_records_until_(
-                      stream,
-                      [acceptor=std::move(acceptor)](variant_type v) mutable -> std::error_code {
-                        if (std::holds_alternative<wal_record_end_of_records>(v))
-                          return make_error_code(wal_errc::bad_read);
-                        return std::invoke(acceptor, std::move(v));
-                      },
-                      completion_wrapper<void(std::error_code)>(
-                          std::move(completion_handler).as_unbound_handler(),
-                          [stream_ptr=std::move(s)](auto& completion_handler, std::error_code ec) mutable {
-                            stream_ptr.reset(); // Not really needed, but silences compiler warning.
-                            std::invoke(completion_handler, ec);
-                          }),
-                      wf->link_offset_);
-                }));
+        wf->async_records_impl_(
+            move_only_function<std::error_code(variant_type)>(std::move(acceptor)),
+            move_only_function<void(std::error_code)>(
+                completion_handler_fun(std::move(completion_handler), wf->get_executor())));
       },
       token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
+}
+
+template<typename Executor, typename Allocator>
+inline auto wal_file_entry<Executor, Allocator>::async_records_impl_(move_only_function<std::error_code(variant_type)> acceptor, move_only_function<void(std::error_code)> completion_handler) const {
+  using pos_stream = positional_stream_adapter<const fd_type&>; // XXX add buffer
+
+  asio::dispatch(
+      completion_wrapper<void()>(
+          asio::bind_executor(strand_,
+              asio::bind_allocator(get_allocator(),
+                  std::move(completion_handler))),
+          [wf=this->shared_from_this(), acceptor=std::move(acceptor)](auto completion_handler) mutable {
+            assert(wf->strand_.running_in_this_thread());
+
+            // If we are not in the correct state, refuse the request.
+            if (wf->state_ != wal_file_entry_state::ready && wf->state_ != wal_file_entry_state::sealing && wf->state_ != wal_file_entry_state::sealed) [[unlikely]] {
+              std::invoke(completion_handler, make_error_code(wal_errc::bad_state));
+              return;
+            }
+
+            constexpr auto begin_offset = std::remove_cvref_t<decltype(std::declval<wal_file_entry>().header_reader_())>::bytes.value();
+            std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf->file, begin_offset);
+            auto& stream = *s;
+
+            auto shared_acceptor = std::allocate_shared<move_only_function<std::error_code(variant_type)>>(wf->get_allocator(), std::move(acceptor));
+            wf->read_records_until_(
+                stream,
+                [acceptor=std::move(shared_acceptor)](variant_type v) mutable -> std::error_code {
+                  if (std::holds_alternative<wal_record_end_of_records>(v))
+                    return make_error_code(wal_errc::bad_read);
+                  return std::invoke(*acceptor, std::move(v));
+                },
+                completion_wrapper<void(std::error_code)>(
+                    std::move(completion_handler),
+                    [stream_ptr=std::move(s)](auto& completion_handler, std::error_code ec) mutable {
+                      stream_ptr.reset(); // Not really needed, but silences compiler warning.
+                      std::invoke(completion_handler, ec);
+                    }),
+                wf->link_offset_);
+          }));
 }
 
 template<typename Executor, typename Allocator>

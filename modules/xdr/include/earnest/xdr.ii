@@ -370,9 +370,9 @@ inline auto callbacks_n_([[maybe_unused]] const constant_size_buffer_factory<Byt
 }
 
 template<typename Fn, typename... Tail>
-inline auto callbacks_n_(const post_processor<Fn>& pp, Tail&&... tail) {
+inline auto callbacks_n_(post_processor<Fn>&& pp, Tail&&... tail) {
   return [ tail_cb=callbacks_n_(std::forward<Tail>(tail)...),
-           fn=pp.callback()
+           fn=std::move(pp).callback()
          ]<typename... T> (std::tuple<T...>& temporaries) mutable -> std::error_code {
            std::error_code ec = std::invoke(fn, temporaries);
            if (!ec) ec = std::invoke(tail_cb, temporaries);
@@ -381,8 +381,8 @@ inline auto callbacks_n_(const post_processor<Fn>& pp, Tail&&... tail) {
 }
 
 template<typename... Factories, std::size_t... Idx>
-inline auto callbacks_(const std::tuple<Factories...>& factories, [[maybe_unused]] std::index_sequence<Idx...> seq) {
-  return callbacks_n_(std::get<Idx>(factories)...);
+inline auto callbacks_(std::tuple<Factories...>&& factories, [[maybe_unused]] std::index_sequence<Idx...> seq) {
+  return callbacks_n_(std::get<Idx>(std::move(factories))...);
 }
 
 
@@ -472,9 +472,10 @@ inline void decoder_callback<Dfn, Nested, Alloc>::continue_(completion_fn&& cfn,
   if (ec) {
     std::invoke(cfn, stream, temporaries, ec);
   } else {
-    async_read(stream, buffers(r),
+    auto r_buffers = buffers(r);
+    async_read(stream, std::move(r_buffers),
         [ done_cb=std::move(cfn),
-          reader_callbacks=callbacks(r),
+          reader_callbacks=callbacks(std::move(r)),
           &stream,
           &temporaries
         ](std::error_code ec, [[maybe_unused]] std::size_t bytes) mutable {
@@ -640,8 +641,8 @@ inline auto buffers(const reader<Factories...>& r) {
 }
 
 template<typename... Factories>
-inline auto callbacks(const reader<Factories...>& r) {
-  return ::earnest::detail::xdr_reader::callbacks_(r.get_factories(), std::index_sequence_for<Factories...>());
+inline auto callbacks(reader<Factories...>&& r) {
+  return ::earnest::detail::xdr_reader::callbacks_(std::move(r).get_factories(), std::index_sequence_for<Factories...>());
 }
 
 
@@ -700,7 +701,7 @@ inline auto pre_processor<Fn>::callback() const & -> const Fn& {
 
 template<typename Fn>
 inline auto pre_processor<Fn>::callback() && -> Fn&& {
-  return fn_;
+  return std::move(fn_);
 }
 
 template<typename Fn>
@@ -812,9 +813,9 @@ inline auto callbacks_n_([[maybe_unused]] const constant_size_buffer_factory<Byt
 }
 
 template<typename Fn, typename... Tail>
-inline auto callbacks_n_(const pre_processor<Fn>& pp, Tail&&... tail) {
+inline auto callbacks_n_(pre_processor<Fn>&& pp, Tail&&... tail) {
   return [ tail_cb=callbacks_n_(std::forward<Tail>(tail)...),
-           fn=pp.callback()
+           fn=std::move(pp).callback()
          ]<typename... T> (std::tuple<T...>& temporaries) mutable -> std::error_code {
            std::error_code ec = std::invoke(fn, temporaries);
            if (!ec) ec = std::invoke(tail_cb, temporaries);
@@ -823,8 +824,8 @@ inline auto callbacks_n_(const pre_processor<Fn>& pp, Tail&&... tail) {
 }
 
 template<typename... Factories, std::size_t... Idx>
-inline auto callbacks_(const std::tuple<Factories...>& factories, [[maybe_unused]] std::index_sequence<Idx...> seq) {
-  return callbacks_n_(std::get<Idx>(factories)...);
+inline auto callbacks_(std::tuple<Factories...>&& factories, [[maybe_unused]] std::index_sequence<Idx...> seq) {
+  return callbacks_n_(std::get<Idx>(std::move(factories))...);
 }
 
 
@@ -885,7 +886,7 @@ inline void encoder_callback<Dfn, Nested, Alloc>::operator()(Stream& stream, std
 template<typename Dfn, typename Nested, typename Alloc>
 template<typename Stream, typename... T>
 inline void encoder_callback<Dfn, Nested, Alloc>::continue_(completion_fn&& cfn, writer_type&& w, Stream& stream, std::tuple<T...>& temporaries, std::error_code ec) {
-  if (!ec) ec = std::invoke(callbacks(w), temporaries);
+  if (!ec) ec = std::invoke(callbacks(std::move(w)), temporaries);
   if (ec) {
     std::invoke(cfn, stream, temporaries, ec);
   } else {
@@ -1054,8 +1055,8 @@ inline auto buffers(const writer<Factories...>& w) {
 }
 
 template<typename... Factories>
-inline auto callbacks(const writer<Factories...>& w) {
-  return ::earnest::detail::xdr_writer::callbacks_(w.get_factories(), std::index_sequence_for<Factories...>());
+inline auto callbacks(writer<Factories...>&& w) {
+  return ::earnest::detail::xdr_writer::callbacks_(std::move(w).get_factories(), std::index_sequence_for<Factories...>());
 }
 
 
@@ -1087,10 +1088,11 @@ inline auto async_read(
             },
             std::move(r));
 
+        auto rr_buffers = buffers(resolved_reader);
         asio::async_read(
-            stream, buffers(resolved_reader),
+            stream, std::move(rr_buffers),
             [ callback=std::move(callback),
-              reader_callbacks=callbacks(resolved_reader),
+              reader_callbacks=callbacks(std::move(resolved_reader)),
               temporaries_ptr=std::move(temporaries_ptr),
               &stream
             ](std::error_code ec, [[maybe_unused]] std::size_t bytes) mutable {
@@ -1133,7 +1135,7 @@ inline auto async_write(
             },
             std::move(w));
 
-        std::error_code ec = std::invoke(callbacks(resolved_writer), *temporaries_ptr);
+        std::error_code ec = std::invoke(callbacks(std::move(resolved_writer)), *temporaries_ptr);
         if (ec) {
           asio::post(ex,
               [ ec,

@@ -124,6 +124,8 @@ class wal_file_entry
   auto async_records(CompletionToken&& token) const;
 
   private:
+  auto async_records_impl_(move_only_function<std::error_code(variant_type)> acceptor, move_only_function<void(std::error_code)> completion_handler) const;
+
   template<typename CompletionToken, typename OnSpaceAssigned, typename TransactionValidator = no_transaction_validation>
   auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state = wal_file_entry_state::ready, TransactionValidator&& transaction_validator = no_transaction_validation());
 
