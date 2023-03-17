@@ -639,10 +639,10 @@ inline auto monitor<Executor, Allocator>::upgrade_lock::async_exclusive(Completi
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
 inline auto monitor<Executor, Allocator>::upgrade_lock::async_exclusive(CompletionToken&& token) && {
-  if (state_ == nullptr) throw std::logic_error("lock not held");
-
   return asio::async_initiate<CompletionToken, void(exclusive_lock)>(
       [](auto handler, upgrade_lock self) {
+        if (self.state_ == nullptr) throw std::logic_error("lock not held");
+
         self.state_->add_upgrade(
             exclusive_function(
                 completion_wrapper<void(exclusive_lock, bool)>(
@@ -658,10 +658,10 @@ inline auto monitor<Executor, Allocator>::upgrade_lock::async_exclusive(Completi
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
 inline auto monitor<Executor, Allocator>::upgrade_lock::dispatch_exclusive(CompletionToken&& token) const & {
-  if (state_ == nullptr) throw std::logic_error("lock not held");
-
   return asio::async_initiate<CompletionToken, void(exclusive_lock)>(
       [](auto handler, upgrade_lock self) {
+        if (self.state_ == nullptr) throw std::logic_error("lock not held");
+
         self.state_->add_upgrade(
             exclusive_function(
                 completion_wrapper<void(exclusive_lock, bool)>(
@@ -680,10 +680,10 @@ inline auto monitor<Executor, Allocator>::upgrade_lock::dispatch_exclusive(Compl
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
 inline auto monitor<Executor, Allocator>::upgrade_lock::dispatch_exclusive(CompletionToken&& token) && {
-  if (state_ == nullptr) throw std::logic_error("lock not held");
-
   return asio::async_initiate<CompletionToken, void(exclusive_lock)>(
       [](auto handler, upgrade_lock self) {
+        if (self.state_ == nullptr) throw std::logic_error("lock not held");
+
         self.state_->add_upgrade(
             exclusive_function(
                 completion_wrapper<void(exclusive_lock, bool)>(
