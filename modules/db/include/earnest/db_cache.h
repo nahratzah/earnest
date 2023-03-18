@@ -160,12 +160,34 @@ class prom_metrics_policy {
 };
 
 
+class cache_value_on_load_invocation_policy {
+  public:
+  template<typename HashTable, typename ValueType, typename Allocator>
+  class table_base_impl {
+    public:
+    auto on_assign_(ValueType* vptr, bool value, bool assigned_via_callback) noexcept -> void {
+      if (value) {
+        std::visit(
+            [](auto& mapped_value) {
+              if constexpr(std::is_same_v<typename ValueType::mapped_type, std::remove_cvref_t<decltype(mapped_value)>>)
+                mapped_value->on_load();
+            },
+            vptr->get(std::false_type()));
+      }
+    }
+  };
+};
+
+
 } /* namespace earnest::detail */
 
 
 class db_cache_value {
   public:
   virtual ~db_cache_value() = default;
+
+  private:
+  virtual void on_load() noexcept {}
 };
 
 
@@ -372,6 +394,7 @@ class db_cache {
       libhoard::error_policy<std::error_code>,
       detail::max_mem_policy,
       detail::prom_metrics_policy,
+      detail::cache_value_on_load_invocation_policy,
       libhoard::pointer_policy<cycle_ptr::cycle_weak_ptr<db_cache_value>, cycle_ptr::cycle_member_ptr<db_cache_value>, mk_member_pointer_>>;
 
   std::shared_ptr<detail::alloc_tracker> tracker_;

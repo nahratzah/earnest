@@ -98,6 +98,65 @@ TEST_FIXTURE(db_cache_fixture, get_error) {
   CHECK(callback_called);
 }
 
+TEST_FIXTURE(db_cache_fixture, on_load_called_on_get) {
+  class element_with_onload : public earnest::db_cache_value {
+    public:
+    element_with_onload(int* on_load_counter)
+    : on_load_counter(on_load_counter)
+    {
+      REQUIRE CHECK(on_load_counter != nullptr);
+    }
+
+    private:
+    auto on_load() noexcept -> void override {
+      ++*on_load_counter;
+    }
+
+    int* on_load_counter = nullptr;
+  };
+
+  cycle_ptr::cycle_gptr<element_with_onload> p0;
+  int on_load_called = 0;
+
+  // First load. Should call the onload callback.
+  cache->async_get(
+      key_type<element_with_onload>{
+        .file{"", "testfile"},
+        .offset=0,
+      },
+      [&p0](std::error_code ec, cycle_ptr::cycle_gptr<element_with_onload> ptr) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK(ptr != nullptr);
+        p0 = ptr;
+      },
+      [](int* on_load_called) {
+        return asio::deferred.values(std::error_code(), cycle_ptr::make_cycle<element_with_onload>(on_load_called));
+      },
+      &on_load_called);
+  ioctx.run();
+  ioctx.restart();
+  CHECK(on_load_called = 1); // Called at construction.
+
+  // Second load. Since the pointer is still valid (saved in `p0` to make sure), this should not cause an onload callback.
+  cache->async_get(
+      key_type<element_with_onload>{
+        .file{"", "testfile"},
+        .offset=0,
+      },
+      [&p0](std::error_code ec, cycle_ptr::cycle_gptr<element_with_onload> ptr) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK(ptr != nullptr);
+        CHECK_EQUAL(p0, ptr);
+      },
+      [](int* on_load_called) {
+        return asio::deferred.values(std::error_code(), cycle_ptr::make_cycle<element_with_onload>(on_load_called));
+      },
+      &on_load_called);
+  ioctx.run();
+  ioctx.restart();
+  CHECK(on_load_called = 1); // Second load doesn't call the on-load callback.
+}
+
 int main() {
   return UnitTest::RunAllTests();
 }
