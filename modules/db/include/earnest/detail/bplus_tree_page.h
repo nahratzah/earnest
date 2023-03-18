@@ -3654,6 +3654,14 @@ class bplus_tree
                 use_lists[rebalance_item.which_page][rebalance_item.new_index] = rebalance_item.use_type;
                 span_copy(ps->level_pages[rebalance_item.which_page]->element_span(rebalance_item.new_index), rebalance_item.kv_bytes);
               });
+
+          // Update elements.
+          std::for_each(ps->rebalance.begin(), ps->rebalance.end(),
+              [ps](const auto& rebalance_item) {
+                if (rebalance_item.which_page != 0)
+                  rebalance_item.elem->owner = ps->level_pages[rebalance_item.which_page];
+                rebalance_item.elem->index = rebalance_item.new_index;
+              });
         }
 
         ps->level_pages[0]->augment_propagation_required = true;
