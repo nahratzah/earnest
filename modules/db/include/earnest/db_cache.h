@@ -165,17 +165,23 @@ class cache_value_on_load_invocation_policy {
   template<typename HashTable, typename ValueType, typename Allocator>
   class table_base_impl {
     public:
-    auto on_assign_(ValueType* vptr, bool value, bool assigned_via_callback) noexcept -> void {
+    auto on_assign_(ValueType* vptr, bool value, [[maybe_unused]] bool assigned_via_callback) noexcept -> void {
       if (value) {
         std::visit(
-            [](auto& mapped_value) {
+            [](const auto& mapped_value) {
               if constexpr(std::is_same_v<typename ValueType::mapped_type, std::remove_cvref_t<decltype(mapped_value)>>)
-                mapped_value->on_load();
+                invoke_on_load_(*mapped_value);
             },
             vptr->get(std::false_type()));
       }
     }
   };
+
+  private:
+  template<typename T>
+  static auto invoke_on_load_(T& v) noexcept -> void {
+    v.on_load();
+  }
 };
 
 
@@ -183,10 +189,12 @@ class cache_value_on_load_invocation_policy {
 
 
 class db_cache_value {
+  friend class detail::cache_value_on_load_invocation_policy;
+
   public:
   virtual ~db_cache_value() = default;
 
-  private:
+  protected:
   virtual void on_load() noexcept {}
 };
 

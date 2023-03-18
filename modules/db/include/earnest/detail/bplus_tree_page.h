@@ -12,6 +12,7 @@
 #include <scoped_allocator>
 #include <span>
 #include <system_error>
+#include <typeinfo>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -374,11 +375,10 @@ class bplus_tree_page
 
           variant_type casted_page;
           if (!ec) {
-            page->async_fix_augment_background();
-            if (auto leaf_ptr = std::dynamic_pointer_cast<leaf_type>(page)) {
-              casted_page.template emplace<cycle_ptr::cycle_gptr<leaf_type>>(std::move(leaf_ptr));
-            } else if (auto intr_ptr = std::dynamic_pointer_cast<intr_type>(page)) {
-              casted_page.template emplace<cycle_ptr::cycle_gptr<intr_type>>(std::move(intr_ptr));
+            if (typeid(*page) == typeid(leaf_type)) {
+              casted_page.template emplace<cycle_ptr::cycle_gptr<leaf_type>>(boost::polymorphic_pointer_downcast<leaf_type>(page));
+            } else if (typeid(*page) == typeid(intr_type)) {
+              casted_page.template emplace<cycle_ptr::cycle_gptr<intr_type>>(boost::polymorphic_pointer_downcast<intr_type>(page));
             } else [[unlikely]] {
               // Can only happen if there is a third type.
               ec = make_error_code(db_errc::cache_collision);
@@ -470,12 +470,156 @@ class bplus_tree_page
   }
 
   template<bool ForWrite>
-  auto parent_page_op(std::bool_constant<ForWrite> for_write) const {
-    return intr_page_op(
-        std::move(for_write), &bplus_tree_page::parent_page_address,
-        [](const auto& target_ptr, const auto& self_ptr) -> bool {
-          return target_ptr->contains(self_ptr->address);
-        });
+  auto parent_page_op([[maybe_unused]] std::bool_constant<ForWrite> for_write) const {
+    using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
+    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
+    using bplus_tree_intr_ptr = cycle_ptr::cycle_gptr<intr_type>;
+    using bplus_tree_leaf_ptr = cycle_ptr::cycle_gptr<leaf_type>;
+    using ptr_type = std::variant<bplus_tree_intr_ptr, bplus_tree_leaf_ptr>;
+    using target_lock_type = std::conditional_t<ForWrite, monitor_uplock_type, monitor_shlock_type>;
+
+    // This is the same code as page_variant_op(),
+    // except the lock order is reversed.
+    struct op
+    : public std::enable_shared_from_this<op>
+    {
+      op(cycle_ptr::cycle_gptr<const bplus_tree_page> self, move_only_function<void(std::error_code, ptr_type, target_lock_type)> handler)
+      : self(std::move(self)),
+        handler(std::move(handler))
+      {}
+
+      // Prevent move/copy, to prevent accidentally introducing bugs.
+      op(const op&) = delete;
+      op(op&&) = delete;
+
+      auto operator()() -> void {
+        self->page_lock.dispatch_shared(
+            [self_op=this->shared_from_this()](monitor_shlock_type lock) mutable -> void {
+              self_op->load_target_page(std::move(lock));
+            });
+      }
+
+      private:
+      auto load_target_page(monitor_shlock_type self_shlock) -> void {
+        cycle_ptr::cycle_gptr<raw_db_type> raw_db = self->raw_db.lock();
+        if (raw_db == nullptr || self->erased_) [[unlikely]] {
+          error_invoke(make_error_code(db_errc::data_expired));
+          return;
+        }
+
+        db_address target_addr = self->parent_page_address();
+        self_shlock.reset(); // Release lock.
+
+        // There is no parent, so we return without an error, and with a nullptr.
+        if (target_addr.offset == nil_page) {
+          std::invoke(handler, std::error_code{}, ptr_type{}, target_lock_type{});
+          return;
+        }
+
+        async_load_op(
+            self->spec,
+            std::move(raw_db),
+            target_addr,
+            [self_op=this->shared_from_this(), target_addr]() {
+              return self_op->self->page_lock.dispatch_shared(asio::deferred)
+              | asio::deferred(
+                  [self_op, target_addr]([[maybe_unused]] monitor_shlock_type self_lock) {
+                    std::error_code ec;
+                    if (self_op->self->erased_ || target_addr != self_op->self->parent_page_address())
+                      ec = make_error_code(bplus_tree_errc::restart);
+                    return asio::deferred.values(ec);
+                  });
+            })
+        | [self_op=this->shared_from_this()](std::error_code ec, ptr_type target_page) -> void {
+            if (ec == make_error_code(bplus_tree_errc::restart)) {
+              // Using asio::post, to prevent recursion from overflowing the stack space.
+              asio::post(
+                  self_op->self->get_executor(),
+                  [self_op]() {
+                    std::invoke(*self_op);
+                  });
+              return;
+            }
+
+            if (ec) {
+              self_op->error_invoke(ec);
+              return;
+            }
+
+            self_op->lock_target(std::move(target_page));
+          };
+      }
+
+      auto lock_target(ptr_type target_page) -> void {
+        const bplus_tree_page*const raw_ptr = get_raw_ptr(target_page);
+        if constexpr(ForWrite) {
+          raw_ptr->page_lock.dispatch_upgrade(
+              [ target_page=std::move(target_page),
+                self_op=this->shared_from_this()
+              ](monitor_uplock_type target_lock) mutable {
+                self_op->validate(std::move(target_page), std::move(target_lock));
+              });
+        } else {
+          raw_ptr->page_lock.dispatch_shared(
+              [ target_page=std::move(target_page),
+                self_op=this->shared_from_this()
+              ](monitor_shlock_type target_lock) mutable {
+                self_op->validate(std::move(target_page), std::move(target_lock));
+              });
+        }
+      }
+
+      auto validate(ptr_type target_page, target_lock_type target_lock) -> void {
+        self->page_lock.dispatch_shared(
+            [ self_op=this->shared_from_this(),
+              target_page=std::move(target_page),
+              target_lock=std::move(target_lock)
+            ](monitor_shlock_type self_lock) mutable {
+              if (self_op->self->erased_) [[unlikely]] {
+                self_op->error_invoke(make_error_code(db_errc::data_expired));
+                return;
+              }
+
+              if (get_raw_ptr(target_page)->address != self_op->self->parent_page_address()) {
+                // Restart.
+                asio::post(
+                    self_op->self->get_executor(),
+                    [self_op]() {
+                      std::invoke(*self_op);
+                    });
+                return;
+              }
+
+              self_lock.reset(); // No longer need this lock.
+              std::invoke(self_op->handler, std::error_code(), std::move(target_page), std::move(target_lock));
+            });
+      }
+
+      static auto get_raw_ptr(const ptr_type& p) -> bplus_tree_page* {
+        return std::visit(
+            [](const auto& ptr) -> bplus_tree_page* {
+              return ptr.get();
+            },
+            p);
+      }
+
+      auto error_invoke(std::error_code ec) -> void {
+        std::invoke(handler, ec, ptr_type{}, target_lock_type{});
+      }
+
+      const cycle_ptr::cycle_gptr<const bplus_tree_page> self;
+      const move_only_function<void(std::error_code, ptr_type, target_lock_type)> handler;
+    };
+
+    return asio::async_initiate<decltype(asio::deferred), void(std::error_code, ptr_type, target_lock_type)>(
+        [](auto handler, cycle_ptr::cycle_gptr<const bplus_tree_page> self) {
+          if constexpr(handler_has_executor_v<decltype(handler)>)
+            std::invoke(*std::make_shared<op>(self, completion_handler_fun(std::move(handler), self->get_executor())));
+          else
+            std::invoke(*std::make_shared<op>(self, std::move(handler)));
+        },
+        asio::deferred, this->shared_from_this(this))
+    | variant_to_pointer_op<intr_type>();
   }
 
   template<bool ParentForWrite, typename SiblingPageType = bplus_tree_page>
@@ -598,68 +742,256 @@ class bplus_tree_page
   }
 
   auto async_fix_augment_background() -> void {
-    page_lock.dispatch_shared(asio::append(asio::deferred, this->shared_from_this(this)))
-    | [](auto lock, cycle_ptr::cycle_gptr<bplus_tree_page> self) {
-        if (!self->augment_propagation_required) return;
-        auto raw_db = self->raw_db.lock();
-        if (raw_db == nullptr) return;
+    auto raw_db = this->raw_db.lock();
+    if (raw_db == nullptr) return;
 
-        asio::defer(
-            self->get_executor(),
-            asio::bind_allocator(
-                raw_db->get_allocator(),
-                [self]() {
-                  self->async_fix_augment_impl_(
-                      [](std::error_code ec) {
-                        if (ec && ec != make_error_code(db_errc::data_expired))
-                          std::clog << "bplus-tree: background augmentation update failed: " << ec.message() << "\n";
-                      });
-                }));
-      };
+    // We use the raw_db allocator, so that the memory usage is tracked,
+    // but doesn't count against cache-memory
+    // (similar to how what we do with the monitors).
+    auto raw_db_allocator = raw_db->get_allocator();
+
+    asio::defer(
+        get_executor(),
+        [self=this->shared_from_this(this), raw_db_allocator]() {
+          self->async_fix_augment_impl_(
+              [](std::error_code ec) {
+                if (ec && ec != make_error_code(db_errc::data_expired))
+                  std::clog << "bplus-tree: background augmentation update failed: " << ec.message() << "\n";
+              },
+              false,
+              raw_db_allocator);
+        });
+  }
+
+  template<typename TxAlloc, typename CompletionToken>
+  auto async_fix_augment(TxAlloc tx_alloc, CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_page> self, TxAlloc tx_alloc) {
+          self->async_fix_augment_impl_(std::move(handler), true, std::move(tx_alloc));
+        },
+        token, this->shared_from_this(this), std::move(tx_alloc));
   }
 
   private:
-  auto async_fix_augment_impl_(move_only_function<void(std::error_code)> handler) -> void {
+  auto on_load() noexcept -> void override {
+    this->db_cache_value::on_load(); // Call parent.
+
+    // Since we're not yet handed out, we can forego locks.
+    if (augment_propagation_required) async_fix_augment_background();
+  }
+
+  template<typename TxAlloc = std::allocator<std::byte>>
+  auto async_fix_augment_impl_(move_only_function<void(std::error_code)> handler, bool must_complete, TxAlloc tx_alloc = TxAlloc()) -> void {
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
     using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
+    using tx_type = typename raw_db_type::template fdb_transaction<TxAlloc>;
 
-    struct op {
-      op(cycle_ptr::cycle_gptr<bplus_tree_page> self, move_only_function<void(std::error_code)> handler)
+    struct op
+    : public std::enable_shared_from_this<op>
+    {
+      op(cycle_ptr::cycle_gptr<bplus_tree_page> self, move_only_function<void(std::error_code)> handler, TxAlloc tx_alloc, bool must_complete)
       : self(std::move(self)),
-        handler(std::move(handler))
+        tx_alloc(std::move(tx_alloc)),
+        handler(std::move(handler)),
+        must_complete(must_complete)
       {}
 
       auto operator()() -> void {
-        // XXX implement
+        self->page_lock.dispatch_shared(
+            [self_op=this->shared_from_this()](monitor_shlock_type lock) {
+              if (self_op->self->erased_) [[unlikely]] {
+                self_op->error_invoke(make_error_code(db_errc::data_expired));
+              } else if (!self_op->self->augment_propagation_required) [[unlikely]] {
+                lock.reset();
+                self_op->self->parent_page_op(std::false_type())
+                | [self_op](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_page> parent, [[maybe_unused]] monitor_shlock_type parent_lock) {
+                    parent_lock.reset();
+                    if (ec)
+                      self_op->error_invoke(ec);
+                    else
+                      self_op->complete_invoke(parent);
+                  };
+              } else {
+                self_op->compute_augmentation(std::move(lock));
+              }
+            });
       }
 
       private:
+      auto compute_augmentation(monitor_shlock_type lock) -> void {
+        self->async_compute_page_augments(asio::append(asio::deferred, std::move(lock)))
+        | asio::deferred(
+            [self_op=this->shared_from_this()](std::vector<std::byte> augment, monitor_shlock_type lock) {
+              self_op->augment = std::move(augment);
+              self_op->augment_version = self_op->self->versions.augment;
+              lock.reset(); // No longer need the lock.
+              return asio::deferred.values();
+            })
+        | [self_op=this->shared_from_this()]() {
+            auto raw_db = self_op->self->raw_db.lock();
+            if (raw_db == nullptr) [[unlikely]] {
+              self_op->error_invoke(make_error_code(db_errc::data_expired));
+              return;
+            }
+
+            self_op->self->parent_page_op(std::true_type())
+            | [self_op](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_intr<RawDbType>> parent, monitor_uplock_type parent_lock) mutable {
+                if (ec) {
+                  self_op->error_invoke(ec);
+                  return;
+                }
+                if (parent == nullptr) {
+                  self_op->self->page_lock.dispatch_exclusive(
+                      [self_op](monitor_exlock_type self_lock) {
+                        // We don't clear this bit if the parent has acquired a parent
+                        // between our earlier conclusion of not having a parent, and now.
+                        if (self_op->self->parent_page_offset() == nil_page)
+                          self_op->self->augment_propagation_required = false;
+
+                        // We're done. Even if the page acquired a parent in the meantime.
+                        self_lock.reset();
+                        self_op->complete_invoke(nullptr);
+                      });
+                }
+
+                self_op->store_augment(std::move(parent), std::move(parent_lock));
+              };
+          };
+      }
+
+      auto store_augment(cycle_ptr::cycle_gptr<bplus_tree_intr<RawDbType>> parent, monitor_uplock_type parent_lock) -> void {
+        auto raw_db = self->raw_db.lock();
+        if (raw_db == nullptr) [[unlikely]] {
+          error_invoke(make_error_code(db_errc::data_expired));
+          return;
+        }
+
+        const std::optional<std::size_t> offset = parent->find_index(self->address);
+        if (!offset.has_value()) {
+          error_invoke(make_error_code(bplus_tree_errc::bad_tree));
+          return;
+        }
+
+        const auto existing_augment = parent->augment_span(offset.value());
+        if (std::equal(existing_augment.begin(), existing_augment.end(), this->augment.cbegin(), this->augment.cend())) {
+          self->page_lock.dispatch_exclusive(
+              [parent=std::move(parent), parent_lock=std::move(parent_lock), self_op=this->shared_from_this()](monitor_exlock_type self_lock) mutable {
+                if (self_op->self->versions.augment != self_op->augment_version) {
+                  // Restart, because augment got updated from under us.
+                  self_lock.reset();
+                  parent_lock.reset();
+                  std::invoke(*self_op);
+                } else {
+                  self_op->self->augment_propagation_required = false;
+                  self_lock.reset();
+                  parent_lock.reset();
+                  self_op->complete_invoke(parent);
+                }
+              });
+          return;
+        }
+
+        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, tx_alloc);
+        parent->async_set_augments_diskonly_op(
+            tx, offset.value(), std::span<const std::byte>(this->augment),
+            [ self_op=this->shared_from_this(),
+              parent_lock=std::move(parent_lock),
+              offset=offset.value(),
+              parent, tx
+            ](std::error_code ec) {
+              if (ec) {
+                self_op->error_invoke(ec);
+              } else {
+                self_op->self->page_lock.dispatch_upgrade(
+                    [ parent_lock=std::move(parent_lock),
+                      self_op, tx, parent, offset
+                    ](monitor_uplock_type self_uplock) {
+                      self_op->commit(tx, std::move(parent), std::move(parent_lock), std::move(self_uplock), offset);
+                    });
+              }
+            });
+      }
+
+      auto commit(tx_type tx, cycle_ptr::cycle_gptr<bplus_tree_intr<RawDbType>> parent, monitor_uplock_type parent_lock, monitor_uplock_type self_lock, std::size_t offset) -> void {
+        if (self->versions.augment != augment_version) {
+          // Restart, because the augment got altered from under us.
+          asio::post(
+              self->get_executor(),
+              [self_op=this->shared_from_this()]() {
+                std::invoke(*self_op);
+              });
+          return;
+        }
+
+        tx.async_commit(asio::deferred)
+        | asio::deferred(
+            [parent_lock=std::move(parent_lock)](std::error_code ec) {
+              return asio::deferred.when(!ec)
+                  .then(std::move(parent_lock).dispatch_exclusive(asio::append(asio::deferred, ec)))
+                  .otherwise(asio::deferred.values(monitor_exlock_type{}, ec));
+            })
+        | asio::deferred(
+            [self_lock=std::move(self_lock)](monitor_exlock_type parent_exlock, std::error_code ec) {
+              return asio::deferred.when(!ec)
+                  .then(self_lock.dispatch_exclusive(asio::append(asio::deferred, std::move(parent_exlock), ec)))
+                  .otherwise(asio::deferred.values(monitor_exlock_type{}, monitor_exlock_type{}, ec));
+            })
+        | [self_op=this->shared_from_this(), offset, parent=std::move(parent)](monitor_exlock_type self_exlock, monitor_exlock_type parent_exlock, std::error_code ec) {
+            if (ec) {
+              self_op->error_invoke(ec);
+              return;
+            }
+
+            const auto existing_augment = parent->augment_span(offset);
+            assert(self_op->augment.size() == existing_augment.size());
+            std::copy(self_op->augment.cbegin(), self_op->augment.cend(), existing_augment.begin());
+            ++parent->versions.augment;
+            parent_exlock.reset();
+
+            self_op->self->augment_propagation_required = false;
+            self_exlock.reset();
+
+            self_op->complete_invoke(parent);
+          };
+      }
+
+      auto error_invoke(std::error_code ec) -> void {
+        std::invoke(handler, ec);
+      }
+
+      auto complete_invoke(cycle_ptr::cycle_gptr<bplus_tree_page> parent) -> void {
+        if (!must_complete || parent == nullptr) {
+          std::invoke(handler, std::error_code());
+          return;
+        }
+
+        this->self = std::move(parent);
+        // Restart, but at the parent.
+        asio::post(
+            self->get_executor(),
+            [self_op=this->shared_from_this()]() {
+              std::invoke(*self_op);
+            });
+      }
+
       cycle_ptr::cycle_gptr<bplus_tree_page> self;
-      move_only_function<void(std::error_code)> handler;
+      TxAlloc tx_alloc;
+      const move_only_function<void(std::error_code)> handler;
+      std::vector<std::byte> augment;
+      bplus_tree_versions::type augment_version;
+      const bool must_complete;
     };
 
-    std::invoke(op(this->shared_from_this(this), std::move(handler)));
+    std::invoke(*std::allocate_shared<op>(tx_alloc, this->shared_from_this(this), std::move(handler), tx_alloc, must_complete));
   }
 
   virtual auto async_compute_page_augments_impl_(move_only_function<void(std::vector<std::byte>)> callback) const -> void = 0;
 
   protected:
-  template<bool ForWrite, typename GetTargetAddrFn, typename AcceptancePredicateFn>
-  auto intr_page_op(std::bool_constant<ForWrite> for_write, GetTargetAddrFn get_target_addr_fn, AcceptancePredicateFn acceptance_predicate_fn) const {
-    return this->page_lock.async_shared(asio::deferred)
-    | asio::deferred(
-        [ self=this->shared_from_this(this),
-          for_write=std::move(for_write),
-          get_target_addr_fn=std::move(get_target_addr_fn),
-          acceptance_predicate_fn=std::move(acceptance_predicate_fn)
-        ](auto lock) mutable {
-          return self->page_variant_op(
-              for_write, std::move(lock), get_target_addr_fn, acceptance_predicate_fn,
-              [self, for_write, get_target_addr_fn, acceptance_predicate_fn]() mutable {
-                return self->page_op_(for_write, get_target_addr_fn, acceptance_predicate_fn);
-              });
-        })
+  template<bool ForWrite>
+  auto intr_page_op(std::bool_constant<ForWrite> for_write, move_only_function<std::variant<std::error_code, db_address>()> get_target_addr_fn) const {
+    return page_variant_op(std::move(for_write), std::move(get_target_addr_fn))
     | variant_to_pointer_op<intr_type>();
   }
 
@@ -678,70 +1010,189 @@ class bplus_tree_page
         });
   }
 
-  template<bool ForWrite, typename Lock, typename GetTargetAddrFn, typename AcceptancePredicateFn, typename MakeRestartOp>
-  auto page_variant_op([[maybe_unused]] std::bool_constant<ForWrite> for_write, Lock lock, GetTargetAddrFn get_target_addr_fn, AcceptancePredicateFn acceptance_predicate_fn, MakeRestartOp make_restart_op) const {
+  template<bool ForWrite>
+  auto page_variant_op([[maybe_unused]] std::bool_constant<ForWrite> for_write, move_only_function<std::variant<std::error_code, db_address>()> get_target_addr_fn) const {
+    using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
+    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using bplus_tree_intr_ptr = cycle_ptr::cycle_gptr<intr_type>;
     using bplus_tree_leaf_ptr = cycle_ptr::cycle_gptr<leaf_type>;
     using ptr_type = std::variant<bplus_tree_intr_ptr, bplus_tree_leaf_ptr>;
-    using target_lock_type = std::conditional_t<
-        ForWrite,
-        typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock,
-        typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock>;
+    using target_lock_type = std::conditional_t<ForWrite, monitor_uplock_type, monitor_shlock_type>;
 
-    cycle_ptr::cycle_gptr<raw_db_type> raw_db = this->raw_db.lock();
-    std::error_code ec;
-    if (raw_db == nullptr || this->erased_) [[unlikely]] ec = make_error_code(db_errc::data_expired);
-    auto addr = std::invoke(get_target_addr_fn, this);
+    struct op
+    : public std::enable_shared_from_this<op>
+    {
+      op(cycle_ptr::cycle_gptr<bplus_tree_page> self,
+          move_only_function<std::variant<std::error_code, db_address>()> get_target_addr_fn,
+          move_only_function<void(std::error_code, ptr_type, target_lock_type)> handler)
+      : self(std::move(self)),
+        get_target_addr_fn(std::move(get_target_addr_fn)),
+        handler(std::move(handler))
+      {}
 
-    return asio::deferred.when(addr.offset == nil_page || ec)
-        .then(asio::deferred(ec, ptr_type()))
-        .otherwise(
-            async_load_op(this->spec, raw_db, addr)
-            | asio::deferred(
-                [lock](std::error_code ec, ptr_type ptr) mutable {
-                  lock.reset(); // No longer need the old lock (but we did need it up-to-now).
-                  return asio::deferred.values(std::move(ec), std::move(ptr));
-                }))
-    | asio::deferred(
-        [](std::error_code ec, ptr_type ptr) {
-          return asio::deferred.when(!ec && std::visit([](const auto& ptr) { return ptr != nullptr; }, ptr))
-              .then(
-                  asio::deferred(
-                      [ptr]() {
-                        std::visit(
-                            [ptr](const auto& actual_ptr) {
-                              if constexpr(ForWrite) {
-                                return actual_ptr->page_lock.async_upgrade(asio::append(asio::deferred, std::error_code(), ptr));
-                              } else {
-                                return actual_ptr->page_lock.async_shared(asio::append(asio::deferred, std::error_code(), ptr));
-                              }
-                            },
-                            ptr);
-                      }))
-              .otherwise(asio::deferred.values(target_lock_type(), ec, ptr_type()));
-        })
-    | asio::deferred(
-        [ self=this->shared_from_this(this),
-          make_restart_op=std::move(make_restart_op),
-          acceptance_predicate_fn=std::move(acceptance_predicate_fn)
-        ](target_lock_type lock, std::error_code ec, ptr_type ptr) mutable {
-          const bool need_restart = std::visit(
-              [ec, &acceptance_predicate_fn, &self](const auto& ptr) -> bool {
-                if (!ec && ptr != nullptr) {
-                  if (ptr->erased_)
-                    return true;
-                  else if (!std::invoke(acceptance_predicate_fn, ptr, self))
-                    return true;
-                }
-                return false;
-              },
-              ptr);
+      // Prevent move/copy, to prevent accidentally introducing bugs.
+      op(const op&) = delete;
+      op(op&&) = delete;
 
-          if (need_restart) [[unlikely]] lock.reset();
-          return asio::deferred.when(need_restart)
-              .then(std::invoke(make_restart_op))
-              .otherwise(asio::deferred.values(std::move(ec), std::move(ptr), std::move(lock)));
-        });
+      auto operator()() -> void {
+        self->page_lock.dispatch_shared(
+            [self_op=this->shared_from_this()](monitor_shlock_type lock) mutable -> void {
+              self_op->load_target_page(std::move(lock));
+            });
+      }
+
+      private:
+      auto load_target_page(monitor_shlock_type self_shlock) -> void {
+        cycle_ptr::cycle_gptr<raw_db_type> raw_db = this->raw_db.lock();
+        if (raw_db == nullptr || self->erased_) [[unlikely]] {
+          error_invoke(make_error_code(db_errc::data_expired));
+          return;
+        }
+
+        std::variant<std::error_code, db_address> addr_or_error = get_target_addr_fn();
+        if (std::holds_alternative<std::error_code>(addr_or_error)) {
+          assert(!!std::get<std::error_code>(addr_or_error));
+          error_invoke(std::get<std::error_code>(addr_or_error));
+          return;
+        }
+        db_address target_addr = std::get<db_address>(std::move(addr_or_error));
+        self_shlock.reset();
+
+        async_load_op(
+            self->spec,
+            std::move(raw_db),
+            target_addr,
+            [self_op=this->shared_from_this(), target_addr]() mutable {
+              return self_op->self->page_lock.dispatch_shared(asio::append(asio::deferred, std::move(self_op), std::move(target_addr)))
+              | asio::deferred(
+                  []([[maybe_unused]] monitor_shlock_type self_lock, std::shared_ptr<op> self_op, db_address target_addr) {
+                    std::error_code ec;
+                    if (self_op->self->erased_) {
+                      ec = make_error_code(bplus_tree_errc::restart);
+                    } else {
+                      std::visit(
+                          overload(
+                              [&ec]([[maybe_unused]] const std::error_code& reload_ec) {
+                                ec = make_error_code(bplus_tree_errc::restart);
+                              },
+                              [&ec, &target_addr](const db_address& reload_addr) {
+                                if (reload_addr != target_addr)
+                                  ec = make_error_code(bplus_tree_errc::restart);
+                              }),
+                          self_op->get_target_addr_fn());
+                    }
+                    return asio::deferred.values(ec);
+                  });
+            })
+        | [self_op=this->shared_from_this()](std::error_code ec, ptr_type target_page) -> void {
+            if (ec == make_error_code(bplus_tree_errc::restart)) {
+              // Using asio::post, to prevent recursion from overflowing the stack space.
+              asio::post(
+                  self_op->get_executor(),
+                  [self_op]() {
+                    std::invoke(self_op);
+                  });
+              return;
+            }
+
+            if (ec) {
+              self_op->error_invoke(ec);
+              return;
+            }
+
+            self_op->lock_target(std::move(target_page));
+          };
+      }
+
+      auto lock_target(ptr_type target_page) -> void {
+        self->page_lock.dispatch_shared(
+            [ target_page=std::move(target_page),
+              self_op=this->shared_from_this()
+            ](monitor_shlock_type self_lock) mutable {
+              const bplus_tree_page*const raw_ptr = get_raw_ptr(target_page);
+              if constexpr(ForWrite) {
+                raw_ptr->page_lock.dispatch_upgrade(
+                    [ target_page=std::move(target_page),
+                      self_lock=std::move(self_lock),
+                      self_op=std::move(self_op)
+                    ](monitor_uplock_type target_lock) mutable {
+                      self_op->validate(std::move(target_page), std::move(target_lock), std::move(self_lock));
+                    });
+              } else {
+                raw_ptr->page_lock.dispatch_shared(
+                    [ target_page=std::move(target_page),
+                      self_lock=std::move(self_lock),
+                      self_op=std::move(self_op)
+                    ](monitor_shlock_type target_lock) mutable {
+                      self_op->validate(std::move(target_page), std::move(target_lock), std::move(self_lock));
+                    });
+              }
+            });
+      }
+
+      auto validate(ptr_type target_page, target_lock_type target_lock, monitor_shlock_type self_lock) -> void {
+        if (self->erased_) [[unlikely]] {
+          error_invoke(make_error_code(db_errc::data_expired));
+          return;
+        }
+
+        bool need_restart = false;
+        std::error_code ec = std::visit(
+            overload(
+                []([[maybe_unused]] const std::error_code& reload_ec) -> std::error_code {
+                  assert(!!reload_ec);
+                  return reload_ec;
+                },
+                [&need_restart, &target_page](const db_address& reload_addr) -> std::error_code {
+                  if (reload_addr != get_raw_ptr(target_page)->address)
+                    need_restart = true;
+                  return {};
+                }),
+            get_target_addr_fn());
+        if (ec) {
+          error_invoke(ec);
+          return;
+        }
+
+        if (need_restart) {
+          // Restart.
+          asio::post(
+              self->get_executor(),
+              [self_op=this->shared_from_this()]() {
+                std::invoke(self_op);
+              });
+          return;
+        }
+
+        self_lock.reset(); // No longer need this lock.
+        std::invoke(handler, std::error_code(), std::move(target_page), std::move(target_lock));
+      }
+
+      static auto get_raw_ptr(const ptr_type& p) -> bplus_tree_page* {
+        return std::visit(
+            [](const auto& ptr) -> bplus_tree_page* {
+              return ptr;
+            },
+            p);
+      }
+
+      auto error_invoke(std::error_code ec) -> void {
+        std::invoke(handler, ec, ptr_type{}, target_lock_type{});
+      }
+
+      const cycle_ptr::cycle_gptr<const bplus_tree_page> self;
+      const move_only_function<std::variant<std::error_code, db_address>()> get_target_addr_fn;
+      const move_only_function<void(std::error_code, ptr_type, target_lock_type)> handler;
+    };
+
+    return asio::async_initiate<decltype(asio::deferred), void(std::error_code, ptr_type, target_lock_type)>(
+        [](auto handler, cycle_ptr::cycle_gptr<const bplus_tree_page> self, auto get_target_addr_fn) {
+          if constexpr(handler_has_executor_v<decltype(handler)>)
+            std::invoke(std::make_shared<op>(self, std::move(get_target_addr_fn), completion_handler_fun(std::move(handler), self->get_executor())));
+          else
+            std::invoke(std::make_shared<op>(std::move(self), std::move(get_target_addr_fn), std::move(handler)));
+        },
+        asio::deferred, this->shared_from_this(this), std::move(get_target_addr_fn));
   }
 
   auto combine_augments(std::vector<std::span<const std::byte>> augments) const -> std::vector<std::byte> {
@@ -775,7 +1226,7 @@ class bplus_tree_page
   protected:
   const cycle_ptr::cycle_weak_ptr<raw_db_type> raw_db;
   const std::shared_ptr<const bplus_tree_spec> spec;
-  monitor<executor_type, typename raw_db_type::allocator_type> page_lock;
+  mutable monitor<executor_type, typename raw_db_type::allocator_type> page_lock;
   bool erased_ = false;
   bool augment_propagation_required = false;
 
@@ -3218,7 +3669,8 @@ class bplus_tree
         // We're done \o/
         done_invoke();
 
-        // Althrough we do want the augmentations to start updating, so we'll kick that off too.
+        // We want the augmentations to start updating, so we'll kick that off.
+        // These are deferred, so they shouldn't grab any locks until we're done.
         ps->level_pages[0]->async_fix_augment_background();
         ps->level_pages[1]->async_fix_augment_background();
       }
@@ -3251,10 +3703,10 @@ class bplus_tree
   auto split_page_op_(cycle_ptr::cycle_gptr<PageType> page, bplus_tree_versions::type page_split, TxAlloc tx_alloc) -> void {
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code)>(
         [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> tree, cycle_ptr::cycle_gptr<PageType> page, bplus_tree_versions::type page_split, TxAlloc tx_alloc) {
-          if constexpr(handler_has_executor_v<decltype(handler)>)
-            tree->split_page_impl_(std::move(page), std::move(page_split), std::move(tx_alloc), completion_handler_fun(std::move(handler), tree->get_executor()));
-          else
-            tree->split_page_impl_(std::move(page), std::move(page_split), std::move(tx_alloc), std::move(handler));
+          // Always use post to invoke the handler:
+          // the split_page_impl_() function ends with many locks held,
+          // and we want those to be released as soon as possible.
+          tree->split_page_impl_(std::move(page), std::move(page_split), std::move(tx_alloc), completion_handler_fun(std::move(handler), tree->get_executor()));
         },
         asio::deferred, this->shared_from_this(this), std::move(page), std::move(page_split), std::move(tx_alloc));
   }
@@ -3391,7 +3843,7 @@ class bplus_tree
   protected:
   const cycle_ptr::cycle_weak_ptr<raw_db_type> raw_db;
   const std::shared_ptr<const bplus_tree_spec> spec;
-  monitor<executor_type, typename raw_db_type::allocator_type> page_lock;
+  mutable monitor<executor_type, typename raw_db_type::allocator_type> page_lock;
 
   private:
   executor_type ex_;
