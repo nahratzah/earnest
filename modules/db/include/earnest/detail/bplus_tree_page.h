@@ -374,6 +374,7 @@ class bplus_tree_page
 
           variant_type casted_page;
           if (!ec) {
+            page->async_fix_augment_background();
             if (auto leaf_ptr = std::dynamic_pointer_cast<leaf_type>(page)) {
               casted_page.template emplace<cycle_ptr::cycle_gptr<leaf_type>>(std::move(leaf_ptr));
             } else if (auto intr_ptr = std::dynamic_pointer_cast<intr_type>(page)) {
@@ -596,11 +597,51 @@ class bplus_tree_page
         token, this->shared_from_this(this));
   }
 
-  auto async_fix_augment_background() {
-    // XXX implement
+  auto async_fix_augment_background() -> void {
+    page_lock.dispatch_shared(asio::append(asio::deferred, this->shared_from_this(this)))
+    | [](auto lock, cycle_ptr::cycle_gptr<bplus_tree_page> self) {
+        if (!self->augment_propagation_required) return;
+        auto raw_db = self->raw_db.lock();
+        if (raw_db == nullptr) return;
+
+        asio::defer(
+            self->get_executor(),
+            asio::bind_allocator(
+                raw_db->get_allocator(),
+                [self]() {
+                  self->async_fix_augment_impl_(
+                      [](std::error_code ec) {
+                        if (ec && ec != make_error_code(db_errc::data_expired))
+                          std::clog << "bplus-tree: background augmentation update failed: " << ec.message() << "\n";
+                      });
+                }));
+      };
   }
 
   private:
+  auto async_fix_augment_impl_(move_only_function<void(std::error_code)> handler) -> void {
+    using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
+    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
+    using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
+
+    struct op {
+      op(cycle_ptr::cycle_gptr<bplus_tree_page> self, move_only_function<void(std::error_code)> handler)
+      : self(std::move(self)),
+        handler(std::move(handler))
+      {}
+
+      auto operator()() -> void {
+        // XXX implement
+      }
+
+      private:
+      cycle_ptr::cycle_gptr<bplus_tree_page> self;
+      move_only_function<void(std::error_code)> handler;
+    };
+
+    std::invoke(op(this->shared_from_this(this), std::move(handler)));
+  }
+
   virtual auto async_compute_page_augments_impl_(move_only_function<void(std::vector<std::byte>)> callback) const -> void = 0;
 
   protected:
