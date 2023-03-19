@@ -135,7 +135,7 @@ TEST_FIXTURE(db_cache_fixture, on_load_called_on_get) {
       &on_load_called);
   ioctx.run();
   ioctx.restart();
-  CHECK(on_load_called = 1); // Called at construction.
+  CHECK_EQUAL(1, on_load_called); // Called at construction.
 
   // Second load. Since the pointer is still valid (saved in `p0` to make sure), this should not cause an onload callback.
   cache->async_get(
@@ -154,7 +154,7 @@ TEST_FIXTURE(db_cache_fixture, on_load_called_on_get) {
       &on_load_called);
   ioctx.run();
   ioctx.restart();
-  CHECK(on_load_called = 1); // Second load doesn't call the on-load callback.
+  CHECK_EQUAL(1, on_load_called); // Second load doesn't call the on-load callback.
 }
 
 int main() {

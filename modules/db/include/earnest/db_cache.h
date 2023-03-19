@@ -163,8 +163,11 @@ class prom_metrics_policy {
 class cache_value_on_load_invocation_policy {
   public:
   template<typename HashTable, typename ValueType, typename Allocator>
-  class table_base_impl {
+  class table_base {
     public:
+    explicit table_base([[maybe_unused]] const cache_value_on_load_invocation_policy& p, [[maybe_unused]] const Allocator& alloc) noexcept
+    {}
+
     auto on_assign_(ValueType* vptr, bool value, [[maybe_unused]] bool assigned_via_callback) noexcept -> void {
       if (value) {
         std::visit(
