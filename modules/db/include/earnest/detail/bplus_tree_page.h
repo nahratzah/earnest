@@ -1628,7 +1628,7 @@ class bplus_tree_leaf
     }
 
     std::size_t index;
-    monitor<executor_type, typename raw_db_type::allocator_type> element_lock;
+    mutable monitor<executor_type, typename raw_db_type::allocator_type> element_lock;
     cycle_ptr::cycle_member_ptr<bplus_tree_leaf> owner;
   };
 
@@ -3213,54 +3213,64 @@ class bplus_tree
           private:
           auto do_page_lock(move_only_function<void(std::shared_ptr<page_selection>)> handler, std::size_t idx) -> void {
             assert(idx <= ps->uplocks.size());
-            cycle_ptr::cycle_gptr<page_type> next_page_to_lock;
+            for (/*skip*/; idx < num_page_locks_needed; ++idx) {
+              const bplus_tree_page<RawDbType>* next_page_to_lock; // Can be nullptr.
+              switch (idx) {
+                default:
+                  next_page_to_lock = ps->level_pages[idx - 1u].get();
+                  break;
+                case 0u:
+                  next_page_to_lock = ps->parent.get();
+                  break;
+              }
 
-            switch (idx) {
-              case 0:
-                next_page_to_lock = ps->parent;
-                break;
-              case num_page_locks_needed:
-                if constexpr(std::is_same_v<PageType, leaf_type>) ps->populate_rebalance(*ps->level_pages[0]);
-                do_elem_lock(std::move(handler));
-                return;
-              default:
-                next_page_to_lock = ps->level_pages[idx - 1u];
-                break;
+              if (next_page_to_lock != nullptr) {
+                auto opt_lock = next_page_to_lock->page_lock.try_upgrade();
+                if (opt_lock.has_value()) {
+                  ps->uplocks[idx] = std::move(opt_lock).value();
+                } else {
+                  next_page_to_lock->page_lock.async_upgrade(
+                      completion_wrapper<void(monitor_uplock_type)>(
+                          std::move(handler),
+                          [self_op=std::move(*this), idx](auto handler, monitor_uplock_type lock) mutable {
+                            self_op.ps->uplocks[idx] = std::move(lock);
+                            self_op.do_page_lock(std::move(handler), idx + 1u);
+                          }));
+                  return; // Callback will restart this loop.
+                }
+              }
             }
 
-            if (next_page_to_lock == nullptr) {
-              std::invoke(*this, std::move(handler), idx + 1u);
-            } else {
-              next_page_to_lock->page_lock.dispatch_upgrade(
-                  completion_wrapper<void(monitor_uplock_type)>(
-                      std::move(handler),
-                      [self_op=std::move(*this), idx](auto handler, monitor_uplock_type lock) mutable {
-                        self_op.ps->uplocks[idx] = std::move(lock);
-                        self_op.do_page_lock(std::move(handler), idx + 1u);
-                      }));
-            }
+            if constexpr(std::is_same_v<PageType, leaf_type>) ps->populate_rebalance(*ps->level_pages[0]);
+            do_elem_lock(std::move(handler));
           }
 
           auto do_elem_lock(move_only_function<void(std::shared_ptr<page_selection>)> handler, [[maybe_unused]] std::size_t idx = 0) -> void {
             if constexpr(std::is_same_v<PageType, intr_type>) {
               invoke_complete(std::move(handler));
-            } else if (idx == ps->rebalance.size()) {
-              invoke_complete(std::move(handler));
             } else {
-              assert(idx < ps->rebalance.size());
+              assert(idx <= ps->rebalance.size());
+              for (/*skip*/; idx < ps->rebalance.size(); ++idx) {
+                const typename leaf_type::element& elem_to_lock = *ps->rebalance[idx].elem;
 
-              cycle_ptr::cycle_gptr<typename leaf_type::element> elem_to_lock = ps->rebalance[idx].elem;
-              // We use `async_upgrade` (as opposed to `dispatch_upgrade`),
-              // because there could be thousands of page elements,
-              // and dispatch recursion could cause the stack to throw huge.
-              // XXX maybe implement a try-lock that grabs the lock instantly.
-              elem_to_lock->element_lock.async_upgrade(
-                  completion_wrapper<void(monitor_uplock_type)>(
-                      std::move(handler),
-                      [self_op=*this, idx](auto handler, monitor_uplock_type lock) mutable {
-                        self_op.ps->rebalance[idx].uplock = std::move(lock);
-                        self_op.do_elem_lock(std::move(handler), idx + 1u);
-                      }));
+                auto opt_lock = elem_to_lock.element_lock.try_upgrade();
+                if (opt_lock.has_value()) {
+                  ps->rebalance[idx].uplock = std::move(opt_lock).value();
+                } else {
+                  // We use `async_upgrade` (as opposed to `dispatch_upgrade`),
+                  // because there could be thousands of page elements,
+                  // and dispatch recursion could cause the stack to throw huge.
+                  elem_to_lock.element_lock.async_upgrade(
+                      completion_wrapper<void(monitor_uplock_type)>(
+                          std::move(handler),
+                          [self_op=*this, idx](auto handler, monitor_uplock_type lock) mutable {
+                            self_op.ps->rebalance[idx].uplock = std::move(lock);
+                            self_op.do_elem_lock(std::move(handler), idx + 1u);
+                          }));
+                  return; // Callback will restart this loop.
+                }
+              }
+              invoke_complete(std::move(handler));
             }
           }
 
@@ -3307,45 +3317,53 @@ class bplus_tree
                 assert(ps->uplocks[i].is_locked());
             }
 
-            if (idx == num_page_locks_needed) {
-              do_elem_lock(std::move(handler), 0);
-              return;
+            for (/*skip*/; idx < num_page_locks_needed; ++idx) {
+              if (ps->uplocks[idx].is_locked()) {
+                monitor_uplock_type lck = std::move(ps->uplocks[idx]);
+                auto opt_lock = lck.try_exclusive();
+                if (opt_lock.has_value()) {
+                  ps->exlocks[idx] = std::move(opt_lock).value();
+                } else {
+                  std::move(lck).dispatch_exclusive(
+                      completion_wrapper<void(monitor_exlock_type)>(
+                          std::move(handler),
+                          [self_op=std::move(*this), idx](auto handler, monitor_exlock_type lock) mutable {
+                            self_op.ps->exlocks[idx] = std::move(lock);
+                            self_op.do_page_lock(std::move(handler), idx + 1u);
+                          }));
+                  return; // Callback will restart this loop.
+                }
+              }
             }
-
-            if (!ps->uplocks[idx].is_locked()) {
-              do_page_lock(std::move(handler), idx + 1u);
-            } else {
-              auto lck = std::move(ps->uplocks[idx]);
-              std::move(lck).dispatch_exclusive(
-                  completion_wrapper<void(monitor_exlock_type)>(
-                      std::move(handler),
-                      [self_op=std::move(*this), idx](auto handler, monitor_exlock_type lock) mutable {
-                        self_op.ps->exlocks[idx] = std::move(lock);
-                        self_op.do_page_lock(std::move(handler), idx + 1u);
-                      }));
-            }
+            do_elem_lock(std::move(handler), 0);
           }
 
           auto do_elem_lock(move_only_function<void(std::shared_ptr<page_selection>)> handler, std::size_t idx) -> void {
             if constexpr(std::is_same_v<PageType, intr_type>) {
               invoke_complete(std::move(handler));
-            } else if (idx == ps->rebalance.size()) {
-              invoke_complete(std::move(handler));
             } else {
-              assert(idx < ps->rebalance.size());
+              assert(idx <= ps->rebalance.size());
 
-              monitor_uplock_type uplock = std::move(ps->rebalance[idx].uplock);
-              // We use `async_exclusive` (as opposed to `dispatch_upgrade`),
-              // because there could be thousands of page elements,
-              // and dispatch recursion could cause the stack to throw huge.
-              // XXX maybe implement a try-lock that grabs the lock instantly.
-              std::move(uplock).async_exclusive(
-                  completion_wrapper<void(monitor_exlock_type)>(
-                      std::move(handler),
-                      [self_op=*this, idx](auto handler, monitor_exlock_type lock) mutable {
-                        self_op.ps->rebalance[idx].exlock = std::move(lock);
-                        self_op.do_elem_lock(std::move(handler), idx + 1u);
-                      }));
+              for (/*skip*/; idx < ps->rebalance.size(); ++idx) {
+                monitor_uplock_type uplock = std::move(ps->rebalance[idx].uplock);
+                auto opt_lock = std::move(uplock).try_exclusive();
+                if (opt_lock.has_value()) {
+                  ps->rebalance[idx].exlock = std::move(opt_lock).value();
+                } else {
+                  // We use `async_exclusive` (as opposed to `dispatch_upgrade`),
+                  // because there could be thousands of page elements,
+                  // and dispatch recursion could cause the stack to throw huge.
+                  std::move(uplock).async_exclusive(
+                      completion_wrapper<void(monitor_exlock_type)>(
+                          std::move(handler),
+                          [self_op=*this, idx](auto handler, monitor_exlock_type lock) mutable {
+                            self_op.ps->rebalance[idx].exlock = std::move(lock);
+                            self_op.do_elem_lock(std::move(handler), idx + 1u);
+                          }));
+                  return; // Callback will restart this loop.
+                }
+              }
+              invoke_complete(std::move(handler));
             }
           }
 

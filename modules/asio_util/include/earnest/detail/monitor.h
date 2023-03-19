@@ -46,6 +46,9 @@ class monitor {
   : state_(std::allocate_shared<state>(alloc, std::move(ex), alloc))
   {}
 
+  [[nodiscard]] auto try_shared() noexcept -> std::optional<shared_lock>;
+  [[nodiscard]] auto try_upgrade() noexcept -> std::optional<upgrade_lock>;
+  [[nodiscard]] auto try_exclusive() noexcept -> std::optional<exclusive_lock>;
   template<typename CompletionToken> auto async_shared(CompletionToken&& token);
   template<typename CompletionToken> auto async_upgrade(CompletionToken&& token);
   template<typename CompletionToken> auto async_exclusive(CompletionToken&& token);
@@ -102,6 +105,18 @@ class monitor<Executor, Allocator>::state
   auto get_executor() const -> executor_type { return ex_; }
   auto get_allocator() const -> allocator_type { return alloc_; }
 
+  [[nodiscard]] auto try_shared() noexcept -> std::optional<shared_lock> {
+    std::unique_lock lck{mtx_};
+    if (exlocks == 0 && !want_exclusive() && pq_.empty()) {
+      assert(shlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
+      ++shlocks;
+      lck.unlock();
+      return shared_lock(this->shared_from_this());
+    }
+
+    return std::nullopt;
+  }
+
   auto add(shared_function&& fn) -> void {
     std::unique_lock lck{mtx_};
     if (exlocks == 0 && !want_exclusive() && pq_.empty()) {
@@ -115,6 +130,18 @@ class monitor<Executor, Allocator>::state
     shq_.emplace_back(std::move(fn));
   }
 
+  [[nodiscard]] auto try_upgrade() noexcept -> std::optional<upgrade_lock> {
+    std::unique_lock lck{mtx_};
+    if (exlocks == 0 && uplocks == 0 && !want_exclusive()) {
+      assert(uplocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
+      ++uplocks;
+      lck.unlock();
+      return upgrade_lock(this->shared_from_this());
+    }
+
+    return std::nullopt;
+  }
+
   auto add(upgrade_function&& fn) -> void {
     std::unique_lock lck{mtx_};
     if (exlocks == 0 && uplocks == 0 && !want_exclusive()) {
@@ -126,6 +153,20 @@ class monitor<Executor, Allocator>::state
     }
 
     wq_.emplace(std::move(fn));
+  }
+
+  [[nodiscard]] auto try_exclusive() noexcept -> std::optional<exclusive_lock> {
+    std::unique_lock lck{mtx_};
+    if (exlocks == 0 && uplocks == 0 && shlocks == 0) {
+      assert(wq_.empty());
+      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
+      ++exlocks;
+
+      lck.unlock();
+      return exclusive_lock(this->shared_from_this());
+    }
+
+    return std::nullopt;
   }
 
   auto add(exclusive_function&& fn) -> void {
@@ -303,7 +344,6 @@ class monitor<Executor, Allocator>::state
     std::unique_lock lck{mtx_};
     assert(uplocks > 0);
     if (shlocks == 0) {
-      assert(uplocks > 0);
       assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
       --uplocks;
       ++exlocks;
@@ -314,6 +354,22 @@ class monitor<Executor, Allocator>::state
     }
 
     pq_.emplace_back(std::move(fn));
+  }
+
+  // Note: must grant the upgrade lock, if the attempt is successful.
+  auto add_upgrade_try() noexcept -> std::optional<exclusive_lock> {
+    std::unique_lock lck{mtx_};
+    assert(uplocks > 0);
+    if (shlocks == 0) {
+      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
+      --uplocks;
+      ++exlocks;
+      lck.unlock();
+
+      return exclusive_lock(this->shared_from_this());
+    }
+
+    return std::nullopt;
   }
 
   private:
@@ -440,6 +496,8 @@ class monitor<Executor, Allocator>::upgrade_lock {
   explicit operator bool() const noexcept { return is_locked(); }
   auto operator!() const noexcept -> bool { return !is_locked(); }
 
+  [[nodiscard]] auto try_exclusive() const & noexcept -> std::optional<exclusive_lock>;
+  [[nodiscard]] auto try_exclusive() && noexcept -> std::optional<exclusive_lock>;
   template<typename CompletionToken> auto async_exclusive(CompletionToken&& token) const &;
   template<typename CompletionToken> auto async_exclusive(CompletionToken&& token) &&;
   template<typename CompletionToken> auto dispatch_exclusive(CompletionToken&& token) const &;
@@ -510,6 +568,24 @@ class monitor<Executor, Allocator>::exclusive_lock {
   std::shared_ptr<state> state_;
 };
 
+
+template<typename Executor, typename Allocator>
+inline auto monitor<Executor, Allocator>::try_shared() noexcept -> std::optional<shared_lock> {
+  assert(state_ != nullptr);
+  return state_->try_shared();
+}
+
+template<typename Executor, typename Allocator>
+inline auto monitor<Executor, Allocator>::try_upgrade() noexcept -> std::optional<upgrade_lock> {
+  assert(state_ != nullptr);
+  return state_->try_upgrade();
+}
+
+template<typename Executor, typename Allocator>
+inline auto monitor<Executor, Allocator>::try_exclusive() noexcept -> std::optional<exclusive_lock> {
+  assert(state_ != nullptr);
+  return state_->try_exclusive();
+}
 
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
@@ -616,6 +692,18 @@ inline auto monitor<Executor, Allocator>::dispatch_exclusive(CompletionToken&& t
       token, state_);
 }
 
+
+template<typename Executor, typename Allocator>
+[[nodiscard]] inline auto monitor<Executor, Allocator>::upgrade_lock::try_exclusive() const & noexcept -> std::optional<exclusive_lock> {
+  return upgrade_lock(*this).try_exclusive(); // Invoke the move-operation.
+}
+
+template<typename Executor, typename Allocator>
+[[nodiscard]] inline auto monitor<Executor, Allocator>::upgrade_lock::try_exclusive() && noexcept -> std::optional<exclusive_lock> {
+  std::optional<exclusive_lock> lck = state_->add_upgrade_try();
+  if (lck.has_value()) state_.reset(); // Grant uplock to the 'add_upgrade' function.
+  return lck;
+}
 
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
