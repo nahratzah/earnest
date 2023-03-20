@@ -162,8 +162,12 @@ struct bplus_tree_leaf_header {
 enum class bplus_tree_leaf_use_element : std::uint8_t {
   unused = 0,
   used = 1,
-  before_first = 0x80,
-  after_last = 0x81,
+  before_first = 0x70,
+  after_last = 0x71,
+  ghost_create = 0x80,
+  ghost_delete = 0x81,
+  ghost_iterator_before = 0x72,
+  ghost_iterator_after = 0x73,
 };
 
 
@@ -792,7 +796,7 @@ class bplus_tree_page
         token, this->shared_from_this(this), std::move(tx_alloc));
   }
 
-  private:
+  protected:
   auto on_load() noexcept -> void override {
     this->db_cache_value::on_load(); // Call parent.
 
@@ -800,6 +804,7 @@ class bplus_tree_page
     if (augment_propagation_required) async_fix_augment_background();
   }
 
+  private:
   template<typename TxAlloc = std::allocator<std::byte>>
   auto async_fix_augment_impl_(move_only_function<void(std::error_code)> handler, bool must_complete, TxAlloc tx_alloc = TxAlloc()) -> void {
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
@@ -1650,6 +1655,7 @@ class bplus_tree_leaf
     std::size_t index;
     mutable monitor<executor_type, typename raw_db_type::allocator_type> element_lock;
     cycle_ptr::cycle_member_ptr<bplus_tree_leaf> owner;
+    std::size_t use_count = 0;
   };
 
   private:
@@ -1877,7 +1883,197 @@ class bplus_tree_leaf
             }));
   }
 
-  private:
+  protected:
+  auto on_load() noexcept -> void override {
+    const bool cleanup_needed = std::any_of(elements_.cbegin(), elements_.cend(),
+        [](const auto& elem_ptr) {
+          switch (elem_ptr->type()) {
+            default:
+              return false;
+            case bplus_tree_leaf_use_element::ghost_create:
+            case bplus_tree_leaf_use_element::ghost_delete:
+              return true;
+          }
+        });
+    if (cleanup_needed) this->background_clean_up_use_list();
+
+    this->bplus_tree_page<RawDbType>::on_load();
+  }
+
+  public:
+  auto background_clean_up_use_list() -> void {
+    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
+    using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
+
+    struct cleanup_data {
+      explicit cleanup_data(cycle_ptr::cycle_gptr<element> elem, monitor_uplock_type elem_uplock) noexcept
+      : elem(std::move(elem)),
+        elem_uplock(std::move(elem_uplock))
+      {}
+
+      cycle_ptr::cycle_gptr<element> elem;
+      monitor_uplock_type elem_uplock;
+      monitor_exlock_type elem_exlock;
+    };
+    using cleanup_data_vector = std::vector<
+        cleanup_data,
+        typename std::allocator_traits<typename raw_db_type::allocator_type>::template rebind_alloc<cleanup_data>>;
+    using tx_type = typename raw_db_type::template fdb_transaction<typename cleanup_data_vector::allocator_type>;
+
+    struct op
+    : public std::enable_shared_from_this<op>
+    {
+      op(cycle_ptr::cycle_gptr<bplus_tree_leaf> page, cycle_ptr::cycle_gptr<raw_db_type> raw_db) noexcept
+      : page(page),
+        cleanups(raw_db->get_allocator())
+      {}
+
+      auto operator()() -> void {
+        page->page_lock.dispatch_upgrade(
+            [self_op=this->shared_from_this()](monitor_uplock_type lock) {
+              self_op->page_uplock = std::move(lock);
+              self_op->gather_cleanups();
+            });
+      }
+
+      auto get_allocator() const -> typename cleanup_data_vector::allocator_type { return cleanups.get_allocator(); }
+      auto get_executor() const -> executor_type { return page->get_executor(); }
+
+      private:
+      auto gather_cleanups(std::size_t idx = 0) -> void {
+        assert(page_uplock.is_locked());
+
+        for (; idx < page->elements_.size(); ++idx) {
+          const element_ptr& elem_ptr = page->elements_[idx];
+          std::optional<monitor_uplock_type> opt_elem_uplock = elem_ptr->element_lock.try_upgrade();
+          if (opt_elem_uplock.has_value()) {
+            switch (elem_ptr->type()) {
+              default:
+                /* skip */
+                break;
+              case bplus_tree_leaf_use_element::ghost_create:
+              case bplus_tree_leaf_use_element::ghost_delete:
+                this->cleanups.emplace_back(elem_ptr, std::move(opt_elem_uplock).value());
+                break;
+            }
+          } else {
+            elem_ptr->element_lock.async_upgrade(
+                [self_op=this->shared_from_this(), elem_ptr=cycle_ptr::cycle_gptr<element>(elem_ptr), idx](monitor_uplock_type elem_uplock) {
+                  switch (elem_ptr->type()) {
+                    default:
+                      /* skip */
+                      break;
+                    case bplus_tree_leaf_use_element::ghost_create:
+                    case bplus_tree_leaf_use_element::ghost_delete:
+                      self_op->cleanups.emplace_back(elem_ptr, std::move(elem_uplock));
+                      break;
+                  }
+                  self_op->gather_cleanups(idx + 1u);
+                });
+            return; // Callback will restart the loop.
+          }
+        }
+        if (cleanups.empty()) return; // Nothing to do.
+
+        update_on_disk();
+      }
+
+      auto update_on_disk() -> void {
+        auto raw_db = page->raw_db.lock();
+        if (raw_db == nullptr) {
+          error_complete(make_error_code(db_errc::data_expired));
+          return;
+        }
+
+        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, get_allocator());
+        auto barrier = make_completion_barrier(
+            [self_op=this->shared_from_this(), tx](std::error_code ec) {
+              if (ec)
+                self_op->error_complete(ec);
+              else
+                self_op->commit(tx);
+            },
+            get_executor());
+
+        std::for_each(cleanups.cbegin(), cleanups.cend(),
+            [&](const auto& c) {
+              page->async_set_use_list_diskonly_op(tx, c.elem->index, bplus_tree_leaf_use_element::unused, ++barrier);
+            });
+        page->async_set_augment_propagation_required_diskonly_op(tx, std::move(barrier));
+      }
+
+      auto commit(tx_type tx) -> void {
+        tx.async_commit(
+            [self_op=this->shared_from_this()](std::error_code ec) {
+              if (ec)
+                self_op->error_complete(ec);
+              else
+                self_op->exlock_page();
+            });
+      }
+
+      auto exlock_page() -> void {
+        std::move(page_uplock).dispatch_exclusive(
+            [self_op=this->shared_from_this()](monitor_exlock_type page_exlock) {
+              self_op->page_exlock = std::move(page_exlock);
+              self_op->exlock_elements();
+            });
+      }
+
+      auto exlock_elements(std::size_t idx = 0) -> void {
+        for (/*skip*/; idx < cleanups.size(); ++idx) {
+          auto opt_elem_exlock = std::move(cleanups[idx].elem_uplock).try_exclusive();
+          if (opt_elem_exlock.has_value()) {
+            cleanups[idx].elem_exlock = std::move(opt_elem_exlock).value();
+          } else {
+            std::move(cleanups[idx].elem_uplock).async_exclusive(
+                [self_op=this->shared_from_this(), idx](monitor_exlock_type elem_exlock) {
+                  self_op->cleanups[idx].elem_exlock = std::move(elem_exlock);
+                  self_op->exlock_elements(idx + 1u);
+                });
+            return; // Callback will continue the loop.
+          }
+        }
+
+        update_in_memory();
+      }
+
+      auto update_in_memory() -> void {
+        assert(page_exlock.is_locked());
+        for (const auto& c : cleanups) assert(c.elem_exlock.is_locked());
+
+        page->augment_propagation_required = true;
+        page->async_fix_augment_background();
+
+        std::for_each(cleanups.cbegin(), cleanups.cend(),
+            [this](const auto& c) mutable {
+              page->use_list_span()[c.elem->index] = bplus_tree_leaf_use_element::unused;
+              if (c.elem->use_count == 0u) {
+                const auto elem_iter = std::find(this->page->elements_.cbegin(), this->page->elements_.cend(), c.elem);
+                assert(elem_iter != this->page->elements_.cend());
+                this->page->elements_.erase(elem_iter);
+              }
+            });
+
+        /* Done! */
+      }
+
+      auto error_complete(std::error_code ec) -> void {
+        if (ec == make_error_code(db_errc::data_expired)) return; // Don't log data-expired.
+        std::clog << "bplus-tree: error during background cleanup of use-list: " << ec.message() << "\n";
+      }
+
+      cycle_ptr::cycle_gptr<bplus_tree_leaf> page;
+      monitor_uplock_type page_uplock;
+      monitor_exlock_type page_exlock;
+      cleanup_data_vector cleanups;
+    };
+
+    cycle_ptr::cycle_gptr<raw_db_type> raw_db = this->raw_db.lock();
+    if (raw_db == nullptr) return;
+    std::invoke(*std::allocate_shared<op>(raw_db->get_allocator(), this->shared_from_this(this), raw_db));
+  }
+
   template<typename Stream, typename CompletionToken>
   auto continue_load_(Stream& stream, cycle_ptr::cycle_gptr<raw_db_type> raw_db, CompletionToken&& token) {
     return async_read(
@@ -1888,14 +2084,23 @@ class bplus_tree_leaf
               assert(this->elements_.empty());
               const auto use_list = this->use_list_span();
               for (std::size_t i = 0; i < use_list.size(); ++i) {
-                if (use_list[i] != bplus_tree_leaf_use_element::unused) {
-                  this->elements_.emplace_back(
-                      cycle_ptr::allocate_cycle<element>(
-                          this->get_allocator(),
-                          this->get_executor(),
-                          i,
-                          this->shared_from_this(this),
-                          raw_db->get_allocator()));
+                switch (use_list[i]) {
+                  case bplus_tree_leaf_use_element::ghost_create:
+                  case bplus_tree_leaf_use_element::ghost_delete:
+                    // We'll handle cleaning these up during the on-load call.
+                    [[fallthrough]];
+                  default:
+                    this->elements_.emplace_back(
+                        cycle_ptr::allocate_cycle<element>(
+                            this->get_allocator(),
+                            this->get_executor(),
+                            i,
+                            this->shared_from_this(this),
+                            raw_db->get_allocator()));
+                    break;
+                  case bplus_tree_leaf_use_element::unused:
+                    /* skip */
+                    break;
                 }
               }
               return {};

@@ -883,7 +883,7 @@ class transaction {
   // Writes done by this transaction.
   // The actual writes are tracked in a replacement map.
   // But the replacement map requires a positional stream, so we have to create one.
-  using writes_buffer_type = detail::byte_positional_stream<executor_type, allocator_type>;
+  using writes_buffer_type = detail::byte_positional_stream<executor_type, rebind_alloc<std::byte>>;
 
   struct writes_map_element {
     writes_map_element(allocator_type alloc)
