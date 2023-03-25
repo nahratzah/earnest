@@ -439,6 +439,7 @@ class monitor<Executor, Allocator>::shared_lock {
   auto is_locked() const noexcept -> bool { return state_ != nullptr; }
   explicit operator bool() const noexcept { return is_locked(); }
   auto operator!() const noexcept -> bool { return !is_locked(); }
+  auto holds_monitor(const monitor& m) const noexcept -> bool { return m->state_ == state_; }
 
   private:
   std::shared_ptr<state> state_;
@@ -495,6 +496,7 @@ class monitor<Executor, Allocator>::upgrade_lock {
   auto is_locked() const noexcept -> bool { return state_ != nullptr; }
   explicit operator bool() const noexcept { return is_locked(); }
   auto operator!() const noexcept -> bool { return !is_locked(); }
+  auto holds_monitor(const monitor& m) const noexcept -> bool { return m->state_ == state_; }
 
   [[nodiscard]] auto try_exclusive() const & noexcept -> std::optional<exclusive_lock>;
   [[nodiscard]] auto try_exclusive() && noexcept -> std::optional<exclusive_lock>;
@@ -558,6 +560,7 @@ class monitor<Executor, Allocator>::exclusive_lock {
   auto is_locked() const noexcept -> bool { return state_ != nullptr; }
   explicit operator bool() const noexcept { return is_locked(); }
   auto operator!() const noexcept -> bool { return !is_locked(); }
+  auto holds_monitor(const monitor& m) const noexcept -> bool { return m->state_ == state_; }
 
   auto as_upgrade_lock() const -> upgrade_lock {
     if (state_ == nullptr) throw std::logic_error("lock not held");

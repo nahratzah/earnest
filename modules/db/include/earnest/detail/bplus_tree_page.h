@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -168,6 +169,12 @@ enum class bplus_tree_leaf_use_element : std::uint8_t {
   ghost_delete = 0x81,
   ghost_iterator_before = 0x72,
   ghost_iterator_after = 0x73,
+};
+
+
+enum class iterator_direction {
+  forward,
+  reverse
 };
 
 
@@ -1276,7 +1283,7 @@ class bplus_tree_page
  * - elements in child[N..size-1] have keys >= key[N]
  */
 template<typename RawDbType>
-class bplus_tree_intr
+class bplus_tree_intr final
 : public bplus_tree_page<RawDbType>
 {
   template<typename> friend class bplus_tree_page;
@@ -1625,7 +1632,7 @@ class bplus_tree_intr
 
 
 template<typename RawDbType>
-class bplus_tree_leaf
+class bplus_tree_leaf final
 : public bplus_tree_page<RawDbType>
 {
   template<typename> friend class bplus_tree_page;
@@ -1655,7 +1662,12 @@ class bplus_tree_leaf
     std::size_t index;
     mutable monitor<executor_type, typename raw_db_type::allocator_type> element_lock;
     cycle_ptr::cycle_member_ptr<bplus_tree_leaf> owner;
-    std::size_t use_count = 0;
+
+    // Use-count counts how many references depend on this element.
+    // If use-count is zero, the element may be safely deleted.
+    // Use-count requires a lock to be held, when increasing from 0.
+    // Use-count does not require a lock to be held, otherwise.
+    std::atomic<std::size_t> use_count{std::size_t(0)};
   };
 
   private:
@@ -2048,7 +2060,10 @@ class bplus_tree_leaf
         std::for_each(cleanups.cbegin(), cleanups.cend(),
             [this](const auto& c) mutable {
               page->use_list_span()[c.elem->index] = bplus_tree_leaf_use_element::unused;
-              if (c.elem->use_count == 0u) {
+
+              // We hold the lock, so use_count can't be turned from zero to non-zero,
+              // so we don't care about atomic memory-order.
+              if (c.elem->use_count.load(std::memory_order_relaxed) == 0u) {
                 const auto elem_iter = std::find(this->page->elements_.cbegin(), this->page->elements_.cend(), c.elem);
                 assert(elem_iter != this->page->elements_.cend());
                 this->page->elements_.erase(elem_iter);
@@ -2268,6 +2283,135 @@ class bplus_tree_leaf
   element_vector elements_;
   bplus_tree_leaf_header hdr_;
 };
+
+
+template<typename RawDbType, bool IsConst>
+class bplus_element_reference {
+  template<typename, bool> friend class bplus_element_reference;
+
+  public:
+  using value_type = std::conditional_t<
+      IsConst,
+      const typename bplus_tree_leaf<RawDbType>::element,
+      typename bplus_tree_leaf<RawDbType>::element>;
+  using pointer = cycle_ptr::cycle_gptr<value_type>;
+  using reference = std::add_lvalue_reference_t<value_type>;
+
+  constexpr bplus_element_reference() noexcept = default;
+
+  explicit bplus_element_reference(pointer elem, const typename monitor<typename RawDbType::executor_type, typename RawDbType::allocator_type>::shared_lock& lock) noexcept
+  : elem_(std::move(elem))
+  {
+    if (this->elem_ != nullptr) {
+      assert(lock.holds_monitor(elem->element_lock));
+      this->elem_->use_count.fetch_add(1u, std::memory_order_relaxed); // relaxed memory order, because we hold the lock
+    }
+  }
+
+  explicit bplus_element_reference(pointer elem, const typename monitor<typename RawDbType::executor_type, typename RawDbType::allocator_type>::upgrade_lock& lock) noexcept
+  : elem_(std::move(elem))
+  {
+    if (this->elem_ != nullptr) {
+      assert(lock.holds_monitor(elem->element_lock));
+      this->elem_->use_count.fetch_add(1u, std::memory_order_relaxed); // relaxed memory order, because we hold the lock
+    }
+  }
+
+  explicit bplus_element_reference(pointer elem, const typename monitor<typename RawDbType::executor_type, typename RawDbType::allocator_type>::exclusive_lock& lock) noexcept
+  : elem_(std::move(elem))
+  {
+    if (this->elem_ != nullptr) {
+      assert(lock.holds_monitor(elem->element_lock));
+      this->elem_->use_count.fetch_add(1u, std::memory_order_relaxed); // relaxed memory order, because we hold the lock
+    }
+  }
+
+  bplus_element_reference(const bplus_element_reference& y) noexcept
+  : elem_(y.elem_)
+  {
+    if (this->elem_ != nullptr) {
+      [[maybe_unused]] const auto old_use_count = elem_->use_count.fetch_add(1u, std::memory_order_relaxed);
+      assert(old_use_count > 0);
+    }
+  }
+
+  // Initialize const-reference from non-const-reference.
+  template<bool Enable = IsConst, std::enable_if_t<Enable, int> = 0>
+  bplus_element_reference(const bplus_element_reference<RawDbType, false>& y) noexcept
+  : elem_(y.elem_)
+  {
+    if (this->elem_ != nullptr) {
+      [[maybe_unused]] const auto old_use_count = elem_->use_count.fetch_add(1u, std::memory_order_relaxed);
+      assert(old_use_count > 0);
+    }
+  }
+
+  // Initialize const-reference from non-const-reference.
+  template<bool Enable = IsConst, std::enable_if_t<Enable, int> = 0>
+  bplus_element_reference(bplus_element_reference<RawDbType, false>&& y) noexcept
+  : elem_(std::move(y.elem_))
+  {
+    if (this->elem_ != nullptr) assert(this->elem_->use_count.load() > 0);
+  }
+
+  bplus_element_reference(bplus_element_reference&& y) noexcept
+  : elem_(std::move(y.elem_))
+  {}
+
+  auto operator=(const bplus_element_reference& y) noexcept -> bplus_element_reference& {
+    bplus_element_reference copy(y);
+    swap(*this, y);
+    return *this;
+  }
+
+  auto operator=(bplus_element_reference&& y) noexcept -> bplus_element_reference& {
+    bplus_element_reference copy(std::move(y));
+    swap(*this, y);
+    return *this;
+  }
+
+  ~bplus_element_reference() {
+    reset();
+  }
+
+  auto operator*() const noexcept -> reference {
+    return *elem_;
+  }
+
+  auto operator->() const noexcept -> const pointer& {
+    return elem_;
+  }
+
+  template<bool YIsConst>
+  auto operator==(const bplus_element_reference<RawDbType, YIsConst>& y) const noexcept -> bool {
+    return elem_ == y.elem_;
+  }
+
+  template<bool YIsConst>
+  auto operator!=(const bplus_element_reference<RawDbType, YIsConst>& y) const noexcept -> bool {
+    return elem_ != y.elem_;
+  }
+
+  auto reset() noexcept -> void {
+    if (elem_ != nullptr) {
+      [[maybe_unused]] const auto old_use_count = elem_->use_count.fetch_sub(1u, std::memory_order_release);
+      assert(old_use_count > 0);
+      elem_.reset();
+    }
+  }
+
+  auto swap(bplus_element_reference& y) noexcept {
+    swap(elem_, y.elem_);
+  }
+
+  private:
+  pointer elem_;
+};
+
+template<typename RawDbType, bool IsConst>
+inline auto swap(bplus_element_reference<RawDbType, IsConst>& x, bplus_element_reference<RawDbType, IsConst>& y) noexcept -> void {
+  x.swap(y);
+}
 
 
 /*
