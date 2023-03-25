@@ -6,6 +6,7 @@ namespace earnest {
 enum class db_errc {
   cache_collision,
   data_expired,
+  bad_database,
 };
 
 inline auto db_category() -> const std::error_category& {
@@ -29,6 +30,8 @@ inline auto db_category() -> const std::error_category& {
           return "DB cache collision"s;
         case db_errc::data_expired:
           return "DB data expired"s;
+        case db_errc::bad_database:
+          return "DB is not valid"s;
       }
     }
   };

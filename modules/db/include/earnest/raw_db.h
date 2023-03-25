@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <utility>
 
@@ -7,6 +8,10 @@
 #include <prometheus/registry.h>
 
 #include <earnest/db_cache.h>
+#include <earnest/db_error.h>
+#include <earnest/detail/completion_handler_fun.h>
+#include <earnest/detail/completion_wrapper.h>
+#include <earnest/detail/handler_traits.h>
 #include <earnest/dir.h>
 #include <earnest/file_db.h>
 
@@ -15,9 +20,13 @@ namespace earnest {
 
 template<typename Executor, typename Allocator = std::allocator<std::byte>>
 class raw_db
-: private cycle_ptr::cycle_base
+: protected cycle_ptr::cycle_base
 {
   public:
+  // Database session number is incremented, each time the database is opened.
+  // The number will wrap around once it reaches its maximum.
+  using session_number = std::uint32_t;
+
   using executor_type = Executor;
   using allocator_type = detail::prom_allocator<Allocator>;
   using file_db_type = file_db<executor_type, allocator_type>;
@@ -43,14 +52,139 @@ class raw_db
   : raw_db(std::move(ex), nullptr, std::string_view(), std::move(alloc))
   {}
 
+  static auto session_number_fileid() -> file_id {
+    return file_id("", "session_number");
+  }
+
   template<typename CompletionToken>
   auto async_create(dir d, CompletionToken&& token) {
-    return fdb_->async_create(std::move(d), std::forward<CompletionToken>(token));
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<raw_db> self, dir d) -> void {
+          auto maybe_wrap_handler = [handler=std::move(handler)]() mutable {
+            if constexpr(detail::handler_has_executor_v<decltype(handler)>)
+              return detail::completion_handler_fun(std::move(handler));
+            else
+              return std::move(handler);
+          };
+
+          self->fdb_->async_create(
+              std::move(d),
+              detail::completion_wrapper<void(std::error_code)>(
+                  maybe_wrap_handler(),
+                  [self](auto handler, std::error_code ec) -> void {
+                    if (ec) {
+                      std::invoke(handler, ec);
+                      return;
+                    }
+
+                    struct state {
+                      state(const cycle_ptr::cycle_gptr<raw_db>& self)
+                      : tx(self->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, self->get_allocator())),
+                        session_number_file(this->tx[session_number_fileid()])
+                      {}
+
+                      fdb_transaction<allocator_type> tx;
+                      typename fdb_transaction<allocator_type>::file session_number_file;
+                    };
+
+                    self->session_number_ = 0;
+                    std::shared_ptr<state> state_ptr = std::allocate_shared<state>(self->get_allocator(), self);
+                    state_ptr->session_number_file.async_create(asio::append(asio::deferred, state_ptr))
+                    | asio::deferred(
+                        [](std::error_code ec, std::shared_ptr<state> state_ptr) {
+                          return asio::deferred.when(!ec)
+                              .then(state_ptr->session_number_file.async_truncate(sizeof(session_number), asio::append(asio::deferred, state_ptr)))
+                              .otherwise(asio::deferred.values(ec, state_ptr));
+                        })
+                    | asio::deferred(
+                        [](std::error_code ec, std::shared_ptr<state> state_ptr) {
+                          return asio::deferred.when(!ec)
+                              .then(state_ptr->tx.async_commit(asio::deferred))
+                              .otherwise(asio::deferred.values(ec));
+                        })
+                    | std::move(handler);
+                  }));
+        },
+        token, this->shared_from_this(this), std::move(d));
   }
 
   template<typename CompletionToken>
   auto async_open(dir d, CompletionToken&& token) {
-    return fdb_->async_open(std::move(d), std::forward<CompletionToken>(token));
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<raw_db> self, dir d) -> void {
+          auto maybe_wrap_handler = [handler=std::move(handler)]() mutable {
+            if constexpr(detail::handler_has_executor_v<decltype(handler)>)
+              return detail::completion_handler_fun(std::move(handler));
+            else
+              return std::move(handler);
+          };
+
+          self->fdb_->async_open(
+              std::move(d),
+              detail::completion_wrapper<void(std::error_code)>(
+                  maybe_wrap_handler(),
+                  [self](auto handler, std::error_code ec) {
+                    if (ec) {
+                      std::invoke(handler, ec);
+                      return;
+                    }
+
+                    struct state {
+                      state(const cycle_ptr::cycle_gptr<raw_db>& self)
+                      : self(self),
+                        tx(self->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, self->get_allocator())),
+                        session_number_file(this->tx[session_number_fileid()])
+                      {}
+
+                      cycle_ptr::cycle_gptr<raw_db> self;
+                      fdb_transaction<allocator_type> tx;
+                      typename fdb_transaction<allocator_type>::file session_number_file;
+                      std::uint64_t new_session_number_be;
+                    };
+
+                    std::shared_ptr<state> state_ptr = std::allocate_shared<state>(self->get_allocator(), self);
+                    state_ptr->session_number_file.async_file_size(asio::append(asio::deferred, state_ptr))
+                    | asio::deferred(
+                        [](std::error_code ec, std::uint64_t filesize, std::shared_ptr<state> state_ptr) {
+                          if (!ec && filesize != sizeof(session_number))
+                            ec = make_error_code(db_errc::bad_database);
+                          return asio::deferred.values(ec, state_ptr);
+                        })
+                    | asio::deferred(
+                        [](std::error_code ec, std::shared_ptr<state> state_ptr) {
+                          return asio::deferred.when(!ec)
+                              .then(asio::async_read_at(state_ptr->session_number_file, 0u, asio::buffer(&state_ptr->self->session_number), asio::append(asio::deferred, state_ptr)))
+                              .otherwise(asio::deferred.values(ec, state_ptr));
+                        })
+                    | asio::deferred(
+                        [](std::error_code ec, std::shared_ptr<state> state_ptr) {
+                          if (!ec) boost::endian::big_to_native_inplace(state_ptr->self->session_number);
+                          return asio::deferred.values(ec, state_ptr);
+                        })
+                    | asio::deferred(
+                        [](std::error_code ec, std::shared_ptr<state> state_ptr) {
+                          state_ptr->new_session_number_be = state_ptr->self->session_number + 1u;
+                          boost::endian::native_to_big_inplace(state_ptr->new_session_number_be);
+
+                          return asio::deferred.when(!ec)
+                              .then(asio::async_write_at(state_ptr->session_number_file, 0, asio::buffer(&state_ptr->new_session_number_be), asio::append(asio::deferred, state_ptr)))
+                              .otherwise(asio::deferred.values(ec, state_ptr));
+                        })
+                    | asio::deferred(
+                        [](std::error_code ec, std::shared_ptr<state> state_ptr) {
+                          return asio::deferred.when(!ec)
+                              .then(state_ptr->tx.async_commit(asio::deferred))
+                              .otherwise(asio::deferred.values(ec));
+                        })
+                    | asio::deferred(
+                        [](std::error_code ec, std::shared_ptr<state> state_ptr) {
+                          if (!ec) std::clog << "DB opened, previous session << " << state_ptr->self->session_number << ", new session " << boost::endian::big_to_native(state_ptr->new_session_number_be) << "\n";
+                          return asio::deferred.values(ec);
+                        })
+                    | std::move(handler);
+                  }));
+        },
+        token, this->shared_from_this(this), std::move(d));
   }
 
   auto get_executor() const -> executor_type { return cache_.get_executor(); }
@@ -58,6 +192,7 @@ class raw_db
   auto get_cache_allocator() const -> cache_allocator_type { return cache_.get_allocator(); }
   auto cache_max_mem() const noexcept -> std::size_t { return cache_.max_mem(); }
   auto cache_max_mem(std::size_t new_max_mem) noexcept -> std::size_t { return cache_.max_mem(new_max_mem); }
+  auto get_session_number() const noexcept -> session_number { return session_number_; }
 
   template<typename Alloc, typename T, typename CompletionToken, typename Fn, typename AcceptanceFn, typename... Args>
   auto async_get([[maybe_unused]] std::allocator_arg_t aa, Alloc alloc, key_type<T> k, CompletionToken&& token, Fn&& fn, AcceptanceFn&& acceptance_fn, Args&&... args) {
@@ -107,6 +242,7 @@ class raw_db
   private:
   std::shared_ptr<file_db_type> fdb_;
   cache_type cache_;
+  session_number session_number_ = 0;
 };
 
 
