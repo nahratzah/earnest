@@ -46,6 +46,8 @@ class move_only_function<R(Args...)> {
   };
 
   public:
+  constexpr move_only_function() noexcept = default;
+
   template<typename Fn>
 #if __cpp_concepts >= 201907L
   requires requires(Fn fn, Args... args) {
@@ -59,6 +61,9 @@ class move_only_function<R(Args...)> {
   auto operator()(Args... args) const -> R {
     return std::invoke(*fn_, std::forward<Args>(args)...);
   }
+
+  explicit operator bool() const noexcept { return fn_ != nullptr; }
+  auto operator!() const noexcept -> bool { return fn_ == nullptr; }
 
   private:
   std::unique_ptr<intf> fn_;

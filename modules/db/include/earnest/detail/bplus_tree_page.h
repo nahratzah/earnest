@@ -29,6 +29,7 @@
 
 #include <earnest/db_address.h>
 #include <earnest/db_cache.h>
+#include <earnest/detail/completion_barrier.h>
 #include <earnest/detail/completion_handler_fun.h>
 #include <earnest/detail/completion_wrapper.h>
 #include <earnest/detail/constexpr_rounding.h>
@@ -197,6 +198,38 @@ struct bplus_tree_value_spec {
   auto padding_bytes() const noexcept -> std::size_t {
     return padded_bytes() - bytes;
   }
+
+  auto do_compare(std::span<const std::byte> x, std::span<const std::byte> y) const -> std::strong_ordering {
+    if (byte_order_enabled) {
+      // I don't have the `std::lexicographical_compare_three_way` function. :'(
+      auto byte_comparison_fn = [](std::span<const std::byte> x, std::span<const std::byte> y) -> std::strong_ordering {
+        auto [x_iter, y_iter] = std::mismatch(x.begin(), x.end(), y.begin(), y.end());
+        if (x_iter == x.end())
+          return (y_iter == y.end() ? std::strong_ordering::equal : std::strong_ordering::less);
+        else if (y_iter == y.end())
+          return std::strong_ordering::greater;
+        else
+          return (*x_iter <=> *y_iter);
+      };
+
+      std::strong_ordering o = byte_comparison_fn(x, y);
+      if (o == std::strong_ordering::equal && !byte_equality_enabled)
+        o = this->compare(x, y);
+      return o;
+    }
+
+    if (byte_equality_enabled && std::equal(x.begin(), x.end(), y.begin(), y.end()))
+      return std::strong_ordering::equal;
+
+    return this->compare(x, y);
+  }
+
+  auto do_equal(std::span<const std::byte> x, std::span<const std::byte> y) const -> bool {
+    if (byte_equality_enabled)
+      return std::equal(x.begin(), x.end(), y.begin(), y.end());
+    else
+      return this->compare(x, y) == std::strong_ordering::equal;
+  }
 };
 
 
@@ -220,6 +253,14 @@ struct bplus_tree_element_spec {
         [](std::size_t x, const bplus_tree_augment_spec& y) noexcept -> std::size_t {
           return x + y.padded_bytes();
         });
+  }
+
+  auto key_compare(std::span<const std::byte> x, std::span<const std::byte> y) const -> std::strong_ordering {
+    return key.do_compare(x, y);
+  }
+
+  auto key_equal(std::span<const std::byte> x, std::span<const std::byte> y) const -> bool {
+    return key.do_equal(x, y);
   }
 };
 
@@ -257,6 +298,14 @@ struct bplus_tree_spec {
     constexpr std::size_t header_bytes = xdr_page_hdr::bytes.value() + xdr_intr_hdr::bytes.value();
 
     return header_bytes + payload_bytes_per_intr();
+  }
+
+  auto key_compare(std::span<const std::byte> x, std::span<const std::byte> y) const -> std::strong_ordering {
+    return element.key_compare(x, y);
+  }
+
+  auto key_equal(std::span<const std::byte> x, std::span<const std::byte> y) const -> bool {
+    return element.key_equal(x, y);
   }
 };
 
@@ -784,23 +833,27 @@ class bplus_tree_page
     asio::defer(
         get_executor(),
         [self=this->shared_from_this(this), raw_db_allocator]() {
-          self->async_fix_augment_impl_(
-              [](std::error_code ec) {
-                if (ec && ec != make_error_code(db_errc::data_expired))
-                  std::clog << "bplus-tree: background augmentation update failed: " << ec.message() << "\n";
-              },
-              false,
-              raw_db_allocator);
+          self->page_lock.async_shared(
+              [self, raw_db_allocator](auto lock) {
+                self->async_fix_augment_impl_(
+                    [](std::error_code ec) {
+                      if (ec && ec != make_error_code(db_errc::data_expired))
+                        std::clog << "bplus-tree: background augmentation update failed: " << ec.message() << "\n";
+                    },
+                    false,
+                    raw_db_allocator,
+                    std::move(lock));
+              });
         });
   }
 
   template<typename TxAlloc, typename CompletionToken>
-  auto async_fix_augment(TxAlloc tx_alloc, CompletionToken&& token) {
+  auto async_fix_augment(TxAlloc tx_alloc, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock page_lock, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_page> self, TxAlloc tx_alloc) {
-          self->async_fix_augment_impl_(std::move(handler), true, std::move(tx_alloc));
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_page> self, TxAlloc tx_alloc, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock page_lock) {
+          self->async_fix_augment_impl_(std::move(handler), true, std::move(tx_alloc), std::move(page_lock));
         },
-        token, this->shared_from_this(this), std::move(tx_alloc));
+        token, this->shared_from_this(this), std::move(tx_alloc), std::move(page_lock));
   }
 
   protected:
@@ -812,12 +865,14 @@ class bplus_tree_page
   }
 
   private:
-  template<typename TxAlloc = std::allocator<std::byte>>
-  auto async_fix_augment_impl_(move_only_function<void(std::error_code)> handler, bool must_complete, TxAlloc tx_alloc = TxAlloc()) -> void {
+  template<typename TxAlloc>
+  auto async_fix_augment_impl_(move_only_function<void(std::error_code)> handler, bool must_complete, TxAlloc tx_alloc, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock page_lock) -> void {
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
     using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
     using tx_type = typename raw_db_type::template fdb_transaction<TxAlloc>;
+
+    assert(page_lock.holds_monitor(this->page_lock));
 
     struct op
     : public std::enable_shared_from_this<op>
@@ -832,22 +887,26 @@ class bplus_tree_page
       auto operator()() -> void {
         self->page_lock.dispatch_shared(
             [self_op=this->shared_from_this()](monitor_shlock_type lock) {
-              if (self_op->self->erased_) [[unlikely]] {
-                self_op->error_invoke(make_error_code(db_errc::data_expired));
-              } else if (!self_op->self->augment_propagation_required) [[unlikely]] {
-                lock.reset();
-                self_op->self->async_parent_page(std::false_type(), asio::deferred)
-                | [self_op](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_page> parent, [[maybe_unused]] monitor_shlock_type parent_lock) {
-                    parent_lock.reset();
-                    if (ec)
-                      self_op->error_invoke(ec);
-                    else
-                      self_op->complete_invoke(parent);
-                  };
-              } else {
-                self_op->compute_augmentation(std::move(lock));
-              }
+              std::invoke(*self_op, std::move(lock));
             });
+      }
+
+      auto operator()(monitor_shlock_type lock) -> void {
+        if (self->erased_) [[unlikely]] {
+          error_invoke(make_error_code(db_errc::data_expired));
+        } else if (!self->augment_propagation_required) [[unlikely]] {
+          lock.reset();
+          self->async_parent_page(std::false_type(), asio::deferred)
+          | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_page> parent, [[maybe_unused]] monitor_shlock_type parent_lock) {
+              parent_lock.reset();
+              if (ec)
+                self_op->error_invoke(ec);
+              else
+                self_op->complete_invoke(parent);
+            };
+        } else {
+          compute_augmentation(std::move(lock));
+        }
       }
 
       private:
@@ -885,6 +944,7 @@ class bplus_tree_page
                         self_lock.reset();
                         self_op->complete_invoke(nullptr);
                       });
+                  return;
                 }
 
                 self_op->store_augment(std::move(parent), std::move(parent_lock));
@@ -1015,7 +1075,7 @@ class bplus_tree_page
       const bool must_complete;
     };
 
-    std::invoke(*std::allocate_shared<op>(tx_alloc, this->shared_from_this(this), std::move(handler), tx_alloc, must_complete));
+    std::invoke(*std::allocate_shared<op>(tx_alloc, this->shared_from_this(this), std::move(handler), tx_alloc, must_complete), std::move(page_lock));
   }
 
   virtual auto async_compute_page_augments_impl_(move_only_function<void(std::vector<std::byte>)> callback) const -> void = 0;
@@ -1504,15 +1564,12 @@ class bplus_tree_intr final
   }
 
   auto key_find_index(std::span<const std::byte> key) const -> std::optional<std::size_t> {
-    const bplus_tree_value_spec& key_spec = this->spec->element.key;
     if (hdr_.size == 0) [[unlikely]] return std::nullopt;
 
     for (std::size_t i = 0; i < hdr_.size - 1u; ++i) {
       const std::span<const std::byte> key_i = key_span(i);
-      const bool less = (key_spec.byte_order_enabled
-          ? std::lexicographical_compare(key.begin(), key.end(), key_i.begin(), key_i.end())
-          : key_spec.compare(key, key_i) == std::strong_ordering::less);
-      if (less) return i;
+      const std::strong_ordering o = this->spec->key_compare(key, key_i);
+      if (o == std::strong_ordering::less) return i;
     }
     return hdr_.size - 1u;
   }
@@ -1648,17 +1705,167 @@ class bplus_tree_leaf final
   template<typename T> using rebind_alloc = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
 
   public:
-  struct element {
+  struct element
+  : protected cycle_ptr::cycle_base
+  {
+    using executor_type = typename bplus_tree_leaf::executor_type;
+
     element(executor_type ex, std::size_t index, cycle_ptr::cycle_gptr<bplus_tree_leaf> owner, typename raw_db_type::allocator_type alloc)
     : index(std::move(index)),
       element_lock(std::move(ex), std::move(alloc)),
       owner(std::move(owner))
     {}
 
+    auto get_executor() -> executor_type {
+      return this->element_lock.get_executor();
+    }
+
     auto type() const -> bplus_tree_leaf_use_element {
       return owner->use_list_span()[index];
     }
 
+    auto key_span() const -> std::span<const std::byte> {
+      return owner->key_span(index);
+    }
+
+    auto key_span() -> std::span<std::byte> {
+      return owner->key_span(index);
+    }
+
+    auto value_span() const -> std::span<const std::byte> {
+      return owner->value_span(index);
+    }
+
+    auto value_span() -> std::span<std::byte> {
+      return owner->value_span(index);
+    }
+
+    auto key_compare(std::span<const std::byte> key) const -> std::strong_ordering {
+      const auto& spec = *owner->spec;
+      std::strong_ordering o = std::strong_ordering::equivalent;
+
+      switch (type()) {
+        default:
+          throw std::system_error(make_error_code(bplus_tree_errc::bad_tree), "element type not recognized");
+        case bplus_tree_leaf_use_element::unused:
+          throw std::system_error(make_error_code(bplus_tree_errc::bad_tree), "element type 'unused' may not be active for element");
+        case bplus_tree_leaf_use_element::before_first:
+          o = std::strong_ordering::less;
+          break;
+        case bplus_tree_leaf_use_element::after_last:
+          o = std::strong_ordering::greater;
+          break;
+        case bplus_tree_leaf_use_element::used:
+        case bplus_tree_leaf_use_element::ghost_create:
+        case bplus_tree_leaf_use_element::ghost_delete:
+          o = spec.key_compare(key_span(), key);
+          break;
+        case bplus_tree_leaf_use_element::ghost_iterator_before:
+          o = spec.key_compare(key_span(), key);
+          if (o == std::strong_ordering::equal) o = std::strong_ordering::less;
+          break;
+        case bplus_tree_leaf_use_element::ghost_iterator_after:
+          o = spec.key_compare(key_span(), key);
+          if (o == std::strong_ordering::equal) o = std::strong_ordering::greater;
+          break;
+      }
+
+      return o;
+    }
+
+    auto key_equal(std::span<const std::byte> key, bool iterator_equal = false) const -> bool {
+      const auto& spec = *owner->spec;
+      bool eq;
+
+      switch (type()) {
+        default: [[unlikely]]
+          eq = false;
+          break;
+        case bplus_tree_leaf_use_element::used:
+        case bplus_tree_leaf_use_element::ghost_create:
+        case bplus_tree_leaf_use_element::ghost_delete:
+          eq = spec.key_equal(key_span(), key);
+          break;
+        case bplus_tree_leaf_use_element::ghost_iterator_before:
+        case bplus_tree_leaf_use_element::ghost_iterator_after:
+          eq = iterator_equal && spec.key_equal(key_span(), key);
+          break;
+      }
+
+      return eq;
+    }
+
+    template<typename LeafLockType = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock, typename TxAlloc, typename CompletionToken>
+    requires std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>
+    auto async_lock_owner(TxAlloc tx_alloc, CompletionToken token) {
+      return asio::async_initiate<CompletionToken, void(cycle_ptr::cycle_gptr<bplus_tree_leaf>, LeafLockType)>(
+          [](auto handler, cycle_ptr::cycle_gptr<element> self, TxAlloc tx_alloc) {
+            self->template async_lock_owner_<LeafLockType>(std::move(tx_alloc), std::move(handler));
+          },
+          token, this->shared_from_this(this), std::move(tx_alloc));
+    }
+
+    private:
+    template<typename LeafLockType = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock, typename TxAlloc>
+    requires std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>
+    auto async_lock_owner_(TxAlloc tx_alloc, move_only_function<void(cycle_ptr::cycle_gptr<bplus_tree_leaf>, LeafLockType)> handler) -> void {
+      using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
+      using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
+      using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
+
+      struct op
+      : public std::enable_shared_from_this<op>
+      {
+        explicit op(cycle_ptr::cycle_gptr<element> self, move_only_function<void(cycle_ptr::cycle_gptr<bplus_tree_leaf>, LeafLockType)> handler)
+        : elem(std::move(self)),
+          handler(std::move(handler))
+        {}
+
+        auto operator()() -> void {
+          elem->element_lock.async_shared(asio::deferred)
+          | asio::deferred(
+              [self_op=this->shared_from_this()]([[maybe_unused]] monitor_shlock_type elem_shlock) {
+                return asio::deferred.values(cycle_ptr::cycle_gptr<bplus_tree_leaf>(self_op->elem->owner));
+              })
+          | asio::deferred(
+              [](cycle_ptr::cycle_gptr<bplus_tree_leaf> owner) {
+                if constexpr(std::is_same_v<monitor_exlock_type, LeafLockType>) {
+                  return owner->page_lock.async_exclusive(asio::append(asio::deferred, owner));
+                } else if constexpr(std::is_same_v<monitor_uplock_type, LeafLockType>) {
+                  return owner->page_lock.async_upgrade(asio::append(asio::deferred, owner));
+                } else {
+                  static_assert(std::is_same_v<monitor_shlock_type, LeafLockType>);
+                  return owner->page_lock.async_shared(asio::append(asio::deferred, owner));
+                }
+              })
+          | [self_op=this->shared_from_this()](LeafLockType leaf_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf> owner) {
+              bool success = std::any_of(owner->elements().begin(), owner->elements().end(),
+                  [&self_op](const auto& owner_elem_ptr) -> bool {
+                    return self_op->elem == owner_elem_ptr;
+                  });
+
+              if (success) {
+                std::invoke(self_op->handler, std::move(owner), std::move(leaf_lock));
+              } else {
+                // Using asio::post, to prevent recursion from overflowing the stack space.
+                asio::post(
+                    self_op->elem->get_executor(),
+                    [self_op]() {
+                      std::invoke(*self_op);
+                    });
+              }
+            };
+        }
+
+        private:
+        const cycle_ptr::cycle_gptr<element> elem;
+        move_only_function<void(cycle_ptr::cycle_gptr<bplus_tree_leaf>, LeafLockType)> handler;
+      };
+
+      std::invoke(*std::allocate_shared<op>(tx_alloc, this->shared_from_this(this), std::move(handler)));
+    }
+
+    public:
     std::size_t index;
     mutable monitor<executor_type, typename raw_db_type::allocator_type> element_lock;
     cycle_ptr::cycle_member_ptr<bplus_tree_leaf> owner;
@@ -1673,11 +1880,11 @@ class bplus_tree_leaf final
   private:
   using element_ptr = cycle_ptr::cycle_member_ptr<element>;
 
+  public:
   using element_vector = std::vector<
       element_ptr,
       cycle_ptr::cycle_allocator<rebind_alloc<element_ptr>>>;
 
-  public:
   bplus_tree_leaf(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, const bplus_tree_page_header& h = bplus_tree_page_header{.parent=bplus_tree_page<RawDbType>::nil_page}, std::uint64_t predecessor_offset = bplus_tree_page<RawDbType>::nil_page, std::uint64_t successor_offset = bplus_tree_page<RawDbType>::nil_page)
   : bplus_tree_page<RawDbType>(spec, std::move(raw_db), std::move(address), h),
     bytes_(spec->payload_bytes_per_leaf(), this->get_allocator()),
@@ -1829,16 +2036,19 @@ class bplus_tree_leaf final
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
     using stream_type = positional_stream_adapter<tx_file_type>;
 
-    std::shared_ptr<stream_type> fptr = std::allocate_shared<stream_type>(tx.get_allocator(), tx[this->address.file], this->address.offset + xdr_page_hdr_bytes);
-    async_write(
-        *fptr,
-        ::earnest::xdr_writer<>() & xdr_constant(std::move(hdr)),
-        completion_wrapper<void(std::error_code)>(
-            std::forward<CompletionToken>(token),
-            [fptr](auto handler, std::error_code ec) mutable {
-              fptr.reset();
-              return std::invoke(handler, ec);
-            }));
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<stream_type> fptr, bplus_tree_leaf_header hdr) {
+          async_write(
+              *fptr,
+              ::earnest::xdr_writer<>() & xdr_constant(std::move(hdr)),
+              completion_wrapper<void(std::error_code)>(
+                  std::move(handler),
+                  [fptr](auto handler, std::error_code ec) mutable {
+                    fptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, std::allocate_shared<stream_type>(tx.get_allocator(), tx[this->address.file], this->address.offset + xdr_page_hdr_bytes), std::move(hdr));
   }
 
   template<typename TxAlloc, typename CompletionToken>
@@ -1854,22 +2064,57 @@ class bplus_tree_leaf final
       bplus_tree_leaf_use_element type;
     };
 
-    if (offset >= this->spec->elements_per_leaf)
-      throw std::invalid_argument("bad offset for element write");
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, std::shared_ptr<state> state_ptr, std::size_t offset) {
+          if (offset >= self->spec->elements_per_leaf)
+            throw std::invalid_argument("bad offset for element write");
 
-    std::shared_ptr<state> state_ptr = std::allocate_shared<state>(tx.get_allocator(), tx[this->address.file], type);
-    const auto span = std::as_bytes(std::span<bplus_tree_leaf_use_element, 1>(&state_ptr->type, 1));
-    return asio::async_write_at(
-        state_ptr->f,
-        this->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + element_offset(offset),
-        asio::buffer(span),
-        completion_wrapper<void(std::error_code, std::size_t)>(
-            std::forward<CompletionToken>(token),
-            [state_ptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-              if (!ec) assert(nbytes == 1);
-              state_ptr.reset();
-              return std::invoke(handler, ec);
-            }));
+          const auto span = std::as_bytes(std::span<bplus_tree_leaf_use_element, 1>(&state_ptr->type, 1));
+          return asio::async_write_at(
+              state_ptr->f,
+              self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->element_offset(offset),
+              asio::buffer(span),
+              completion_wrapper<void(std::error_code, std::size_t)>(
+                  std::move(handler),
+                  [state_ptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                    if (!ec) assert(nbytes == 1);
+                    state_ptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, this->shared_from_this(this), std::allocate_shared<state>(tx.get_allocator(), tx[this->address.file], type), std::move(offset));
+  }
+
+  template<typename TxAlloc, typename CompletionToken>
+  auto async_set_use_list_diskonly_op(typename raw_db_type::template fdb_transaction<TxAlloc> tx, std::size_t offset, std::span<const bplus_tree_leaf_use_element> type, CompletionToken&& token) {
+    using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
+    struct state {
+      explicit state(tx_file_type f)
+      : f(std::move(f))
+      {}
+
+      tx_file_type f;
+    };
+
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, std::shared_ptr<state> state_ptr, std::size_t offset, std::span<const bplus_tree_leaf_use_element> type) {
+          if (offset + type.size() > self->spec->elements_per_leaf)
+            throw std::invalid_argument("bad offset for element write");
+
+          const auto span = std::as_bytes(type);
+          return asio::async_write_at(
+              state_ptr->f,
+              self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->element_offset(offset),
+              asio::buffer(span),
+              completion_wrapper<void(std::error_code, std::size_t)>(
+                  std::move(handler),
+                  [state_ptr, type](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                    if (!ec) assert(nbytes == type.size());
+                    state_ptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, this->shared_from_this(this), std::allocate_shared<state>(tx.get_allocator(), tx[this->address.file]), std::move(offset), std::move(type));
   }
 
   // Write elements to disk, but don't update in-memory representation.
@@ -1877,22 +2122,25 @@ class bplus_tree_leaf final
   auto async_set_elements_diskonly_op(typename raw_db_type::template fdb_transaction<TxAlloc> tx, std::size_t offset, std::span<const std::byte> elements, CompletionToken&& token) {
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
 
-    if (offset >= this->spec->elements_per_leaf)
-      throw std::invalid_argument("bad offset for element write");
-    if (elements.size() > (this->spec->elements_per_leaf - offset) * element_length())
-      throw std::invalid_argument("too many bytes for element write");
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, std::shared_ptr<tx_file_type> fptr, std::size_t offset, std::span<const std::byte> elements) {
+          if (offset >= self->spec->elements_per_leaf)
+            throw std::invalid_argument("bad offset for element write");
+          if (elements.size() > (self->spec->elements_per_leaf - offset) * self->element_length())
+            throw std::invalid_argument("too many bytes for element write");
 
-    std::shared_ptr<tx_file_type> fptr = std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]);
-    return asio::async_write_at(
-        *fptr,
-        this->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + element_offset(offset),
-        asio::buffer(elements),
-        completion_wrapper<void(std::error_code, std::size_t)>(
-            std::forward<CompletionToken>(token),
-            [fptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-              fptr.reset();
-              return std::invoke(handler, ec);
-            }));
+          return asio::async_write_at(
+              *fptr,
+              self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->element_offset(offset),
+              asio::buffer(elements),
+              completion_wrapper<void(std::error_code, std::size_t)>(
+                  std::move(handler),
+                  [fptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                    fptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, this->shared_from_this(this), std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]), std::move(offset), std::move(elements));
   }
 
   protected:
@@ -2194,6 +2442,20 @@ class bplus_tree_leaf final
     return { &bytes_[element_offset(idx)], element_length() };
   }
 
+  auto element_multispan(std::size_t b, std::size_t e) const noexcept -> std::span<const std::byte> {
+    assert(b < this->spec->elements_per_leaf);
+    assert(e <= this->spec->elements_per_leaf);
+    assert(bytes_.size() >= element_offset(this->spec->elements_per_leaf));
+    return { &bytes_[element_offset(b)], element_offset(e) - element_offset(b) };
+  }
+
+  auto element_multispan(std::size_t b, std::size_t e) noexcept -> std::span<std::byte> {
+    assert(b < this->spec->elements_per_leaf);
+    assert(e <= this->spec->elements_per_leaf);
+    assert(bytes_.size() >= element_offset(this->spec->elements_per_leaf));
+    return { &bytes_[element_offset(b)], element_offset(e) - element_offset(b) };
+  }
+
   auto key_span(std::size_t idx) const noexcept -> std::span<const std::byte> {
     assert(idx < this->spec->elements_per_leaf);
     assert(bytes_.size() >= element_offset(this->spec->elements_per_leaf));
@@ -2266,12 +2528,10 @@ class bplus_tree_leaf final
 
     auto augments = byte_vector(this->spec->element.padded_augment_bytes(), std::byte(0));
     std::span<std::byte> data_span = std::span(augments);
-    const std::span<const std::byte> key_span = this->key_span(e.index);
-    const std::span<const std::byte> value_span = this->value_span(e.index);
 
     for (const bplus_tree_augment_spec& spec : this->spec->element.augments) {
       assert(data_span.size() >= spec.padded_bytes());
-      spec.augment_value(data_span.subspan(0, spec.bytes), key_span, value_span);
+      spec.augment_value(data_span.subspan(0, spec.bytes), e.key_span(), e.value_span());
       data_span = data_span.subspan(spec.padded_bytes());
     }
     assert(data_span.empty());
@@ -2374,11 +2634,27 @@ class bplus_element_reference {
     reset();
   }
 
+  template<typename Alloc, typename... Args>
+  static auto allocate(Alloc&& alloc, Args&&... args) -> bplus_element_reference {
+    bplus_element_reference r;
+    pointer p = cycle_ptr::allocate_cycle<typename bplus_tree_leaf<RawDbType>::element>(std::forward<Alloc>(alloc), std::forward<Args>(args)...);
+
+    [[maybe_unused]] auto old_use_count = p->use_count.fetch_add(1u, std::memory_order_relaxed);
+    assert(old_use_count == 0);
+    r.elem_ = std::move(p);
+
+    return r;
+  }
+
   auto operator*() const noexcept -> reference {
     return *elem_;
   }
 
   auto operator->() const noexcept -> const pointer& {
+    return elem_;
+  }
+
+  auto get() const noexcept -> const pointer& {
     return elem_;
   }
 
@@ -2491,6 +2767,18 @@ class bplus_tree
   }
 
   private:
+  template<typename T, std::size_t TExtent, typename U, std::size_t UExtent>
+  requires std::assignable_from<T&, U&>
+  static auto span_copy(std::span<T, TExtent> dst, std::span<U, UExtent> src) -> void {
+    static_assert(TExtent == std::dynamic_extent || UExtent == std::dynamic_extent || TExtent == UExtent, "extents are of unequal length");
+
+    if (dst.size() != src.size()) throw std::invalid_argument("span size mismatch during page-split");
+    if (&*dst.begin() >= &*src.begin() && &*dst.begin() < &*src.end())
+      std::copy_backward(src.begin(), src.end(), dst.end());
+    else
+      std::copy(src.begin(), src.end(), dst.begin());
+  }
+
   template<typename TxAlloc>
   struct tree_path {
     using allocator_type = TxAlloc;
@@ -2989,8 +3277,9 @@ class bplus_tree
   }
 
   template<typename LeafLockType = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock, typename TxAlloc>
-  requires std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>
-  auto find_leaf_page_for_insert_op_(TxAlloc tx_alloc, std::span<const std::byte> key) {
+  requires std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>
+  auto find_leaf_page_for_insert_op_(tree_path<TxAlloc> path, std::span<const std::byte> key) {
+    assert(path.tree == this->shared_from_this(this));
     return tree_walk_<LeafLockType>(
         [key](cycle_ptr::cycle_gptr<intr_type> intr) -> std::variant<db_address, std::error_code> {
           std::optional<db_address> opt_child_page_address = intr->key_find(key);
@@ -2999,7 +3288,7 @@ class bplus_tree
           else
             return make_error_code(bplus_tree_errc::bad_tree);
         },
-        tree_path<TxAlloc>(this->shared_from_this(this), tx_alloc),
+        std::move(path),
         asio::deferred);
   }
 
@@ -3879,14 +4168,6 @@ class bplus_tree
             });
       }
 
-      static auto span_copy(std::span<std::byte> dst, std::span<const std::byte> src) -> void {
-        if (dst.size() != src.size()) throw std::invalid_argument("span size mismatch during page-split");
-        if (&*dst.begin() >= &*src.begin() && &*dst.begin() < &*src.end())
-          std::copy_backward(src.begin(), src.end(), dst.end());
-        else
-          std::copy(src.begin(), src.end(), dst.begin());
-      }
-
       auto update_memory_representation(std::shared_ptr<page_selection> ps, std::uint32_t shift) -> void {
         if constexpr(std::is_same_v<PageType, intr_type>) {
           const std::optional<std::size_t> index_in_parent = ps->parent->find_index(ps->level_pages[0]->address);
@@ -3931,7 +4212,8 @@ class bplus_tree
           std::for_each(ps->rebalance.begin(), ps->rebalance.end(),
               [&use_lists, ps](const auto& rebalance_item) {
                 use_lists[rebalance_item.which_page][rebalance_item.new_index] = rebalance_item.use_type;
-                span_copy(ps->level_pages[rebalance_item.which_page]->element_span(rebalance_item.new_index), rebalance_item.kv_bytes);
+                span_copy(ps->level_pages[rebalance_item.which_page]->element_span(rebalance_item.new_index),
+                    std::span<const std::byte>(rebalance_item.kv_bytes.data(), rebalance_item.kv_bytes.size()));
               });
 
           // Update elements.
@@ -3987,7 +4269,7 @@ class bplus_tree
 
   template<typename PageType, typename TxAlloc>
   requires (std::is_same_v<PageType, intr_type> || std::is_same_v<PageType, leaf_type>)
-  auto split_page_op_(cycle_ptr::cycle_gptr<PageType> page, bplus_tree_versions::type page_split, TxAlloc tx_alloc) -> void {
+  auto split_page_op_(cycle_ptr::cycle_gptr<PageType> page, bplus_tree_versions::type page_split, TxAlloc tx_alloc) {
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code)>(
         [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> tree, cycle_ptr::cycle_gptr<PageType> page, bplus_tree_versions::type page_split, TxAlloc tx_alloc) {
           // Always use post to invoke the handler:
@@ -3998,7 +4280,499 @@ class bplus_tree
         asio::deferred, this->shared_from_this(this), std::move(page), std::move(page_split), std::move(tx_alloc));
   }
 
+  template<typename TxAlloc>
+  struct insert_op
+  : std::enable_shared_from_this<insert_op<TxAlloc>>
+  {
+    using byte_vector = std::vector<std::byte, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::byte>>;
+    using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
+    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
+    using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
+    using element_vector = typename bplus_tree_leaf<raw_db_type>::element_vector;
+    using tx_type = typename raw_db_type::template fdb_transaction<TxAlloc>;
+
+    struct shift_elem {
+      cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> elem;
+      monitor_uplock_type uplock;
+      monitor_exlock_type exlock;
+    };
+    using shift_elem_vector = std::vector<shift_elem, typename std::allocator_traits<TxAlloc>::template rebind_alloc<shift_elem>>;
+
+    insert_op(cycle_ptr::cycle_gptr<bplus_tree> tree, std::span<const std::byte> key, std::span<const std::byte> value, TxAlloc tx_alloc)
+    : tree(tree),
+      key_and_value(make_key_and_value(*tree->spec, key, value, tx_alloc)),
+      tx_alloc(tx_alloc),
+      path(tree, tx_alloc)
+    {}
+
+    private:
+    static auto make_key_and_value(const bplus_tree_spec& spec, std::span<const std::byte> key, std::span<const std::byte> value, TxAlloc tx_alloc) -> byte_vector {
+      auto bytes = byte_vector(spec.element.key.padded_bytes() + spec.element.value.padded_bytes(), std::byte{0}, tx_alloc);
+      span_copy(
+          std::span(bytes.data(), bytes.size()).subspan(0, spec.element.key.bytes),
+          key);
+      span_copy(
+          std::span(bytes.data(), bytes.size()).subspan(spec.element.key.padded_bytes(), spec.element.value.bytes),
+          value);
+      return bytes;
+    }
+
+    public:
+    auto get_allocator() const -> TxAlloc { return tx_alloc; }
+    auto element_span() const noexcept -> std::span<const std::byte> { return {key_and_value.data(), key_and_value.size()}; }
+
+    auto key_span() const noexcept -> std::span<const std::byte> {
+      const auto& spec = *tree->spec;
+      return element_span().subspan(0, spec.element.key.bytes);
+    }
+
+    auto value_span() const noexcept -> std::span<const std::byte> {
+      const auto& spec = *tree->spec;
+      return element_span().subspan(spec.element.key.padded_bytes(), spec.element.value.bytes);
+    }
+
+    auto operator()(move_only_function<void(std::error_code, bplus_element_reference<raw_db_type, false>)> handler) -> void {
+      assert(!this->handler);
+      this->handler = std::move(handler);
+
+      get_insertion_page();
+    }
+
+    private:
+    auto get_insertion_page() -> void {
+      tree->template find_leaf_page_for_insert_op_<monitor_uplock_type>(std::move(path), key_span())
+      | [self_op=this->shared_from_this()](std::error_code ec, tree_path<TxAlloc> path, monitor_uplock_type leaf_lock) {
+          if (ec) {
+            self_op->error_invoke(ec);
+          } else {
+            self_op->path = std::move(path);
+            self_op->use_target_page(std::move(leaf_lock));
+          }
+        };
+    }
+
+    auto use_target_page(monitor_uplock_type leaf_lock) -> void {
+      // Ensure page has enough space.
+      if (path.leaf_page.page->elements().size() >= tree->spec->elements_per_leaf) {
+        leaf_lock.reset();
+        tree->split_page_op_(path.leaf_page.page, path.leaf_page.versions.page_split, get_allocator())
+        | [self_op=this->shared_from_this()](std::error_code ec) {
+            if (ec && ec != make_error_code(db_errc::data_expired))
+              self_op->error_invoke(ec);
+            else
+              self_op->get_insertion_page();
+          };
+        return;
+      }
+
+      find_insert_position(path.leaf_page.page->elements().begin(), path.leaf_page.page->elements().end(), std::move(leaf_lock));
+    }
+
+    auto find_insert_position(typename element_vector::const_iterator b, typename element_vector::const_iterator e, monitor_uplock_type leaf_lock) -> void {
+      while (b != e) {
+        const auto delta = e - b;
+        assert(delta >= 1u);
+        const typename element_vector::const_iterator m = b + delta / 2u;
+        assert(b <= m && m < e);
+
+        auto opt_elem_shlock = (*m)->element_lock.try_shared();
+        if (opt_elem_shlock.has_value()) {
+          if ((*m)->key_compare(key_span()) == std::strong_ordering::greater)
+            e = m;
+          else
+            b = m + 1;
+        } else {
+          (*m)->element_lock.async_shared(
+              [b, e, m, leaf_lock, self_op=this->shared_from_this()](auto elem_shlock) mutable -> void {
+                if ((*m)->key_compare(self_op->key_span()) == std::strong_ordering::greater) {
+                  elem_shlock.reset();
+                  self_op->find_insert_position(b, m, std::move(leaf_lock));
+                } else {
+                  elem_shlock.reset();
+                  self_op->find_insert_position(m + 1, e, std::move(leaf_lock));
+                }
+              });
+          return; // Callback will restart the loop.
+        }
+      }
+
+      insert_at(b, std::move(leaf_lock));
+    }
+
+    auto insert_at(const typename element_vector::const_iterator insert_before_pos, monitor_uplock_type leaf_lock) -> void {
+      const auto& elements = path.leaf_page.page->elements();
+      const std::size_t elements_per_leaf = path.leaf_page.page->spec->elements_per_leaf;
+
+      // Figure out the start of the range to shift, if we shift things down.
+      typename element_vector::const_iterator forw_shift_begin = insert_before_pos;
+      while (forw_shift_begin != elements.begin() && (*std::prev(forw_shift_begin))->index + 1u == (*forw_shift_begin)->index)
+        --forw_shift_begin;
+
+      // Figure out the end of the range to shift, if we shift things up.
+      typename element_vector::const_iterator back_shift_end = insert_before_pos;
+      if (back_shift_end != elements.end()) {
+        ++back_shift_end;
+        while (back_shift_end != elements.end() && (*std::prev(back_shift_end))->index + 1u == (*back_shift_end)->index)
+          ++back_shift_end;
+      }
+
+      const auto back_shift_count = back_shift_end - insert_before_pos;
+      const auto forw_shift_count = insert_before_pos - forw_shift_begin;
+      const auto can_forw_shift = (forw_shift_begin == elements.begin()
+          ? elements.empty() || elements.front()->index > 0u
+          : true);
+      const auto can_back_shift = (back_shift_end == elements.end()
+          ? elements.empty() || elements.back()->index + 1u < elements_per_leaf
+          : true);
+      assert(can_forw_shift || can_back_shift);
+
+      if (can_forw_shift && forw_shift_count == 0) {
+        // No need for shifting, so skip the process entirely.
+        do_ghost_insert(insert_before_pos, std::move(leaf_lock));
+      } else if (can_forw_shift && forw_shift_count <= back_shift_count) {
+        shift_(forw_shift_begin, insert_before_pos, leaf_lock,
+            std::integral_constant<int, -1>(),
+            [ self_op=this->shared_from_this(),
+              insert_before_pos
+            ](std::error_code ec, monitor_exlock_type leaf_exlock) mutable {
+              if (ec)
+                self_op->error_invoke(ec);
+              else
+                self_op->do_ghost_insert(insert_before_pos, std::move(leaf_exlock).as_upgrade_lock());
+            });
+      } else {
+        shift_(insert_before_pos, back_shift_end, leaf_lock,
+            std::integral_constant<int, 1>(),
+            [ self_op=this->shared_from_this(),
+              insert_before_pos
+            ](std::error_code ec, monitor_exlock_type leaf_exlock) mutable {
+              if (ec)
+                self_op->error_invoke(ec);
+              else
+                self_op->do_ghost_insert(insert_before_pos, std::move(leaf_exlock).as_upgrade_lock());
+            });
+      }
+    }
+
+    template<int Direction, typename Handler>
+    auto shift_(const typename element_vector::const_iterator b, const typename element_vector::const_iterator e, monitor_uplock_type leaf_lock, [[maybe_unused]] std::integral_constant<int, Direction> direction, Handler&& handler) -> std::enable_if_t<Direction == -1 || Direction == 1> {
+      assert(shift_elems.empty());
+      assert(b != path.leaf_page.page->elements().end());
+
+      std::transform(b, e, std::back_inserter(shift_elems),
+          [](const auto& elem_ptr) {
+            return shift_elem{ .elem=elem_ptr };
+          });
+      const auto source_index = (*b)->index;
+      const auto target_index = (Direction < 0 ? source_index - 1u : source_index + 1u);
+      const auto shift_count = (*std::prev(e))->index + 1u - (*b)->index;
+
+      auto raw_db = tree->raw_db.lock();
+      if (raw_db == nullptr) [[unlikely]] {
+        error_invoke(make_error_code(db_errc::data_expired));
+        return;
+      }
+      tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, get_allocator());
+
+      shift_lock_all_for_upgrade_(asio::deferred)
+      | asio::deferred(
+          [self_op=this->shared_from_this(), tx, target_index, source_index, shift_count]() {
+            return asio::async_initiate<decltype(asio::deferred), void(std::error_code)>(
+                [target_index, source_index, shift_count](auto handler, std::shared_ptr<insert_op> self_op, tx_type tx) {
+                  auto& leaf_page = *self_op->path.leaf_page.page;
+                  auto barrier = make_completion_barrier(std::move(handler), self_op->tree->get_executor());
+
+                  leaf_page.async_set_use_list_diskonly_op(
+                      tx, target_index,
+                      leaf_page.use_list_span().subspan(source_index, shift_count),
+                      ++barrier);
+                  leaf_page.async_set_elements_diskonly_op(
+                      tx, target_index,
+                      leaf_page.element_multispan(source_index, source_index + shift_count),
+                      ++barrier);
+
+                  if constexpr(Direction < 0) {
+                    leaf_page.async_set_use_list_diskonly_op(
+                        tx, source_index + shift_count - 1u,
+                        bplus_tree_leaf_use_element::unused,
+                        ++barrier);
+                  } else {
+                    leaf_page.async_set_use_list_diskonly_op(
+                        tx, source_index,
+                        bplus_tree_leaf_use_element::unused,
+                        ++barrier);
+                  }
+
+                  std::invoke(barrier, std::error_code());
+                },
+                asio::deferred, self_op, tx);
+          })
+      | asio::deferred(
+          [tx](std::error_code ec) mutable {
+            return asio::deferred.when(!ec)
+                .then(tx.async_commit(asio::deferred))
+                .otherwise(asio::deferred.values(ec));
+          })
+      | asio::deferred(
+          [leaf_lock](std::error_code ec) {
+            return asio::deferred.when(!ec)
+                .then(leaf_lock.dispatch_exclusive(asio::append(asio::deferred, ec)))
+                .otherwise(asio::deferred.values(monitor_exlock_type{}, ec));
+          })
+      | asio::deferred(
+          [self_op=this->shared_from_this()](monitor_exlock_type leaf_exlock, std::error_code ec) {
+            return asio::deferred.when(!ec)
+                .then(self_op->shift_lock_all_for_ex_(asio::append(asio::deferred, ec, leaf_exlock)))
+                .otherwise(asio::deferred.values(ec, leaf_exlock));
+          })
+      | asio::deferred(
+          [ self_op=this->shared_from_this(),
+            source_index, target_index, shift_count
+          ](std::error_code ec, monitor_exlock_type leaf_exlock) {
+            auto& leaf_page = *self_op->path.leaf_page.page;
+
+            if (!ec) {
+              span_copy(
+                  leaf_page.use_list_span().subspan(target_index, shift_count),
+                  leaf_page.use_list_span().subspan(source_index, shift_count));
+              span_copy(
+                  leaf_page.element_multispan(target_index, target_index + shift_count),
+                  leaf_page.element_multispan(source_index, source_index + shift_count));
+
+              if constexpr(Direction < 0)
+                leaf_page.use_list_span()[source_index + shift_count - 1u] = bplus_tree_leaf_use_element::unused;
+              else
+                leaf_page.use_list_span()[source_index] = bplus_tree_leaf_use_element::unused;
+
+              std::for_each(self_op->shift_elems.begin(), self_op->shift_elems.end(),
+                  [](const auto& sh_elem) {
+                    if constexpr(Direction < 0)
+                      --sh_elem.elem->index;
+                    else
+                      ++sh_elem.elem->index;
+                  });
+            }
+
+            self_op->shift_elems.clear();
+            return asio::deferred.values(ec, std::move(leaf_exlock));
+          })
+      | std::forward<Handler>(handler);
+    }
+
+    template<typename CompletionToken>
+    auto shift_lock_all_for_upgrade_(CompletionToken&& token) {
+      return asio::async_initiate<CompletionToken, void()>(
+          [](auto handler, std::shared_ptr<insert_op> self_op) -> void {
+            self_op->shift_lock_all_for_upgrade_impl_(self_op->shift_elems.begin(), std::move(handler));
+          },
+          token, this->shared_from_this());
+    }
+
+    template<typename Handler>
+    auto shift_lock_all_for_upgrade_impl_(typename shift_elem_vector::iterator i, Handler&& handler) -> void {
+      for (/* skip */; i != shift_elems.end(); ++i) {
+        auto opt_elem_uplock = i->elem->element_lock.try_upgrade();
+        if (opt_elem_uplock.has_value()) {
+          i->uplock = std::move(opt_elem_uplock).value();
+        } else {
+          i->elem->element_lock.async_upgrade(
+              [ self_op=this->shared_from_this(),
+                handler=std::forward<Handler>(handler),
+                i
+              ](monitor_uplock_type elem_uplock) mutable {
+                i->uplock = std::move(elem_uplock);
+                self_op->shift_lock_all_for_upgrade_impl_(std::next(i), std::move(handler));
+              });
+          return; // Callback will resume the loop.
+        }
+      }
+
+      std::invoke(handler);
+    }
+
+    template<typename CompletionToken>
+    auto shift_lock_all_for_ex_(CompletionToken&& token) {
+      return asio::async_initiate<CompletionToken, void()>(
+          [](auto handler, std::shared_ptr<insert_op> self_op) -> void {
+            self_op->shift_lock_all_for_ex_impl_(self_op->shift_elems.begin(), std::move(handler));
+          },
+          token, this->shared_from_this());
+    }
+
+    template<typename Handler>
+    auto shift_lock_all_for_ex_impl_(typename shift_elem_vector::iterator i, Handler&& handler) -> void {
+      for (/* skip */; i != shift_elems.end(); ++i) {
+        auto opt_elem_exlock = std::move(i->uplock).try_exclusive();
+        if (opt_elem_exlock.has_value()) {
+          i->exlock = std::move(opt_elem_exlock).value();
+        } else {
+          std::move(i->uplock).async_exclusive(
+              [ self_op=this->shared_from_this(),
+                handler=std::forward<Handler>(handler),
+                i
+              ](monitor_exlock_type elem_exlock) mutable {
+                i->exlock = std::move(elem_exlock);
+                self_op->shift_lock_all_for_ex_impl_(std::next(i), std::move(handler));
+              });
+          return; // Callback will resume the loop.
+        }
+      }
+
+      std::invoke(handler);
+    }
+
+    auto do_ghost_insert(const typename element_vector::const_iterator insert_before_pos, monitor_uplock_type leaf_lock) -> void {
+      // We want the new element to in the middle of the free space.
+      // That way, hopefully future inserts won't require any shifting.
+      const auto max_index = (insert_before_pos == path.leaf_page.page->elements().end()
+          ?  path.leaf_page.page->spec->elements_per_leaf
+          : (*insert_before_pos)->index) - 1u;
+      const auto min_index = (insert_before_pos == path.leaf_page.page->elements().begin()
+          ? 0u
+          : (*std::prev(insert_before_pos))->index + 1u);
+      const auto insert_index = (min_index + max_index + 1u) / 2u;
+      assert(min_index <= insert_index && insert_index <= max_index);
+
+      auto new_element = bplus_element_reference<raw_db_type, false>::allocate(path.leaf_page.page->get_allocator(), path.leaf_page.page->get_executor(), insert_index, path.leaf_page.page, path.leaf_page.page->get_allocator());
+
+      auto raw_db = tree->raw_db.lock();
+      if (raw_db == nullptr) [[unlikely]] {
+        error_invoke(make_error_code(db_errc::data_expired));
+        return;
+      }
+      tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, get_allocator());
+
+      asio::async_initiate<decltype(asio::deferred), void(std::error_code)>(
+          [](auto handler, std::shared_ptr<insert_op> self_op, tx_type tx, std::size_t insert_index) -> void {
+            auto& leaf_page = *self_op->path.leaf_page.page;
+            auto barrier = make_completion_barrier(std::move(handler), self_op->tree->get_executor());
+
+            leaf_page.async_set_augment_propagation_required_diskonly_op(tx, ++barrier);
+            leaf_page.async_set_use_list_diskonly_op(tx, insert_index, bplus_tree_leaf_use_element::ghost_create, ++barrier);
+            leaf_page.async_set_elements_diskonly_op(tx, insert_index, self_op->element_span(), ++barrier);
+
+            std::invoke(barrier, std::error_code());
+          },
+          asio::deferred, this->shared_from_this(), tx, insert_index)
+      | asio::deferred(
+          [tx](std::error_code ec) mutable {
+            return asio::deferred.when(!ec)
+                .then(tx.async_commit(asio::deferred))
+                .otherwise(asio::deferred.values(ec));
+          })
+      | asio::deferred(
+          [leaf_lock](std::error_code ec) {
+            return asio::deferred.when(!ec)
+                .then(leaf_lock.async_exclusive(asio::append(asio::deferred, ec)))
+                .otherwise(asio::deferred.values(monitor_exlock_type{}, ec));
+          })
+      | asio::deferred(
+          [self_op=this->shared_from_this(), insert_before_pos, insert_index, new_element]([[maybe_unused]] monitor_exlock_type leaf_exlock, std::error_code ec) {
+            if (!ec) {
+              self_op->path.leaf_page.page->use_list_span()[insert_index] = bplus_tree_leaf_use_element::ghost_create;
+              span_copy(self_op->path.leaf_page.page->element_span(insert_index), self_op->element_span());
+              self_op->path.leaf_page.page->elements_.emplace(insert_before_pos, new_element.get());
+              self_op->path.leaf_page.page->augment_propagation_required = true;
+            }
+
+            return asio::deferred.values(ec);
+          })
+      | asio::deferred(
+          [self_op=this->shared_from_this(), new_element](std::error_code ec) {
+            return asio::deferred.when(!ec)
+                .then(new_element->template async_lock_owner<monitor_shlock_type>(self_op->get_allocator(), asio::append(asio::deferred, ec)))
+                .otherwise(asio::deferred.values(cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>>{}, monitor_shlock_type{}, ec));
+          })
+      | asio::deferred(
+          [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, std::error_code ec) {
+            // Clear tree path. Path elements are likely to be invalidated.
+            // And in any way, we no longer need them.
+            // By releasing them, we allow the cache to forget about them.
+            // It's good to be nice to the cache.
+            self_op->path = tree_path<TxAlloc>{};
+
+            // We release all our locks while doing the augmentation, which can take a long time.
+            // That way, other operations (both read and write) can take place.
+            return asio::deferred.when(!ec)
+                .then(leaf->async_fix_augment(self_op->get_allocator(), std::move(leaf_lock), asio::deferred))
+                .otherwise(asio::deferred.values(ec));
+          })
+      | [self_op=this->shared_from_this(), new_element](std::error_code ec) {
+          if (ec)
+            self_op->error_invoke(ec);
+          else
+            self_op->promote_element(new_element);
+        };
+    }
+
+    auto promote_element(bplus_element_reference<raw_db_type, false> elem_ref) -> void {
+      auto raw_db = tree->raw_db.lock();
+      if (raw_db == nullptr) [[unlikely]] {
+        error_invoke(make_error_code(db_errc::data_expired));
+        return;
+      }
+      tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, get_allocator());
+
+      elem_ref->template async_lock_owner<monitor_shlock_type>(this->get_allocator(), asio::deferred)
+      | asio::deferred(
+          [elem_ref](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock) {
+            return elem_ref->element_lock.async_upgrade(asio::append(asio::deferred, std::move(leaf), std::move(leaf_lock)));
+          })
+      | asio::deferred(
+          [tx, elem_ref](monitor_uplock_type elem_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock) {
+            return leaf->async_set_use_list_diskonly_op(tx, elem_ref->index, bplus_tree_leaf_use_element::used,
+                asio::append(asio::deferred, leaf, std::move(leaf_lock), std::move(elem_lock)));
+          })
+      | asio::deferred(
+          [tx](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, monitor_uplock_type elem_lock) mutable {
+            return asio::deferred.when(!ec)
+                .then(tx.async_commit(asio::append(asio::deferred, leaf, leaf_lock, elem_lock)))
+                .otherwise(asio::deferred.values(ec, leaf, leaf_lock, elem_lock));
+          })
+      | asio::deferred(
+          [](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, monitor_uplock_type elem_lock) {
+            return asio::deferred.when(!ec)
+                .then(elem_lock.async_exclusive(asio::append(asio::deferred, ec, leaf, leaf_lock)))
+                .otherwise(asio::deferred.values(monitor_exlock_type{}, ec, leaf, leaf_lock));
+          })
+      | asio::deferred(
+          [elem_ref]([[maybe_unused]] monitor_exlock_type elem_lock, std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, [[maybe_unused]] monitor_shlock_type leaf_lock) {
+            if (!ec) leaf->use_list_span()[elem_ref->index] = bplus_tree_leaf_use_element::used;
+            return asio::deferred.values(ec);
+          })
+      | [self_op=this->shared_from_this(), elem_ref](std::error_code ec) {
+          if (ec)
+            self_op->error_invoke(ec);
+          else
+            std::invoke(self_op->handler, ec, std::move(elem_ref));
+        };
+    }
+
+    auto error_invoke(std::error_code ec) -> void {
+      std::invoke(handler, ec, bplus_element_reference<raw_db_type, false>{});
+    }
+
+    const cycle_ptr::cycle_gptr<bplus_tree> tree;
+    const byte_vector key_and_value;
+    shift_elem_vector shift_elems;
+    TxAlloc tx_alloc;
+    tree_path<TxAlloc> path;
+    move_only_function<void(std::error_code, bplus_element_reference<raw_db_type, false>)> handler;
+  };
+
   public:
+  template<typename TxAlloc, typename CompletionToken>
+  auto insert(std::span<const std::byte> key, std::span<const std::byte> value, TxAlloc tx_alloc, CompletionToken&& token) {
+    return asio::async_initiate<CompletionToken, void(std::error_code, bplus_element_reference<raw_db_type, false>)>(
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> self, std::shared_ptr<insert_op<TxAlloc>> op) {
+          if constexpr(handler_has_executor_v<decltype(handler)>)
+            std::invoke(*op, completion_handler_fun(std::move(handler), self->get_executor()));
+          else
+            std::invoke(*op, std::move(handler));
+        },
+        token, this->shared_from_this(this), std::allocate_shared<insert_op<TxAlloc>>(tx_alloc, this->shared_from_this(this), std::move(key), std::move(value), tx_alloc));
+  }
+
   template<typename TxAlloc, typename CompletionToken>
   auto async_before_first_element(TxAlloc tx_alloc, CompletionToken&& token) {
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
@@ -4079,6 +4853,7 @@ class bplus_tree
     using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
     using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
+#if 0
     using lock_variant = std::variant<monitor_exlock_type, monitor_uplock_type, monitor_uplock_type, monitor_shlock_type>;
 
     find_leaf_page_for_insert_op_(std::allocator<std::byte>(), std::span<const std::byte>())
@@ -4106,6 +4881,7 @@ class bplus_tree
               if (ec) throw std::system_error(ec, "split_page_impl");
             });
       };
+#endif
 
     async_before_first_element(std::allocator<std::byte>(),
         [](std::error_code ec, cycle_ptr::cycle_gptr<element> elem) {

@@ -57,6 +57,21 @@ NEW_TEST(temp) {
   ioctx.run();
 }
 
+NEW_TEST(insert) {
+  std::array<std::byte, key_bytes> key{ std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4} };
+  std::array<std::byte, value_bytes> value{ std::byte{5}, std::byte{6}, std::byte{7}, std::byte{8} };
+
+  bool callback_called = false;
+  tree->insert(key, value, std::allocator<std::byte>(),
+      [&callback_called](std::error_code ec, [[maybe_unused]] auto elem_ref) {
+        CHECK_EQUAL(std::error_code(), ec);
+        callback_called = true;
+      });
+  ioctx.run();
+
+  CHECK(callback_called);
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     std::cerr << "Usage: " << (argc > 0 ? argv[0] : "bplus_tree_page_test") << "writeable_dir\n"
