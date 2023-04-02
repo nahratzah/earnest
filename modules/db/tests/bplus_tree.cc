@@ -52,11 +52,6 @@ class fixture {
 NEW_TEST(constructor) {
 }
 
-NEW_TEST(temp) {
-  tree->TEST_FN();
-  ioctx.run();
-}
-
 NEW_TEST(insert) {
   std::array<std::byte, key_bytes> key{ std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4} };
   std::array<std::byte, value_bytes> value{ std::byte{5}, std::byte{6}, std::byte{7}, std::byte{8} };

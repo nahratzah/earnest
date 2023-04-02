@@ -22,6 +22,9 @@ class db
   using raw_db<Executor, Allocator>::async_open;
   using raw_db<Executor, Allocator>::get_executor;
   using raw_db<Executor, Allocator>::get_allocator;
+
+  using raw_db<Executor, Allocator>::cache_max_mem;
+  using raw_db<Executor, Allocator>::get_session_number;
 };
 
 

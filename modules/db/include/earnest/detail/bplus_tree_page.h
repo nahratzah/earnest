@@ -455,16 +455,19 @@ class bplus_tree_page
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
     using stream_type = positional_stream_adapter<tx_file_type>;
 
-    std::shared_ptr<stream_type> fptr = std::allocate_shared<stream_type>(tx.get_allocator(), tx[address.file], address.offset + bplus_tree_page_header::augment_propagation_required_offset);
-    async_write(
-        *fptr,
-        ::earnest::xdr_writer<>() & xdr_constant(true).as(xdr_bool),
-        completion_wrapper<void(std::error_code)>(
-            std::forward<CompletionToken>(token),
-            [fptr](auto handler, std::error_code ec) mutable {
-              fptr.reset();
-              return std::invoke(handler, ec);
-            }));
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<stream_type> fptr) {
+          async_write(
+              *fptr,
+              ::earnest::xdr_writer<>() & xdr_constant(true).as(xdr_bool),
+              completion_wrapper<void(std::error_code)>(
+                  std::move(handler),
+                  [fptr](auto handler, std::error_code ec) mutable {
+                    fptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, std::allocate_shared<stream_type>(tx.get_allocator(), tx[address.file], address.offset + bplus_tree_page_header::augment_propagation_required_offset));
   }
 
   // Write parent address to disk, but don't update in-memory representation.
@@ -473,16 +476,19 @@ class bplus_tree_page
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
     using stream_type = positional_stream_adapter<tx_file_type>;
 
-    std::shared_ptr<stream_type> fptr = std::allocate_shared<stream_type>(tx.get_allocator(), tx[address.file], address.offset + bplus_tree_page_header::parent_offset);
-    async_write(
-        *fptr,
-        ::earnest::xdr_writer<>() & xdr_constant(parent).as(xdr_uint64),
-        completion_wrapper<void(std::error_code)>(
-            std::forward<CompletionToken>(token),
-            [fptr](auto handler, std::error_code ec) mutable {
-              fptr.reset();
-              return std::invoke(handler, ec);
-            }));
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<stream_type> fptr, std::uint64_t parent) {
+          async_write(
+              *fptr,
+              ::earnest::xdr_writer<>() & xdr_constant(parent).as(xdr_uint64),
+              completion_wrapper<void(std::error_code)>(
+                  std::move(handler),
+                  [fptr](auto handler, std::error_code ec) mutable {
+                    fptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, std::allocate_shared<stream_type>(tx.get_allocator(), tx[address.file], address.offset + bplus_tree_page_header::parent_offset), std::move(parent));
   }
 
   private:
@@ -1458,16 +1464,19 @@ class bplus_tree_intr final
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
     using stream_type = positional_stream_adapter<tx_file_type>;
 
-    std::shared_ptr<stream_type> fptr = std::allocate_shared<stream_type>(tx.get_allocator(), tx[this->address.file], this->address.offset + xdr_page_hdr_bytes);
-    async_write(
-        *fptr,
-        ::earnest::xdr_writer<>() & xdr_constant(std::move(hdr)),
-        completion_wrapper<void(std::error_code)>(
-            std::forward<CompletionToken>(token),
-            [fptr](auto handler, std::error_code ec) mutable {
-              fptr.reset();
-              return std::invoke(handler, ec);
-            }));
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, std::shared_ptr<stream_type> fptr, bplus_tree_intr_header hdr) -> void {
+          async_write(
+              *fptr,
+              ::earnest::xdr_writer<>() & xdr_constant(std::move(hdr)),
+              completion_wrapper<void(std::error_code)>(
+                  std::move(handler),
+                  [fptr](auto handler, std::error_code ec) mutable {
+                    fptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, std::allocate_shared<stream_type>(tx.get_allocator(), tx[this->address.file], this->address.offset + xdr_page_hdr_bytes), std::move(hdr));
   }
 
   // Write elements to disk, but don't update in-memory representation.
@@ -1475,22 +1484,25 @@ class bplus_tree_intr final
   auto async_set_elements_diskonly_op(typename raw_db_type::template fdb_transaction<TxAlloc> tx, std::size_t offset, std::span<const std::byte> elements, CompletionToken&& token) {
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
 
-    if (offset >= this->spec->child_pages_per_intr)
-      throw std::invalid_argument("bad offset for element write");
-    if (elements.size() > (this->spec->child_pages_per_intr - offset) * element_length())
-      throw std::invalid_argument("too many bytes for element write");
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_intr> self, std::shared_ptr<tx_file_type> fptr, std::size_t offset, std::span<const std::byte> elements) -> void {
+          if (offset >= self->spec->child_pages_per_intr)
+            throw std::invalid_argument("bad offset for element write");
+          if (elements.size() > (self->spec->child_pages_per_intr - offset) * self->element_length())
+            throw std::invalid_argument("too many bytes for element write");
 
-    std::shared_ptr<tx_file_type> fptr = std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]);
-    return asio::async_write_at(
-        *fptr,
-        this->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + element_offset(offset),
-        asio::buffer(elements),
-        completion_wrapper<void(std::error_code, std::size_t)>(
-            std::forward<CompletionToken>(token),
-            [fptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-              fptr.reset();
-              return std::invoke(handler, ec);
-            }));
+          return asio::async_write_at(
+              *fptr,
+              self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->element_offset(offset),
+              asio::buffer(elements),
+              completion_wrapper<void(std::error_code, std::size_t)>(
+                  std::move(handler),
+                  [fptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                    fptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, this->shared_from_this(this), std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]), std::move(offset), std::move(elements));
   }
 
   // Write augments to disk, but don't update in-memory representation.
@@ -1498,22 +1510,25 @@ class bplus_tree_intr final
   auto async_set_augments_diskonly_op(typename raw_db_type::template fdb_transaction<TxAlloc> tx, std::size_t offset, std::span<const std::byte> augments, CompletionToken&& token) {
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
 
-    if (offset >= this->spec->child_pages_per_intr)
-      throw std::invalid_argument("bad offset for augment write");
-    if (augments.size() > (this->spec->child_pages_per_intr - offset) * augment_length())
-      throw std::invalid_argument("too many bytes for augment write");
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_intr> self, std::shared_ptr<tx_file_type> fptr, std::size_t offset, std::span<const std::byte> augments) -> void {
+          if (offset >= self->spec->child_pages_per_intr)
+            throw std::invalid_argument("bad offset for augment write");
+          if (augments.size() > (self->spec->child_pages_per_intr - offset) * self->augment_length())
+            throw std::invalid_argument("too many bytes for augment write");
 
-    std::shared_ptr<tx_file_type> fptr = std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]);
-    return asio::async_write_at(
-        *fptr,
-        this->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + augment_offset(offset),
-        asio::buffer(augments),
-        completion_wrapper<void(std::error_code, std::size_t)>(
-            std::forward<CompletionToken>(token),
-            [fptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-              fptr.reset();
-              return std::invoke(handler, ec);
-            }));
+          return asio::async_write_at(
+              *fptr,
+              self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->augment_offset(offset),
+              asio::buffer(augments),
+              completion_wrapper<void(std::error_code, std::size_t)>(
+                  std::move(handler),
+                  [fptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                    fptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, this->shared_from_this(this), std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]), std::move(offset), std::move(augments));
   }
 
   // Write keys to disk, but don't update in-memory representation.
@@ -1521,22 +1536,25 @@ class bplus_tree_intr final
   auto async_set_keys_diskonly_op(typename raw_db_type::template fdb_transaction<TxAlloc> tx, std::size_t offset, std::span<const std::byte> keys, CompletionToken&& token) {
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
 
-    if (offset >= this->spec->child_pages_per_intr)
-      throw std::invalid_argument("bad offset for key write");
-    if (keys.size() > (this->spec->child_pages_per_intr - offset) * key_length())
-      throw std::invalid_argument("too many bytes for key write");
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_intr> self, std::shared_ptr<tx_file_type> fptr, std::size_t offset, std::span<const std::byte> keys) {
+          if (offset >= self->spec->child_pages_per_intr)
+            throw std::invalid_argument("bad offset for key write");
+          if (keys.size() > (self->spec->child_pages_per_intr - offset) * self->key_length())
+            throw std::invalid_argument("too many bytes for key write");
 
-    std::shared_ptr<tx_file_type> fptr = std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]);
-    return asio::async_write_at(
-        *fptr,
-        this->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + key_offset(offset),
-        asio::buffer(keys),
-        completion_wrapper<void(std::error_code, std::size_t)>(
-            std::forward<CompletionToken>(token),
-            [fptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
-              fptr.reset();
-              return std::invoke(handler, ec);
-            }));
+          return asio::async_write_at(
+              *fptr,
+              self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->key_offset(offset),
+              asio::buffer(keys),
+              completion_wrapper<void(std::error_code, std::size_t)>(
+                  std::move(handler),
+                  [fptr](auto handler, std::error_code ec, [[maybe_unused]] std::size_t nbytes) mutable {
+                    fptr.reset();
+                    return std::invoke(handler, ec);
+                  }));
+        },
+        token, this->shared_from_this(this), std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]), std::move(offset), std::move(keys));
   }
 
   // Must hold page_lock.
@@ -4847,57 +4865,6 @@ class bplus_tree
                   }));
         },
         token, this->shared_from_this(this), std::move(tx_alloc));
-  }
-
-  auto TEST_FN() {
-    using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
-    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
-    using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
-#if 0
-    using lock_variant = std::variant<monitor_exlock_type, monitor_uplock_type, monitor_uplock_type, monitor_shlock_type>;
-
-    find_leaf_page_for_insert_op_(std::allocator<std::byte>(), std::span<const std::byte>())
-    | [self=this->shared_from_this(this)](std::error_code ec, tree_path<std::allocator<std::byte>> path, [[maybe_unused]] lock_variant parent_lock) {
-        std::clog << "find_leaf_page_for_insert_op_ yields:\n"
-            << "  ec=" << ec << " (" << ec.message() << ")\n"
-            << "  path{tree=" << path.tree << ", interior has " << path.interior_pages.size() << " levels, leaf=" << path.leaf_page.page << "}\n";
-        if (ec) throw std::system_error(ec, "find_leaf_page_for_insert_op");
-
-        self->ensure_parent_op_(path.leaf_page.page, std::allocator<std::byte>())
-        | [](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent_page) {
-            std::clog << "ensure_parent_op_ yields:\n"
-                << "  ec=" << ec << " (" << ec.message() << ")\n"
-                << "  parent_page=" << parent_page << "\n";
-
-            if (ec) throw std::system_error(ec, "ensure_parent_op");
-          };
-
-        self->split_page_impl_(
-            path.leaf_page.page, path.leaf_page.versions.page_split, std::allocator<std::byte>(),
-            [](std::error_code ec) {
-              std::clog << "split_page_impl_ yields:\n"
-                  << "  ec=" << ec << " (" << ec.message() << ")\n";
-
-              if (ec) throw std::system_error(ec, "split_page_impl");
-            });
-      };
-#endif
-
-    async_before_first_element(std::allocator<std::byte>(),
-        [](std::error_code ec, cycle_ptr::cycle_gptr<element> elem) {
-          std::clog << "before_first:\n"
-              << "  ec=" << ec << " (" << ec.message() << ")\n"
-              << "  elem=" << elem << "\n";
-          if (ec) throw std::system_error(ec, "async_before_first_element");
-        });
-
-    async_after_last_element(std::allocator<std::byte>(),
-        [](std::error_code ec, cycle_ptr::cycle_gptr<element> elem) {
-          std::clog << "after_last:\n"
-              << "  ec=" << ec << " (" << ec.message() << ")\n"
-              << "  elem=" << elem << "\n";
-          if (ec) throw std::system_error(ec, "async_after_last_element");
-        });
   }
 
   public:
