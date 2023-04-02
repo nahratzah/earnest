@@ -1,4 +1,4 @@
-#include <earnest/detail/bplus_tree_page.h>
+#include <earnest/detail/bplus_tree.h>
 
 #include <UnitTest++/UnitTest++.h>
 
@@ -8,8 +8,10 @@
 #include <earnest/dir.h>
 #include <earnest/isolation.h>
 #include <iostream>
+#include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 earnest::dir write_dir;
 
@@ -33,6 +35,8 @@ class fixture {
   static constexpr std::size_t value_bytes = 4;
   static constexpr std::string_view tree_filename = "test.tree";
   static const earnest::db_address tree_address;
+  using read_kv_type = std::pair<std::string, std::string>;
+  using read_kv_vector = std::vector<read_kv_type>;
 
   using raw_db_type = earnest::raw_db<asio::io_context::executor_type>;
   using db_allocator = earnest::detail::file_grow_allocator<raw_db_type>;
@@ -42,6 +46,8 @@ class fixture {
   explicit fixture(std::string_view name);
   ~fixture();
 
+  auto read_all() -> std::vector<read_kv_type>;
+
   asio::io_context ioctx;
   const std::shared_ptr<earnest::detail::bplus_tree_spec> spec;
   const cycle_ptr::cycle_gptr<raw_db_type> raw_db;
@@ -49,12 +55,29 @@ class fixture {
 };
 
 
+namespace std {
+
+template<typename Alloc>
+inline auto operator<<(std::ostream& out, const std::vector<::fixture::read_kv_type, Alloc>& v) -> std::ostream& {
+  bool first = true;
+  out << "{";
+  for (const auto& kv : v) {
+    out << (first ? " " : ", ");
+    first = false;
+    out << "{" << kv.first << " => " << kv.second << "}";
+  }
+  return out << (first ? "" : " ") << "}";
+}
+
+}
+
+
 NEW_TEST(constructor) {
 }
 
 NEW_TEST(insert) {
-  std::array<std::byte, key_bytes> key{ std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4} };
-  std::array<std::byte, value_bytes> value{ std::byte{5}, std::byte{6}, std::byte{7}, std::byte{8} };
+  std::array<std::byte, key_bytes> key{ std::byte{'a'}, std::byte{'b'}, std::byte{'b'}, std::byte{'a'} };
+  std::array<std::byte, value_bytes> value{ std::byte{'c'}, std::byte{'d'}, std::byte{'e'}, std::byte{'f'} };
 
   bool callback_called = false;
   tree->insert(key, value, std::allocator<std::byte>(),
@@ -63,8 +86,14 @@ NEW_TEST(insert) {
         callback_called = true;
       });
   ioctx.run();
+  ioctx.restart();
 
   CHECK(callback_called);
+  CHECK_EQUAL(
+      read_kv_vector({
+        { "abba", "cdef" },
+      }),
+      read_all());
 }
 
 int main(int argc, char** argv) {
@@ -201,5 +230,62 @@ fixture::fixture(std::string_view name)
 }
 
 fixture::~fixture() = default;
+
+auto fixture::read_all() -> std::vector<read_kv_type> {
+  std::vector<read_kv_type> elements;
+  bool read_all_callback_called = false;
+
+  struct op {
+    explicit op(std::vector<read_kv_type>& output)
+    : output(output)
+    {}
+
+    auto operator()(
+        std::span<const earnest::detail::bplus_element_reference<raw_db_type, true>> elements,
+        earnest::detail::move_only_function<void(std::error_code)> callback) -> void {
+      while (!elements.empty()) {
+        auto opt_shlock = elements.front()->element_lock.try_shared();
+        if (opt_shlock) {
+          output.emplace_back(byte_array_as_string(elements.front()->key_span()), byte_array_as_string(elements.front()->value_span()));
+          elements = elements.subspan(1);
+        } else {
+          elements.front()->element_lock.async_shared(
+              [ op=*this, // copy
+                elements,
+                callback=std::move(callback)
+              ](auto lock) mutable -> void {
+                op.output.emplace_back(byte_array_as_string(elements.front()->key_span()), byte_array_as_string(elements.front()->value_span()));
+                lock.reset();
+                std::invoke(op, elements.subspan(1), std::move(callback));
+              });
+          return; // Callback will resume the loop.
+        }
+      }
+
+      callback(std::error_code{});
+      return;
+    }
+
+    private:
+    static auto byte_array_as_string(std::span<const std::byte> bytes) -> std::string {
+      return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    }
+
+    std::vector<read_kv_type>& output;
+  };
+
+  tree->async_visit_all(
+      std::allocator<std::byte>(),
+      op(elements),
+      [&read_all_callback_called](std::error_code ec) {
+        read_all_callback_called = true;
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+      });
+
+  ioctx.run();
+  ioctx.restart();
+  REQUIRE CHECK(read_all_callback_called);
+  return elements;
+}
 
 const earnest::db_address fixture::tree_address = earnest::db_address(earnest::file_id("", std::string(tree_filename)), 0);
