@@ -24,4 +24,10 @@ struct db_address {
 };
 
 
+template<typename CharT, typename Traits>
+inline auto operator<<(std::basic_ostream<CharT, Traits>& out, const db_address& address) -> std::basic_ostream<CharT, Traits>& {
+  return out << address.offset << "@" << address.file;
+}
+
+
 } /* namespace earnest */

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <functional>
 #include <iterator>
+#include <iostream>
 #include <memory>
 #include <numeric>
 #include <scoped_allocator>
@@ -27,6 +28,7 @@
 #include <boost/endian.hpp>
 #include <boost/polymorphic_pointer_cast.hpp>
 
+#include <earnest/byte_span_printer.h>
 #include <earnest/db_address.h>
 #include <earnest/db_cache.h>
 #include <earnest/detail/completion_barrier.h>
@@ -171,6 +173,207 @@ enum class bplus_tree_leaf_use_element : std::uint8_t {
   ghost_iterator_before = 0x72,
   ghost_iterator_after = 0x73,
 };
+
+
+template<typename Traits>
+inline auto operator<<(std::basic_ostream<char, Traits>& out, bplus_tree_leaf_use_element elem) -> std::basic_ostream<char, Traits>& {
+  using namespace std::literals;
+
+  switch (elem) {
+    default:
+      {
+        unsigned int elem_value = static_cast<std::underlying_type_t<bplus_tree_leaf_use_element>>(elem);
+        out << "earnest::detail::bplus_tree_leaf_use_element{"sv << elem_value << "}"sv;
+      }
+      break;
+    case bplus_tree_leaf_use_element::unused:
+      out << "unused"sv;
+      break;
+    case bplus_tree_leaf_use_element::used:
+      out << "used"sv;
+      break;
+    case bplus_tree_leaf_use_element::before_first:
+      out << "before_first"sv;
+      break;
+    case bplus_tree_leaf_use_element::after_last:
+      out << "after_last"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_create:
+      out << "ghost_create"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_delete:
+      out << "ghost_delete"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_before:
+      out << "ghost_iterator_before"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_after:
+      out << "ghost_iterator_after"sv;
+      break;
+  }
+
+  return out;
+}
+
+template<typename Traits>
+inline auto operator<<(std::basic_ostream<wchar_t, Traits>& out, bplus_tree_leaf_use_element elem) -> std::basic_ostream<wchar_t, Traits>& {
+  using namespace std::literals;
+
+  switch (elem) {
+    default:
+      {
+        unsigned int elem_value = static_cast<std::underlying_type_t<bplus_tree_leaf_use_element>>(elem);
+        out << L"earnest::detail::bplus_tree_leaf_use_element{"sv << elem_value << L"}"sv;
+      }
+      break;
+    case bplus_tree_leaf_use_element::unused:
+      out << L"unused"sv;
+      break;
+    case bplus_tree_leaf_use_element::used:
+      out << L"used"sv;
+      break;
+    case bplus_tree_leaf_use_element::before_first:
+      out << L"before_first"sv;
+      break;
+    case bplus_tree_leaf_use_element::after_last:
+      out << L"after_last"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_create:
+      out << L"ghost_create"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_delete:
+      out << L"ghost_delete"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_before:
+      out << L"ghost_iterator_before"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_after:
+      out << L"ghost_iterator_after"sv;
+      break;
+  }
+
+  return out;
+}
+
+template<typename Traits>
+inline auto operator<<(std::basic_ostream<char8_t, Traits>& out, bplus_tree_leaf_use_element elem) -> std::basic_ostream<char8_t, Traits>& {
+  using namespace std::literals;
+
+  switch (elem) {
+    default:
+      {
+        unsigned int elem_value = static_cast<std::underlying_type_t<bplus_tree_leaf_use_element>>(elem);
+        out << u8"earnest::detail::bplus_tree_leaf_use_element{"sv << elem_value << u8"}"sv;
+      }
+      break;
+    case bplus_tree_leaf_use_element::unused:
+      out << u8"unused"sv;
+      break;
+    case bplus_tree_leaf_use_element::used:
+      out << u8"used"sv;
+      break;
+    case bplus_tree_leaf_use_element::before_first:
+      out << u8"before_first"sv;
+      break;
+    case bplus_tree_leaf_use_element::after_last:
+      out << u8"after_last"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_create:
+      out << u8"ghost_create"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_delete:
+      out << u8"ghost_delete"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_before:
+      out << u8"ghost_iterator_before"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_after:
+      out << u8"ghost_iterator_after"sv;
+      break;
+  }
+
+  return out;
+}
+
+template<typename Traits>
+inline auto operator<<(std::basic_ostream<char16_t, Traits>& out, bplus_tree_leaf_use_element elem) -> std::basic_ostream<char16_t, Traits>& {
+  using namespace std::literals;
+
+  switch (elem) {
+    default:
+      {
+        unsigned int elem_value = static_cast<std::underlying_type_t<bplus_tree_leaf_use_element>>(elem);
+        out << u"earnest::detail::bplus_tree_leaf_use_element{"sv << elem_value << u"}"sv;
+      }
+      break;
+    case bplus_tree_leaf_use_element::unused:
+      out << u"unused"sv;
+      break;
+    case bplus_tree_leaf_use_element::used:
+      out << u"used"sv;
+      break;
+    case bplus_tree_leaf_use_element::before_first:
+      out << u"before_first"sv;
+      break;
+    case bplus_tree_leaf_use_element::after_last:
+      out << u"after_last"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_create:
+      out << u"ghost_create"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_delete:
+      out << u"ghost_delete"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_before:
+      out << u"ghost_iterator_before"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_after:
+      out << u"ghost_iterator_after"sv;
+      break;
+  }
+
+  return out;
+}
+
+template<typename Traits>
+inline auto operator<<(std::basic_ostream<char32_t, Traits>& out, bplus_tree_leaf_use_element elem) -> std::basic_ostream<char32_t, Traits>& {
+  using namespace std::literals;
+
+  switch (elem) {
+    default:
+      {
+        unsigned int elem_value = static_cast<std::underlying_type_t<bplus_tree_leaf_use_element>>(elem);
+        out << U"earnest::detail::bplus_tree_leaf_use_element{"sv << elem_value << U"}"sv;
+      }
+      break;
+    case bplus_tree_leaf_use_element::unused:
+      out << U"unused"sv;
+      break;
+    case bplus_tree_leaf_use_element::used:
+      out << U"used"sv;
+      break;
+    case bplus_tree_leaf_use_element::before_first:
+      out << U"before_first"sv;
+      break;
+    case bplus_tree_leaf_use_element::after_last:
+      out << U"after_last"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_create:
+      out << U"ghost_create"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_delete:
+      out << U"ghost_delete"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_before:
+      out << U"ghost_iterator_before"sv;
+      break;
+    case bplus_tree_leaf_use_element::ghost_iterator_after:
+      out << U"ghost_iterator_after"sv;
+      break;
+  }
+
+  return out;
+}
 
 
 enum class iterator_direction {
@@ -801,8 +1004,10 @@ class bplus_tree_page
                       [&](bplus_tree_intr_ptr&& target_page) {
                         std::invoke(self_op->handler, std::error_code(), std::move(target_page), std::move(target_lock));
                       },
-                      [&]([[maybe_unused]] bplus_tree_leaf_ptr&& target_page) {
+                      [&](bplus_tree_leaf_ptr&& target_page) {
                         // Parent page cannot be a leaf, so this would be bad.
+                        std::clog << "bplus-tree: bad-tree, parent page is a leaf\n";
+                        target_page->maybe_log_dump("parent page");
                         self_op->error_invoke(make_error_code(bplus_tree_errc::bad_tree));
                       }),
                   std::move(target_page));
@@ -1105,6 +1310,9 @@ class bplus_tree_page
 
         const std::optional<std::size_t> offset = parent->find_index(self->address);
         if (!offset.has_value()) {
+          std::clog << "bplus-tree: bad-tree, child-page not found within parent page\n";
+          self->maybe_log_dump("child page");
+          parent->maybe_log_dump("parent page");
           error_invoke(make_error_code(bplus_tree_errc::bad_tree));
           return;
         }
@@ -1223,6 +1431,68 @@ class bplus_tree_page
   }
 
   virtual auto async_compute_page_augments_impl_(move_only_function<void(std::vector<std::byte>)> callback) const -> void = 0;
+
+  protected:
+  virtual auto log_dump_impl_(std::ostream& out) const -> void {
+    using namespace std::literals;
+
+    out << "  address: "sv << address << "\n"sv
+        << "  versions: {\n"sv
+        << "    page_split: "sv << versions.page_split << "\n"sv
+        << "    page_merge: "sv << versions.page_merge << "\n"sv
+        << "    augment:    "sv << versions.augment << "\n"sv
+        << "  }\n"sv
+        << "  raw_db: "sv << raw_db.lock() << "\n"sv
+        << "  spec{\n"sv
+        << "    elements_per_leaf: "sv << spec->elements_per_leaf << "\n"sv
+        << "    child_pages_per_intr: "sv << spec->child_pages_per_intr << "\n"sv
+        << "    element: {\n"sv
+        << "      key: {\n"sv
+        << "        bytes: "sv << spec->element.key.bytes << "\n"sv
+        << "        byte_equality_enabled: "sv << spec->element.key.byte_equality_enabled << "\n"sv
+        << "        byte_order_enabled: "sv << spec->element.key.byte_order_enabled << "\n"sv
+        << "      }\n"sv
+        << "      value: {\n"sv
+        << "        bytes: "sv << spec->element.value.bytes << "\n"sv
+        << "        byte_equality_enabled: "sv << spec->element.value.byte_equality_enabled << "\n"sv
+        << "        byte_order_enabled: "sv << spec->element.value.byte_order_enabled << "\n"sv
+        << "      }\n"sv;
+
+    if (spec->element.augments.empty()) {
+      out << "      augments: []\n"sv;
+    } else {
+      out << "      augments: [\n"sv;
+      for (const auto& augment : spec->element.augments) {
+        out << "        { bytes: "sv << augment.bytes << "\n"sv
+            << "          byte_equality_enabled: "sv << augment.byte_equality_enabled << "\n"sv
+            << "          byte_order_enabled: "sv << augment.byte_order_enabled << "\n"sv
+            << "        }\n"sv;
+      }
+      out << "      ]\n"sv;
+    }
+
+    out << "    }\n"sv
+        << "    bytes_per_leaf: "sv << spec->bytes_per_leaf() << "\n"sv
+        << "    bytes_per_intr: "sv << spec->bytes_per_intr() << "\n"sv
+        << "  }\n"sv
+        << "  erased: " << erased_ << "\n"sv
+        << "  augment_propagation_required: " << augment_propagation_required << "\n"sv
+        << "  parent_offset: " << parent_offset << "\n"sv;
+  }
+
+  public:
+  auto log_dump(std::ostream& out) const -> void {
+    log_dump_impl_(out);
+  }
+
+  auto maybe_log_dump([[maybe_unused]] std::string_view prefix = std::string_view()) -> void {
+#ifndef NDEBUG
+    using namespace std::literals;
+
+    if (!prefix.empty()) std::clog << prefix << " "sv;
+    log_dump(std::clog);
+#endif
+  }
 
   protected:
   template<bool ForWrite>
@@ -1780,7 +2050,7 @@ class bplus_tree_intr final
   }
 
   auto element_multispan(std::size_t b, std::size_t e) noexcept -> std::span<std::byte> {
-    assert(b < this->spec->child_pages_per_intr);
+    assert(b <= e);
     assert(e <= this->spec->child_pages_per_intr);
     return std::span<std::byte>(&bytes_[element_offset(b)], &bytes_[element_offset(e)]);
   }
@@ -1807,7 +2077,7 @@ class bplus_tree_intr final
   }
 
   auto augment_multispan(std::size_t b, std::size_t e) noexcept -> std::span<std::byte> {
-    assert(b < this->spec->child_pages_per_intr);
+    assert(b <= e);
     assert(e <= this->spec->child_pages_per_intr);
     return std::span<std::byte>(&bytes_[augment_offset(b)], &bytes_[augment_offset(e)]);
   }
@@ -1825,7 +2095,7 @@ class bplus_tree_intr final
   }
 
   auto key_multispan(std::size_t b, std::size_t e) noexcept -> std::span<std::byte> {
-    assert(b < this->spec->child_pages_per_intr - 1u);
+    assert(b <= e);
     assert(e <= this->spec->child_pages_per_intr - 1u);
     return std::span<std::byte>(&bytes_[key_offset(b)], &bytes_[key_offset(e)]);
   }
@@ -1839,6 +2109,25 @@ class bplus_tree_intr final
     callback(this->combine_augments(std::move(inputs)));
   }
 
+  protected:
+  auto log_dump_impl_(std::ostream& out) const -> void override {
+    using namespace std::literals;
+
+    out << "earnest::detail::bplus_tree_intr: {\n"sv;
+    this->bplus_tree_page<RawDbType>::log_dump_impl_(out);
+    out << "  index_size: "sv << index_size() << "\n"sv;
+
+    for (std::size_t i = 0; i < index_size(); ++i) {
+      if (i != 0)
+        out << "  key["sv <<  (i - 1u) << "]: "sv << byte_span_printer(key_span(i - 1u)) << "\n"sv;
+      out << "  element["sv << i << "]: "sv << element(i) << "\n"sv;
+      out << "  augment["sv << i << "]: "sv << byte_span_printer(augment_span(i)) << "\n"sv;
+    }
+
+    out << "}\n"sv;
+  }
+
+  private:
   std::vector<std::byte, rebind_alloc<std::byte>> bytes_;
   bplus_tree_intr_header hdr_;
 };
@@ -2839,7 +3128,7 @@ class bplus_tree_leaf final
               } else {
                 leaf->async_next_page(self_op->get_allocator(), asio::deferred)
                 | [self_op, leaf](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf> next_page, monitor_shlock_type next_page_lock, monitor_shlock_type leaf_lock) {
-                    if (ec) {
+                    if (ec == make_error_code(db_errc::data_expired)) {
                       self_op->last_elem->element_lock.async_shared(asio::deferred)
                       | [self_op, leaf, ec]([[maybe_unused]] monitor_shlock_type last_elem_lock) {
                           if (self_op->last_elem->owner == leaf) {
@@ -2850,11 +3139,17 @@ class bplus_tree_leaf final
                           }
                         };
                       return;
+                    } else if (ec) {
+                      std::invoke(self_op->handler, ec);
+                      return;
                     }
 
                     if (leaf->versions.page_split != self_op->leaf_versions.page_split || leaf->versions.page_merge != self_op->leaf_versions.page_merge) {
-                      leaf_lock.reset();
-                      self_op->resume(); // page was changed, retry resume
+                      self_op->gather(std::move(self_op->last_elem), true, std::move(leaf), std::move(leaf_lock));
+                    } else if (next_page == nullptr) {
+                      std::clog << "bplus-tree: iteration running out of pages without finding iteration end point...\n";
+                      leaf->maybe_log_dump("most recent page");
+                      std::invoke(self_op->handler, std::error_code{});
                     } else {
                       leaf_lock.reset();
                       self_op->gather(bplus_element_reference<raw_db_type, true>{}, false, std::move(next_page), std::move(next_page_lock));
@@ -3082,6 +3377,48 @@ class bplus_tree_leaf final
     return augments;
   }
 
+  protected:
+  auto log_dump_impl_(std::ostream& out) const -> void override {
+    using namespace std::literals;
+
+    out << "earnest::detail::bplus_tree_leaf: {\n"sv;
+    this->bplus_tree_page<RawDbType>::log_dump_impl_(out);
+    out << "  next_page_address: "sv << next_page_address() << "\n"sv;
+    out << "  prev_page_address: "sv << prev_page_address() << "\n"sv;
+    out << "  elements_size: "sv << elements_.size() << "\n"sv;
+
+    if (elements_.empty()) {
+      out << "  elements: []\n"sv;
+    } else {
+      out << "  elements: [\n"sv;
+      for (const auto& elem_ptr : elements_) {
+        if (elem_ptr == nullptr) {
+          out << "    nullptr\n"sv;
+          continue;
+        }
+
+        out << "    { index: "sv << elem_ptr->index << ", owner: "sv;
+        if (elem_ptr->owner == nullptr)
+          out << "nullptr"sv;
+        else
+          out << elem_ptr->owner->address;
+        out << " }\n"sv;
+      }
+      out << "  ]\n"sv;
+    }
+
+    for (std::size_t i = 0; i < this->spec->elements_per_leaf; ++i) {
+      out << "  use_list["sv << i << "]: "sv << use_list_span()[i] << "\n"sv;
+      if (use_list_span()[i] == bplus_tree_leaf_use_element::unused) continue;
+
+      out << "  key["sv << i << "]: "sv << byte_span_printer(key_span(i)) << "\n"sv;
+      out << "  value["sv << i << "]: "sv << byte_span_printer(value_span(i)) << "\n"sv;
+    }
+
+    out << "}\n"sv;
+  }
+
+  private:
   std::vector<std::byte, rebind_alloc<std::byte>> bytes_;
   element_vector elements_;
   bplus_tree_leaf_header hdr_;
@@ -3687,10 +4024,13 @@ class bplus_tree
     return tree_walk_<LeafLockType>(
         [key](cycle_ptr::cycle_gptr<intr_type> intr) -> std::variant<db_address, std::error_code> {
           std::optional<db_address> opt_child_page_address = intr->key_find(key);
-          if (opt_child_page_address.has_value())
+          if (opt_child_page_address.has_value()) {
             return std::move(opt_child_page_address).value();
-          else
+          } else {
+            std::clog << "bplus-tree: bad-tree, page has no child-pages\n";
+            intr->maybe_log_dump();
             return make_error_code(bplus_tree_errc::bad_tree);
+          }
         },
         std::move(path),
         asio::deferred);
@@ -3796,6 +4136,8 @@ class bplus_tree
             if (self_op.tree->address.file != self_op.page->address.file) [[unlikely]] {
               page_uplock.reset();
               tree_uplock.reset();
+              std::clog << "bplus-tree: bad-tree, tree and page are in different files (tree file: " << self_op.tree->address.file << ", page file: " << self_op.page->address.file << ")\n";
+              self_op.page->maybe_log_dump();
               self_op.error_invoke(make_error_code(bplus_tree_errc::bad_tree));
               return;
             }
@@ -4445,15 +4787,18 @@ class bplus_tree
             },
             tree->get_executor());
 
-        if constexpr(std::is_same_v<PageType, intr_type>) {
-          // Find index in parent page.
-          const std::optional<std::size_t> index_in_parent = ps->parent->find_index(ps->level_pages[0]->address);
-          if (!index_in_parent.has_value()) [[unlikely]] {
-            std::invoke(barrier, make_error_code(bplus_tree_errc::bad_tree));
-            return;
-          }
-          const std::size_t new_sibling_index_in_parent = index_in_parent.value() + 1u;
+        // Find index in parent page.
+        const std::optional<std::size_t> index_in_parent = ps->parent->find_index(ps->level_pages[0]->address);
+        if (!index_in_parent.has_value()) [[unlikely]] {
+          std::clog << "bplus-tree: bad-tree, page not found in parent\n";
+          ps->parent->maybe_log_dump("parent");
+          ps->level_pages[0]->maybe_log_dump("ps->level_pages[0]");
+          std::invoke(barrier, make_error_code(bplus_tree_errc::bad_tree));
+          return;
+        }
+        const std::size_t new_sibling_index_in_parent = index_in_parent.value() + 1u;
 
+        if constexpr(std::is_same_v<PageType, intr_type>) {
           // Truncate old page.
           ps->level_pages[0]->async_set_hdr_diskonly_op(tx, {.size=static_cast<std::uint32_t>(page->index_size()-shift)}, ++barrier);
 
@@ -4464,31 +4809,6 @@ class bplus_tree
           ps->level_pages[1]->async_set_elements_diskonly_op(tx, 0, page->element_multispan(copy_begin, copy_end), ++barrier);
           ps->level_pages[1]->async_set_augments_diskonly_op(tx, 0, page->augment_multispan(copy_begin, copy_end), ++barrier);
           ps->level_pages[1]->async_set_keys_diskonly_op(tx, 0, page->key_multispan(copy_begin, copy_end - 1u), ++barrier);
-
-          // Update parent page: shift existing elements.
-          ps->parent->async_set_hdr_diskonly_op(tx, {.size=static_cast<std::uint32_t>(ps->parent->index_size()+1u)}, ++barrier);
-          ps->parent->async_set_elements_diskonly_op(tx, new_sibling_index_in_parent + 1u, ps->parent->element_multispan(new_sibling_index_in_parent, ps->parent->index_size()), ++barrier);
-          ps->parent->async_set_augments_diskonly_op(tx, new_sibling_index_in_parent + 1u, ps->parent->augment_multispan(new_sibling_index_in_parent, ps->parent->index_size()), ++barrier);
-          ps->parent->async_set_keys_diskonly_op(tx, new_sibling_index_in_parent, ps->parent->key_multispan(new_sibling_index_in_parent - 1u, ps->parent->index_size() - 1u), ++barrier);
-
-          // Update parent page: install new page.
-          if constexpr(boost::endian::order::native == boost::endian::order::big) {
-            // No byte order conversion needed, so we write things directly.
-            ps->parent->async_set_elements_diskonly_op(tx, new_sibling_index_in_parent, std::as_bytes(std::span<const std::uint64_t, 1>(&ps->level_pages[1]->address.offset, 1)), ++barrier);
-          } else {
-            // We'll need a temporary buffer, to hold the endian-reversed type.
-            std::shared_ptr<std::uint64_t> new_sibling_offset_be = std::allocate_shared<std::uint64_t>(tx.get_allocator(), boost::endian::native_to_big(ps->level_pages[1]->address.offset));
-            ps->parent->async_set_elements_diskonly_op(tx, new_sibling_index_in_parent, std::as_bytes(std::span<const std::uint64_t, 1>(new_sibling_offset_be.get(), 1)),
-                completion_wrapper<void(std::error_code)>(
-                    ++barrier,
-                    [new_sibling_offset_be](auto handler, std::error_code ec) mutable {
-                      new_sibling_offset_be.reset();
-                      std::invoke(handler, ec);
-                    }));
-          }
-          // We copy the augment and key from the current page.
-          ps->parent->async_set_augments_diskonly_op(tx, new_sibling_index_in_parent, ps->parent->augment_span(*index_in_parent), ++barrier);
-          ps->parent->async_set_keys_diskonly_op(tx, new_sibling_index_in_parent - 1u, ps->level_pages[0]->key_span(copy_begin - 1u), ++barrier);
         } else {
           static_assert(std::is_same_v<PageType, leaf_type>);
 
@@ -4545,6 +4865,37 @@ class bplus_tree
           }
         }
 
+        // Update parent page: shift existing elements.
+        ps->parent->async_set_hdr_diskonly_op(tx, {.size=static_cast<std::uint32_t>(ps->parent->index_size()+1u)}, ++barrier);
+        if (new_sibling_index_in_parent < ps->parent->index_size()) {
+          ps->parent->async_set_elements_diskonly_op(tx, new_sibling_index_in_parent + 1u, ps->parent->element_multispan(new_sibling_index_in_parent, ps->parent->index_size()), ++barrier);
+          ps->parent->async_set_augments_diskonly_op(tx, new_sibling_index_in_parent + 1u, ps->parent->augment_multispan(new_sibling_index_in_parent, ps->parent->index_size()), ++barrier);
+          ps->parent->async_set_keys_diskonly_op(tx, new_sibling_index_in_parent, ps->parent->key_multispan(new_sibling_index_in_parent - 1u, ps->parent->index_size() - 1u), ++barrier);
+        }
+
+        // Update parent page: install new page.
+        if constexpr(boost::endian::order::native == boost::endian::order::big) {
+          // No byte order conversion needed, so we write things directly.
+          ps->parent->async_set_elements_diskonly_op(tx, new_sibling_index_in_parent, std::as_bytes(std::span<const std::uint64_t, 1>(&ps->level_pages[1]->address.offset, 1)), ++barrier);
+        } else {
+          // We'll need a temporary buffer, to hold the endian-reversed type.
+          std::shared_ptr<std::uint64_t> new_sibling_offset_be = std::allocate_shared<std::uint64_t>(tx.get_allocator(), boost::endian::native_to_big(ps->level_pages[1]->address.offset));
+          ps->parent->async_set_elements_diskonly_op(tx, new_sibling_index_in_parent, std::as_bytes(std::span<const std::uint64_t, 1>(new_sibling_offset_be.get(), 1)),
+              completion_wrapper<void(std::error_code)>(
+                  ++barrier,
+                  [new_sibling_offset_be](auto handler, std::error_code ec) mutable {
+                    new_sibling_offset_be.reset();
+                    std::invoke(handler, ec);
+                  }));
+        }
+        // We copy the augment and key from the current page.
+        ps->parent->async_set_augments_diskonly_op(tx, new_sibling_index_in_parent, ps->parent->augment_span(*index_in_parent), ++barrier);
+        if constexpr(std::is_same_v<PageType, intr_type>) {
+          ps->parent->async_set_keys_diskonly_op(tx, new_sibling_index_in_parent - 1u, ps->level_pages[0]->key_span(page->index_size() - shift - 1u), ++barrier);
+        } else {
+          ps->parent->async_set_keys_diskonly_op(tx, new_sibling_index_in_parent - 1u, (ps->rebalance.end() - shift)->elem->key_span(), ++barrier);
+        }
+
         // Mark both siblings as needing an update to their augmentation.
         ps->level_pages[0]->async_set_augment_propagation_required_diskonly_op(tx, ++barrier);
         ps->level_pages[1]->async_set_augment_propagation_required_diskonly_op(tx, ++barrier);
@@ -4573,11 +4924,25 @@ class bplus_tree
       }
 
       auto update_memory_representation(std::shared_ptr<page_selection> ps, std::uint32_t shift) -> void {
-        if constexpr(std::is_same_v<PageType, intr_type>) {
-          const std::optional<std::size_t> index_in_parent = ps->parent->find_index(ps->level_pages[0]->address);
-          assert(index_in_parent.has_value()); // Already accounted for in update_disk_representation.
-          const std::size_t new_sibling_index_in_parent = index_in_parent.value() + 1u;
+        const std::optional<std::size_t> index_in_parent = ps->parent->find_index(ps->level_pages[0]->address);
+        assert(index_in_parent.has_value()); // Already accounted for in update_disk_representation.
+        const std::size_t new_sibling_index_in_parent = index_in_parent.value() + 1u;
 
+        ps->parent->maybe_log_dump("parent before in-memory changes");
+        ps->level_pages[0]->maybe_log_dump("level_pages[0] before in-memory changes");
+
+        auto new_key = std::vector<std::byte, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::byte>>(tx_alloc);
+        if constexpr(std::is_same_v<PageType, intr_type>) {
+          auto span = ps->level_pages[0]->key_span(page->index_size() - shift - 1u);
+          new_key.resize(span.size());
+          std::copy(span.begin(), span.end(), new_key.begin());
+        } else {
+          auto span = (ps->rebalance.end() - shift)->elem->key_span();
+          new_key.resize(span.size());
+          std::copy(span.begin(), span.end(), new_key.begin());
+        }
+
+        if constexpr(std::is_same_v<PageType, intr_type>) {
           // Truncate old page.
           ps->level_pages[0]->hdr_.size -= shift;
 
@@ -4588,19 +4953,6 @@ class bplus_tree
           span_copy(ps->level_pages[1]->element_multispan(0, shift), page->element_multispan(copy_begin, copy_end));
           span_copy(ps->level_pages[1]->augment_multispan(0, shift), page->augment_multispan(copy_begin, copy_end));
           span_copy(ps->level_pages[1]->key_multispan(0, shift - 1u), page->key_multispan(copy_begin, copy_end - 1u));
-
-          // Update parent page: shift existing elements.
-          const auto parent_old_size = ps->parent->hdr_.size++;
-          span_copy(ps->parent->element_multispan(new_sibling_index_in_parent + 1u, ps->parent->hdr_.size), ps->parent->element_multispan(new_sibling_index_in_parent, parent_old_size));
-          span_copy(ps->parent->augment_multispan(new_sibling_index_in_parent + 1u, ps->parent->hdr_.size), ps->parent->augment_multispan(new_sibling_index_in_parent, parent_old_size));
-          span_copy(ps->parent->key_multispan(new_sibling_index_in_parent, ps->parent->hdr_.size - 1u), ps->parent->key_multispan(new_sibling_index_in_parent - 1u, parent_old_size - 1u));
-
-          // Update parent page: install new page.
-          const std::uint64_t new_sibling_offset_be = boost::endian::native_to_big(ps->level_pages[1]->address.offset);
-          span_copy(ps->parent->element_span(new_sibling_index_in_parent), std::as_bytes(std::span<const std::uint64_t, 1>(&new_sibling_offset_be, 1)));
-          // We copy the augment and key from the current page.
-          span_copy(ps->parent->augment_span(new_sibling_index_in_parent), ps->parent->augment_span(*index_in_parent));
-          span_copy(ps->parent->key_span(new_sibling_index_in_parent - 1u), ps->level_pages[0]->key_span(copy_begin - 1u));
         } else {
           static_assert(std::is_same_v<PageType, leaf_type>);
 
@@ -4627,8 +4979,40 @@ class bplus_tree
                   rebalance_item.elem->owner = ps->level_pages[rebalance_item.which_page];
                 rebalance_item.elem->index = rebalance_item.new_index;
               });
+          // Link shifted elements into the new page.
+          ps->level_pages[1]->elements_.insert(
+              ps->level_pages[1]->elements_.end(),
+              std::make_move_iterator(ps->level_pages[0]->elements_.end()) - shift,
+              std::make_move_iterator(ps->level_pages[0]->elements_.end()));
+          ps->level_pages[0]->elements_.erase(
+              ps->level_pages[0]->elements_.end() - shift,
+              ps->level_pages[0]->elements_.end());
+
+          // Update predecessor/successor references.
+          ps->level_pages[0]->hdr_.successor_page = ps->level_pages[1]->address.offset;
+          ps->level_pages[1]->hdr_.predecessor_page = ps->level_pages[0]->address.offset;
+          if (ps->level_pages[2] != nullptr) {
+            ps->level_pages[1]->hdr_.successor_page = ps->level_pages[2]->address.offset;
+            ps->level_pages[2]->hdr_.predecessor_page = ps->level_pages[1]->address.offset;
+          }
         }
 
+        // Update parent page: shift existing elements.
+        const auto parent_old_size = ps->parent->hdr_.size++;
+        if (new_sibling_index_in_parent < parent_old_size) {
+          span_copy(ps->parent->element_multispan(new_sibling_index_in_parent + 1u, ps->parent->hdr_.size), ps->parent->element_multispan(new_sibling_index_in_parent, parent_old_size));
+          span_copy(ps->parent->augment_multispan(new_sibling_index_in_parent + 1u, ps->parent->hdr_.size), ps->parent->augment_multispan(new_sibling_index_in_parent, parent_old_size));
+          span_copy(ps->parent->key_multispan(new_sibling_index_in_parent, ps->parent->hdr_.size - 1u), ps->parent->key_multispan(new_sibling_index_in_parent - 1u, parent_old_size - 1u));
+        }
+
+        // Update parent page: install new page.
+        const std::uint64_t new_sibling_offset_be = boost::endian::native_to_big(ps->level_pages[1]->address.offset);
+        span_copy(ps->parent->element_span(new_sibling_index_in_parent), std::as_bytes(std::span<const std::uint64_t, 1>(&new_sibling_offset_be, 1)));
+        // We copy the augment and key from the current page.
+        span_copy(ps->parent->augment_span(new_sibling_index_in_parent), ps->parent->augment_span(*index_in_parent));
+        span_copy(ps->parent->key_span(new_sibling_index_in_parent - 1u), std::span<const std::byte>(new_key.data(), new_key.size()));
+
+        // Update the splitted pages that they'll need to update augmentation.
         ps->level_pages[0]->augment_propagation_required = true;
         ps->level_pages[1]->augment_propagation_required = true;
 
@@ -4640,6 +5024,15 @@ class bplus_tree
         ++ps->level_pages[1]->versions.augment;
 
         // We're done \o/
+#if 1
+        std::clog << "Done splitting page \\o/\n";
+        ps->parent->maybe_log_dump("ps->parent");
+        for (std::size_t i = 0; i < ps->level_pages.size(); ++i) {
+          if (ps->level_pages[i] != nullptr)
+            ps->level_pages[i]->maybe_log_dump("ps->level_pages[" + std::to_string(i) + "]");
+        }
+        // if constexpr(std::is_same_v<PageType, intr_type>) assert(false);
+#endif
         done_invoke();
 
         // We want the augmentations to start updating, so we'll kick that off.
@@ -4809,7 +5202,8 @@ class bplus_tree
 
       // Figure out the start of the range to shift, if we shift things down.
       typename element_vector::const_iterator forw_shift_begin = insert_before_pos;
-      while (forw_shift_begin != elements.begin() && (*std::prev(forw_shift_begin))->index + 1u == (*forw_shift_begin)->index)
+      while (forw_shift_begin != elements.begin()
+          && (*std::prev(forw_shift_begin))->index + 1u == (forw_shift_begin == elements.end() ? path.leaf_page.page->spec->elements_per_leaf : (*forw_shift_begin)->index))
         --forw_shift_begin;
 
       // Figure out the end of the range to shift, if we shift things up.
@@ -4833,7 +5227,7 @@ class bplus_tree
       if (can_forw_shift && forw_shift_count == 0) {
         // No need for shifting, so skip the process entirely.
         do_ghost_insert(insert_before_pos, std::move(leaf_lock));
-      } else if (can_forw_shift && forw_shift_count <= back_shift_count) {
+      } else if (can_forw_shift && (forw_shift_count <= back_shift_count || !can_back_shift)) {
         shift_(forw_shift_begin, insert_before_pos, leaf_lock,
             std::integral_constant<int, -1>(),
             [ self_op=this->shared_from_this(),
@@ -5029,7 +5423,7 @@ class bplus_tree
       // We want the new element to in the middle of the free space.
       // That way, hopefully future inserts won't require any shifting.
       const auto max_index = (insert_before_pos == path.leaf_page.page->elements().end()
-          ?  path.leaf_page.page->spec->elements_per_leaf
+          ? path.leaf_page.page->spec->elements_per_leaf
           : (*insert_before_pos)->index) - 1u;
       const auto min_index = (insert_before_pos == path.leaf_page.page->elements().begin()
           ? 0u
@@ -5187,10 +5581,13 @@ class bplus_tree
           self->tree_walk_(
               [](cycle_ptr::cycle_gptr<intr_type> intr) -> std::variant<db_address, std::error_code> {
                 std::optional<db_address> addr = intr->get_index(0);
-                if (addr.has_value())
+                if (addr.has_value()) {
                   return std::move(addr).value();
-                else
+                } else {
+                  std::clog << "bplus-tree: bad-tree, page has no child at index 0\n";
+                  intr->maybe_log_dump();
                   return make_error_code(bplus_tree_errc::bad_tree);
+                }
               },
               tree_path<TxAlloc>(self, std::move(tx_alloc)),
               completion_wrapper<void(std::error_code, tree_path<TxAlloc>, monitor_shlock_type)>(
@@ -5198,12 +5595,18 @@ class bplus_tree
                   [](auto handler, std::error_code ec, tree_path<TxAlloc> path, monitor_shlock_type leaf_lock) {
                     cycle_ptr::cycle_gptr<element> elem_ptr;
 
-                    if (!ec && path.leaf_page.page->elements().empty()) [[unlikely]]
+                    if (!ec && path.leaf_page.page->elements().empty()) [[unlikely]] {
+                      std::clog << "bplus-tree: bad-tree, empty leaf-page\n";
+                      path.leaf_page.page->maybe_log_dump();
                       ec = make_error_code(bplus_tree_errc::bad_tree);
+                    }
 
                     if (!ec) {
                       elem_ptr = path.leaf_page.page->elements().front();
                       if (elem_ptr->type() != bplus_tree_leaf_use_element::before_first) [[unlikely]] {
+                        std::clog << "bplus-tree: bad-tree, last element is supposed to be " << bplus_tree_leaf_use_element::before_first
+                            << ", but is " << elem_ptr->type() << "\n";
+                        path.leaf_page.page->maybe_log_dump();
                         ec = make_error_code(bplus_tree_errc::bad_tree);
                         elem_ptr.reset();
                       }
@@ -5243,10 +5646,13 @@ class bplus_tree
           self->tree_walk_(
               [](cycle_ptr::cycle_gptr<intr_type> intr) -> std::variant<db_address, std::error_code> {
                 std::optional<db_address> addr = intr->get_index(intr->index_size() - 1u);
-                if (addr.has_value())
+                if (addr.has_value()) {
                   return std::move(addr).value();
-                else
+                } else {
+                  std::clog << "bplus-tree: bad-tree, page has no child at index " << (intr->index_size() - 1u) << "\n";
+                  intr->maybe_log_dump();
                   return make_error_code(bplus_tree_errc::bad_tree);
+                }
               },
               tree_path<TxAlloc>(self, std::move(tx_alloc)),
               completion_wrapper<void(std::error_code, tree_path<TxAlloc>, monitor_shlock_type)>(
@@ -5254,12 +5660,18 @@ class bplus_tree
                   [](auto handler, std::error_code ec, tree_path<TxAlloc> path, monitor_shlock_type leaf_lock) {
                     cycle_ptr::cycle_gptr<element> elem_ptr;
 
-                    if (!ec && path.leaf_page.page->elements().empty()) [[unlikely]]
+                    if (!ec && path.leaf_page.page->elements().empty()) [[unlikely]] {
+                      std::clog << "bplus-tree: bad-tree, empty leaf-page\n";
+                      path.leaf_page.page->maybe_log_dump();
                       ec = make_error_code(bplus_tree_errc::bad_tree);
+                    }
 
                     if (!ec) {
                       elem_ptr = path.leaf_page.page->elements().back();
                       if (elem_ptr->type() != bplus_tree_leaf_use_element::after_last) [[unlikely]] {
+                        std::clog << "bplus-tree: bad-tree, last element is supposed to be " << bplus_tree_leaf_use_element::after_last
+                            << ", but is " << elem_ptr->type() << "\n";
+                        path.leaf_page.page->maybe_log_dump();
                         ec = make_error_code(bplus_tree_errc::bad_tree);
                         elem_ptr.reset();
                       }

@@ -46,6 +46,7 @@ class fixture {
   explicit fixture(std::string_view name);
   ~fixture();
 
+  auto insert(std::string_view key, std::string_view value, bool sync) -> void;
   auto read_all() -> std::vector<read_kv_type>;
 
   asio::io_context ioctx;
@@ -95,6 +96,48 @@ NEW_TEST(insert) {
       }),
       read_all());
 }
+
+NEW_TEST(insert_many_sequentially) {
+  read_kv_vector expect;
+  for (int seq = 0; seq < 100 - 2 + 1; ++seq) {
+    auto key = std::string(
+        {
+          static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
+          static_cast<char>('a' + (seq / 26 / 26 % 26)),
+          static_cast<char>('a' + (seq / 26 % 26)),
+          static_cast<char>('a' + (seq % 26)),
+        });
+    auto value = std::to_string(seq % 10'000);
+
+    expect.emplace_back(key, value);
+    insert(key, value, true);
+
+    REQUIRE CHECK_EQUAL(expect, read_all());
+  }
+}
+
+#if 0
+NEW_TEST(insert_many_concurrently) {
+  read_kv_vector expect;
+  for (int seq = 0; seq < 100; ++seq) {
+    auto key = std::string(
+        {
+          static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
+          static_cast<char>('a' + (seq / 26 / 26 % 26)),
+          static_cast<char>('a' + (seq / 26 % 26)),
+          static_cast<char>('a' + (seq % 26)),
+        });
+    auto value = std::to_string(seq % 10'000);
+
+    expect.emplace_back(key, value);
+    insert(key, value, false);
+  }
+  ioctx.run();
+  ioctx.restart();
+
+  CHECK_EQUAL(expect, read_all());
+}
+#endif
 
 int main(int argc, char** argv) {
   if (argc < 2) {
@@ -159,8 +202,8 @@ fixture::fixture(std::string_view name)
                 .bytes=value_bytes,
               },
             },
-            .elements_per_leaf=1000,
-            .child_pages_per_intr=1000,
+            .elements_per_leaf=10,
+            .child_pages_per_intr=10,
           })),
   raw_db(cycle_ptr::make_cycle<raw_db_type>(ioctx.get_executor()))
 {
@@ -231,6 +274,52 @@ fixture::fixture(std::string_view name)
 
 fixture::~fixture() = default;
 
+auto fixture::insert(std::string_view key, std::string_view value, bool sync) -> void {
+  if (key.size() > key_bytes || value.size() > value_bytes) throw std::invalid_argument("key/value too long");
+
+  struct state {
+    state(std::string_view key, std::string_view value)
+    : key(key.begin(), key.end()),
+      value(value.begin(), value.end())
+    {
+      this->key.resize(key_bytes);
+      this->value.resize(value_bytes);
+    }
+
+    auto printable_key() const -> std::string_view {
+      std::string_view s = key;
+      while (!s.empty() && s.back() == '\0') s = s.substr(0, s.size() - 1u);
+      return s;
+    }
+
+    auto printable_value() const -> std::string_view {
+      std::string_view s = value;
+      while (!s.empty() && s.back() == '\0') s = s.substr(0, s.size() - 1u);
+      return s;
+    }
+
+    std::string key, value;
+    bool callback_called = false;
+  };
+  auto state_ptr = std::make_shared<state>(key, value);
+
+  tree->insert(
+      std::as_bytes(std::span<const char>(state_ptr->key.data(), state_ptr->key.size())),
+      std::as_bytes(std::span<const char>(state_ptr->value.data(), state_ptr->value.size())),
+      std::allocator<std::byte>(),
+      [state_ptr](std::error_code ec, [[maybe_unused]] auto elem_ref) {
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+        state_ptr->callback_called = true;
+        std::clog << "  inserted " << state_ptr->printable_key() << " => " << state_ptr->printable_value() << "\n";
+      });
+
+  if (sync) {
+    ioctx.run();
+    ioctx.restart();
+    REQUIRE CHECK(state_ptr->callback_called);
+  }
+}
+
 auto fixture::read_all() -> std::vector<read_kv_type> {
   std::vector<read_kv_type> elements;
   bool read_all_callback_called = false;
@@ -262,13 +351,19 @@ auto fixture::read_all() -> std::vector<read_kv_type> {
         }
       }
 
+      if (output.empty())
+        std::cerr << "read elements, but still empty :P\n";
+      else
+        std::cerr << "read elements, now up to '" << output.back().first << "'\n";
       callback(std::error_code{});
       return;
     }
 
     private:
     static auto byte_array_as_string(std::span<const std::byte> bytes) -> std::string {
-      return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+      auto s = std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+      while (!s.empty() && s.back() == '\0') s.pop_back();
+      return s;
     }
 
     std::vector<read_kv_type>& output;
