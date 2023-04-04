@@ -8,12 +8,14 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <utility>
 #include <variant>
 #include <vector>
 
 #include <earnest/detail/completion_handler_fun.h>
+#include <earnest/detail/completion_wrapper.h>
 #include <earnest/detail/move_only_function.h>
 #include <earnest/detail/overload.h>
 
@@ -74,12 +76,6 @@ class monitor<Executor, Allocator>::state
 : public std::enable_shared_from_this<monitor<Executor, Allocator>::state>
 {
   private:
-  enum class state_t {
-    idle,
-    shared,
-    waiting,
-  };
-
   using shared_fn_list = std::vector<shared_function, typename std::allocator_traits<allocator_type>::template rebind_alloc<shared_function>>;
   using queue_element = std::variant<exclusive_function, upgrade_function>;
   using queue_type = std::queue<
@@ -106,24 +102,16 @@ class monitor<Executor, Allocator>::state
   auto get_allocator() const -> allocator_type { return alloc_; }
 
   [[nodiscard]] auto try_shared() noexcept -> std::optional<shared_lock> {
-    std::unique_lock lck{mtx_};
-    if (exlocks == 0 && !want_exclusive() && pq_.empty()) {
-      assert(shlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-      ++shlocks;
-      lck.unlock();
-      return shared_lock(this->shared_from_this());
-    }
-
-    return std::nullopt;
+    std::lock_guard lck{mtx_};
+    return maybe_lock_shared();
   }
 
   auto add(shared_function&& fn) -> void {
     std::unique_lock lck{mtx_};
-    if (exlocks == 0 && !want_exclusive() && pq_.empty()) {
-      assert(shlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-      ++shlocks;
+    auto shlock = maybe_lock_shared();
+    if (shlock.has_value()) {
       lck.unlock();
-      std::invoke(fn, shared_lock(this->shared_from_this()), true);
+      std::invoke(fn, std::move(shlock).value(), true);
       return;
     }
 
@@ -131,24 +119,16 @@ class monitor<Executor, Allocator>::state
   }
 
   [[nodiscard]] auto try_upgrade() noexcept -> std::optional<upgrade_lock> {
-    std::unique_lock lck{mtx_};
-    if (exlocks == 0 && uplocks == 0 && !want_exclusive()) {
-      assert(uplocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-      ++uplocks;
-      lck.unlock();
-      return upgrade_lock(this->shared_from_this());
-    }
-
-    return std::nullopt;
+    std::lock_guard lck{mtx_};
+    return maybe_lock_upgrade();
   }
 
   auto add(upgrade_function&& fn) -> void {
     std::unique_lock lck{mtx_};
-    if (exlocks == 0 && uplocks == 0 && !want_exclusive()) {
-      assert(uplocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-      ++uplocks;
+    auto uplock = maybe_lock_upgrade();
+    if (uplock.has_value()) {
       lck.unlock();
-      std::invoke(fn, upgrade_lock(this->shared_from_this()), true);
+      std::invoke(fn, std::move(uplock).value(), true);
       return;
     }
 
@@ -156,28 +136,16 @@ class monitor<Executor, Allocator>::state
   }
 
   [[nodiscard]] auto try_exclusive() noexcept -> std::optional<exclusive_lock> {
-    std::unique_lock lck{mtx_};
-    if (exlocks == 0 && uplocks == 0 && shlocks == 0) {
-      assert(wq_.empty());
-      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-      ++exlocks;
-
-      lck.unlock();
-      return exclusive_lock(this->shared_from_this());
-    }
-
-    return std::nullopt;
+    std::lock_guard lck{mtx_};
+    return maybe_lock_exclusive();
   }
 
   auto add(exclusive_function&& fn) -> void {
     std::unique_lock lck{mtx_};
-    if (exlocks == 0 && uplocks == 0 && shlocks == 0) {
-      assert(wq_.empty());
-      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-      ++exlocks;
-
+    auto exlock = maybe_lock_exclusive();
+    if (exlock.has_value()) {
       lck.unlock();
-      std::invoke(fn, exclusive_lock(this->shared_from_this()), true);
+      std::invoke(fn, std::move(exlock).value(), true);
       return;
     }
 
@@ -185,129 +153,106 @@ class monitor<Executor, Allocator>::state
   }
 
   auto unlock_shared() -> void {
-    std::unique_lock lck{mtx_};
+    std::lock_guard lck{mtx_};
     assert(shlocks > 0);
     --shlocks;
     if (shlocks > 0) return;
 
     if (!pq_.empty()) {
       assert(uplocks >= pq_.size());
-      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max() - pq_.size());
-      uplocks -= pq_.size();
-      exlocks += pq_.size();
-      auto pending = std::move(pq_);
-      lck.unlock();
-
-      std::for_each(
-          std::make_move_iterator(pending.begin()), std::make_move_iterator(pending.end()),
-          [this](exclusive_function&& invocation) {
-            std::invoke(invocation, exclusive_lock(this->shared_from_this()), false);
-          });
-    } else if (!wq_.empty()) {
-      auto wq_front = std::move(wq_.front());
-      wq_.pop();
-      std::visit(
-          overload(
-              [this, &lck](exclusive_function&& fn) {
-                assert(this->exlocks == 0 && this->uplocks == 0 && this->shlocks == 0);
-                assert(this->exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-                ++this->exlocks;
-                lck.unlock();
-
-                std::invoke(fn, exclusive_lock(this->shared_from_this()), false);
-              },
-              [this, &lck](upgrade_function&& fn) {
-                assert(exlocks == 0);
-                assert(uplocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-                ++uplocks;
-                lck.unlock();
-
-                std::invoke(fn, upgrade_lock(this->shared_from_this()), false);
-              }),
-          std::move(wq_front));
+      if (exlocks == 0) {
+        std::for_each(
+            pq_.begin(), pq_.end(),
+            [this](exclusive_function& f) {
+              assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(exlocks)>>::max());
+              ++exlocks;
+              --uplocks;
+              std::invoke(f, exclusive_lock(this->shared_from_this()), false);
+            });
+        pq_.clear();
+      }
+      return;
     }
+
+    if (!wq_.empty() && std::holds_alternative<exclusive_function>(wq_.front())) {
+      auto exlock = maybe_lock_exclusive();
+      if (exlock.has_value()) {
+        exclusive_function f = std::get<exclusive_function>(std::move(wq_.front()));
+        wq_.pop();
+        std::invoke(f, std::move(exlock).value(), false);
+      }
+      return;
+    }
+
+    assert(shq_.empty());
   }
 
   auto unlock_upgrade() -> void {
-    std::unique_lock lck{mtx_};
+    std::lock_guard lck{mtx_};
     assert(uplocks > 0);
     --uplocks;
-    if (uplocks > 0 || exlocks > 0 || wq_.empty()) return;
 
-    if (std::holds_alternative<upgrade_function>(wq_.front())) {
-      assert(exlocks == 0);
-      assert(uplocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-      ++uplocks;
+    if (exlocks != 0) return;
+    if (!pq_.empty()) return;
 
-      upgrade_function wq_front = std::get<upgrade_function>(std::move(wq_.front()));
-      wq_.pop();
-      lck.unlock();
-
-      std::invoke(wq_front, upgrade_lock(this->shared_from_this()), false);
-    } else if (shlocks == 0) {
-      assert(exlocks == 0 && uplocks == 0 && shlocks == 0);
-      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-      ++exlocks;
-
-      exclusive_function wq_front = std::get<exclusive_function>(std::move(wq_.front()));
-      wq_.pop();
-      lck.unlock();
-
-      std::invoke(wq_front, exclusive_lock(this->shared_from_this()), false);
+    if (!wq_.empty()) {
+      if (std::holds_alternative<exclusive_function>(wq_.front())) {
+        auto exlock = maybe_lock_exclusive();
+        if (exlock.has_value()) {
+          exclusive_function f = std::get<exclusive_function>(std::move(wq_.front()));
+          wq_.pop();
+          std::invoke(f, std::move(exlock).value(), false);
+        }
+        return;
+      } else {
+        auto uplock = maybe_lock_upgrade();
+        if (uplock.has_value()) {
+          upgrade_function f = std::get<upgrade_function>(std::move(wq_.front()));
+          wq_.pop();
+          std::invoke(f, std::move(uplock).value(), false);
+        }
+      }
     }
+
+    assert(shq_.empty() || !maybe_lock_shared().has_value());
   }
 
   auto unlock_exclusive() -> void {
-    std::unique_lock lck{mtx_};
+    std::lock_guard lck{mtx_};
     assert(exlocks > 0);
     --exlocks;
-    if (exlocks > 0) return;
+
+    // While an exclusive lock is held, all upgrades succeed.
+    assert(pq_.empty());
+
+    // If there are still exclusive locks held, nothing can be locked.
+    if (exlocks != 0) return;
 
     if (!wq_.empty()) {
-      auto wq_front = std::move(wq_.front());
-      wq_.pop();
-      std::visit(
-          overload(
-              [this, &lck](exclusive_function&& fn) {
-                assert(this->exlocks == 0 && this->uplocks == 0 && this->shlocks == 0);
-                assert(this->exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-                ++this->exlocks;
-                lck.unlock();
-
-                std::invoke(fn, exclusive_lock(this->shared_from_this()), false);
-              },
-              [this, &lck](upgrade_function&& fn) {
-                assert(this->exlocks == 0);
-                assert(this->uplocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
-                ++this->uplocks;
-
-                assert(this->exlocks == 0 && this->pq_.empty());
-                assert(this->shlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max() - this->shq_.size());
-                this->shlocks += this->shq_.size();
-                auto shared = std::move(this->shq_);
-                lck.unlock();
-
-                std::invoke(fn, upgrade_lock(this->shared_from_this()), false);
-                std::for_each(
-                    std::make_move_iterator(shared.begin()), std::make_move_iterator(shared.end()),
-                    [this](shared_function&& invocation) {
-                      std::invoke(invocation, shared_lock(this->shared_from_this()), false);
-                    });
-              }),
-          std::move(wq_front));
-    } else {
-      assert(exlocks == 0 && pq_.empty());
-      assert(shlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max() - shq_.size());
-      shlocks += shq_.size();
-      auto shared = std::move(shq_);
-      lck.unlock();
-
-      std::for_each(
-          std::make_move_iterator(shared.begin()), std::make_move_iterator(shared.end()),
-          [this](shared_function&& invocation) {
-            std::invoke(invocation, shared_lock(this->shared_from_this()), false);
-          });
+      if (std::holds_alternative<exclusive_function>(wq_.front())) {
+        auto exlock = maybe_lock_exclusive();
+        if (exlock.has_value()) {
+          exclusive_function f = std::get<exclusive_function>(std::move(wq_.front()));
+          wq_.pop();
+          std::invoke(f, std::move(exlock).value(), false);
+        }
+        return;
+      } else {
+        auto uplock = maybe_lock_upgrade();
+        if (uplock.has_value()) {
+          upgrade_function f = std::get<upgrade_function>(std::move(wq_.front()));
+          wq_.pop();
+          std::invoke(f, std::move(uplock).value(), false);
+        }
+      }
     }
+
+    std::for_each(
+        shq_.begin(), shq_.end(),
+        [this](shared_function& f) {
+          std::invoke(f, this->maybe_lock_shared().value(), false);
+        });
+    shq_.clear();
   }
 
   auto shared_inc() noexcept -> void {
@@ -320,21 +265,21 @@ class monitor<Executor, Allocator>::state
   auto upgrade_inc() noexcept -> void {
     std::lock_guard lck{mtx_};
     assert(uplocks > 0);
-    assert(uplocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
+    assert(uplocks < std::numeric_limits<std::remove_cvref_t<decltype(uplocks)>>::max());
     ++uplocks;
   }
 
   auto exclusive_inc() noexcept -> void {
     std::lock_guard lck{mtx_};
     assert(exlocks > 0);
-    assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
+    assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(exlocks)>>::max());
     ++exlocks;
   }
 
   auto make_upgrade_lock_from_lock() noexcept -> upgrade_lock {
     std::lock_guard lck{mtx_};
     assert(exlocks > 0);
-    assert(uplocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
+    assert(uplocks < std::numeric_limits<std::remove_cvref_t<decltype(uplocks)>>::max());
     ++uplocks;
     return upgrade_lock(this->shared_from_this());
   }
@@ -344,7 +289,7 @@ class monitor<Executor, Allocator>::state
     std::unique_lock lck{mtx_};
     assert(uplocks > 0);
     if (shlocks == 0) {
-      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
+      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(exlocks)>>::max());
       --uplocks;
       ++exlocks;
       lck.unlock();
@@ -361,7 +306,7 @@ class monitor<Executor, Allocator>::state
     std::unique_lock lck{mtx_};
     assert(uplocks > 0);
     if (shlocks == 0) {
-      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(shlocks)>>::max());
+      assert(exlocks < std::numeric_limits<std::remove_cvref_t<decltype(exlocks)>>::max());
       --uplocks;
       ++exlocks;
       lck.unlock();
@@ -373,6 +318,33 @@ class monitor<Executor, Allocator>::state
   }
 
   private:
+  auto maybe_lock_exclusive() noexcept -> std::optional<exclusive_lock> {
+    if (exlocks != 0) return std::nullopt;
+    if (uplocks != 0) return std::nullopt;
+    if (shlocks != 0) return std::nullopt;
+
+    ++exlocks;
+    return exclusive_lock(this->shared_from_this());
+  }
+
+  auto maybe_lock_upgrade() noexcept -> std::optional<upgrade_lock> {
+    if (exlocks != 0) return std::nullopt;
+    if (uplocks != 0) return std::nullopt;
+
+    ++uplocks;
+    return upgrade_lock(this->shared_from_this());
+  }
+
+  auto maybe_lock_shared() noexcept -> std::optional<shared_lock> {
+    if (exlocks != 0) return std::nullopt;
+    if (!pq_.empty()) return std::nullopt;
+    if (uplocks == 0 && !wq_.empty() && std::holds_alternative<exclusive_function>(wq_.front())) return std::nullopt;
+
+    ++shlocks;
+    return shared_lock(this->shared_from_this());
+  }
+
+  [[deprecated]]
   auto want_exclusive() const -> bool {
     return exlocks == 0 && uplocks == 0 && !wq_.empty() && std::holds_alternative<exclusive_function>(wq_.front());
   }
@@ -562,9 +534,16 @@ class monitor<Executor, Allocator>::exclusive_lock {
   auto operator!() const noexcept -> bool { return !is_locked(); }
   auto holds_monitor(const monitor& m) const noexcept -> bool { return m.state_ == state_; }
 
-  auto as_upgrade_lock() const -> upgrade_lock {
+  auto as_upgrade_lock() const & -> upgrade_lock {
     if (state_ == nullptr) throw std::logic_error("lock not held");
     return state_->make_upgrade_lock_from_lock();
+  }
+
+  auto as_upgrade_lock() && -> upgrade_lock {
+    if (state_ == nullptr) throw std::logic_error("lock not held");
+    upgrade_lock uplock = state_->make_upgrade_lock_from_lock();
+    reset();
+    return uplock;
   }
 
   private:

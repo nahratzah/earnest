@@ -12,7 +12,7 @@ target_sources(asio_util
     include/earnest/detail/fanout.h
     include/earnest/detail/positional_stream_adapter.h)
 target_compile_features(asio_util INTERFACE cxx_std_17)
-target_link_libraries(asio_util INTERFACE asio)
+target_link_libraries(asio_util INTERFACE asio util)
 
 add_executable(completion_handler_fun_test)
 target_link_libraries(completion_handler_fun_test PUBLIC asio_util UnitTest++)
@@ -23,3 +23,8 @@ add_executable(completion_wrapper_test)
 target_link_libraries(completion_wrapper_test PUBLIC asio_util UnitTest++)
 target_sources(completion_wrapper_test PRIVATE tests/completion_wrapper.cc)
 add_test(NAME completion_wrapper COMMAND completion_wrapper_test)
+
+add_executable(monitor_test)
+target_link_libraries(monitor_test PUBLIC asio_util UnitTest++)
+target_sources(monitor_test PRIVATE tests/monitor.cc)
+add_test(NAME monitor COMMAND monitor_test)
