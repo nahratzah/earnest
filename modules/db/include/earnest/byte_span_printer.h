@@ -17,6 +17,11 @@ class byte_span_printer {
   : span(span)
   {}
 
+  template<std::size_t Extent>
+  explicit byte_span_printer(std::span<std::byte, Extent> span) noexcept
+  : span(span)
+  {}
+
   template<typename Traits>
   friend auto operator<<(std::basic_ostream<char, Traits>& out, const byte_span_printer& p) -> std::basic_ostream<char, Traits>& {
     using namespace std::literals;

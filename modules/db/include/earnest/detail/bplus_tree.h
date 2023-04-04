@@ -4347,13 +4347,168 @@ class bplus_tree
     };
 
     struct element_rebalancer_for_intr {
+      struct reparent_item {
+        reparent_item() = default;
+
+        explicit reparent_item(cycle_ptr::cycle_gptr<page_type> page)
+        : page(std::move(page))
+        {}
+
+        cycle_ptr::cycle_gptr<page_type> page;
+        monitor_uplock_type uplock;
+        monitor_exlock_type exlock;
+      };
+
+      using reparent_vector = std::vector<reparent_item, typename std::allocator_traits<TxAlloc>::template rebind_alloc<reparent_item>>;
+
       protected:
-      explicit element_rebalancer_for_intr([[maybe_unused]] const TxAlloc& tx_alloc) {}
+      explicit element_rebalancer_for_intr(const TxAlloc& tx_alloc)
+      : reparent(tx_alloc)
+      {}
+
       ~element_rebalancer_for_intr() = default;
 
       auto compute_rebalance([[maybe_unused]] const intr_type& intr, [[maybe_unused]] std::size_t shift) -> void {
         assert(false); // Should never be called.
       }
+
+      public:
+      auto load_child_pages(cycle_ptr::cycle_gptr<const intr_type> parent, std::size_t shift) {
+        return asio::async_initiate<decltype(asio::deferred), void(std::error_code)>(
+            [](auto handler, element_rebalancer_for_intr* self, cycle_ptr::cycle_gptr<const intr_type> parent, std::size_t shift) {
+              using handler_type = decltype(handler);
+
+              struct op
+              : public std::enable_shared_from_this<op>
+              {
+                op(element_rebalancer_for_intr* self,
+                    cycle_ptr::cycle_gptr<const intr_type> parent,
+                    std::size_t shift,
+                    handler_type handler)
+                : self(std::move(self)),
+                  parent(std::move(parent)),
+                  shift(std::move(shift)),
+                  handler(std::move(handler))
+                {}
+
+                auto operator()() -> void {
+                  auto raw_db = parent->raw_db.lock();
+                  if (raw_db == nullptr) {
+                    std::invoke(handler, make_error_code(db_errc::data_expired));
+                    return;
+                  }
+
+                  while (self->reparent.size() < shift) {
+                    page_type::async_load_op(
+                        parent->spec, raw_db,
+                        db_address(parent->address.file, parent->element(parent->index_size() - shift + self->reparent.size())),
+                        []() {
+                          // We hold the lock on parent, so there's no way this address can be invalidated.
+                          return asio::deferred.values(std::error_code());
+                        })
+                    | asio::deferred(
+                        [](std::error_code ec, std::variant<cycle_ptr::cycle_gptr<intr_type>, cycle_ptr::cycle_gptr<leaf_type>> page) {
+                          return asio::deferred.values(
+                              ec,
+                              std::visit(
+                                  [](cycle_ptr::cycle_gptr<page_type> page_ptr) -> cycle_ptr::cycle_gptr<page_type> {
+                                    return page_ptr;
+                                  },
+                                  std::move(page)));
+                        })
+                    | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<page_type> page) -> void {
+                        if (ec == make_error_code(bplus_tree_errc::restart)) {
+                          std::invoke(*self_op);
+                        } else if (ec) {
+                          std::invoke(self_op->handler, ec);
+                        } else {
+                          self_op->self->reparent.emplace_back(std::move(page));
+                          std::invoke(*self_op);
+                        }
+                      };
+                    return; // callback will restart the loop.
+                  }
+
+                  lock_for_upgrade();
+                }
+
+                private:
+                auto lock_for_upgrade(std::size_t i = 0) -> void {
+                  for (/* skip */; i < shift; ++i) {
+                    assert(!self->reparent[i].uplock.is_locked());
+
+                    auto opt_uplock = self->reparent[i].page->page_lock.try_upgrade();
+                    if (opt_uplock.has_value()) {
+                      self->reparent[i].uplock = std::move(opt_uplock).value();
+                    } else {
+                      self->reparent[i].page->page_lock.async_upgrade(
+                          [self_op=this->shared_from_this(), i](monitor_uplock_type uplock) -> void {
+                            self_op->self->reparent[i].uplock = std::move(uplock);
+                            self_op->lock_for_upgrade(i + 1u);
+                          });
+                    }
+                  }
+
+                  std::invoke(handler, std::error_code());
+                }
+
+                element_rebalancer_for_intr*const self;
+                const cycle_ptr::cycle_gptr<const intr_type> parent;
+                const std::size_t shift;
+                handler_type handler;
+              };
+
+              std::invoke(*std::allocate_shared<op>(self->reparent.get_allocator(), self, std::move(parent), std::move(shift), std::move(handler)));
+            },
+            asio::deferred, this, std::move(parent), std::move(shift));
+      }
+
+      auto exlock_reparent() {
+        return asio::async_initiate<decltype(asio::deferred), void()>(
+            [](auto handler, element_rebalancer_for_intr* self) {
+              using handler_type = decltype(handler);
+
+              struct op
+              : public std::enable_shared_from_this<op>
+              {
+                op(element_rebalancer_for_intr* self, handler_type handler)
+                : self(std::move(self)),
+                  handler(std::move(handler))
+                {}
+
+                auto operator()() -> void {
+                  (*this)(0);
+                }
+
+                auto operator()(std::size_t i) -> void {
+                  for (/* skip */; i < self->reparent.size(); ++i) {
+                    auto opt_exlock = std::move(self->reparent[i].uplock).try_exclusive();
+                    if (opt_exlock.has_value()) {
+                      self->reparent[i].exlock = std::move(opt_exlock).value();
+                    } else {
+                      std::move(self->reparent[i].uplock).async_exclusive(
+                          [self_op=this->shared_from_this(), i](monitor_exlock_type exlock) -> void {
+                            self_op->self->reparent[i].exlock = std::move(exlock);
+                            std::invoke(*self_op, i + 1u);
+                          });
+                      return; // callback will resume the loop
+                    }
+                  }
+
+                  std::invoke(handler);
+                }
+
+                private:
+                element_rebalancer_for_intr*const self;
+                handler_type handler;
+              };
+
+              std::invoke(*std::allocate_shared<op>(self->reparent.get_allocator(), self, std::move(handler)));
+            },
+            asio::deferred, this);
+      }
+
+      reparent_vector reparent;
     };
 
     using element_rebalancer = std::conditional_t<std::is_same_v<PageType, intr_type>, element_rebalancer_for_intr, element_rebalancer_for_leaf>;
@@ -4371,6 +4526,9 @@ class bplus_tree
             std::make_move_iterator(init_level_pages.end()),
             level_pages.begin());
       }
+
+      page_selection(const page_selection&) = delete;
+      page_selection(page_selection&&) = delete;
 
       auto reset() -> void {
         for (auto& l : exlocks) l.reset();
@@ -4678,11 +4836,25 @@ class bplus_tree
         for (const auto& locks : ps->exlocks)
           assert(!locks.is_locked());
 
-        return asio::async_initiate<decltype(asio::deferred), void(std::shared_ptr<page_selection>)>(
+        auto deferred_op = asio::async_initiate<decltype(asio::deferred), void(std::shared_ptr<page_selection>)>(
             [](auto handler, std::shared_ptr<page_selection> ps) -> void {
               std::invoke(exlock_op(std::move(ps)), move_only_function<void(std::shared_ptr<page_selection>)>(std::move(handler)));
             },
             asio::deferred, std::move(ps));
+
+        if constexpr(std::is_same_v<PageType, intr_type>) {
+          return std::move(deferred_op)
+          | asio::deferred(
+              [](std::shared_ptr<page_selection> ps) {
+                return ps->exlock_reparent()
+                | asio::deferred(
+                    [ps]() {
+                      return asio::deferred.values(ps);
+                    });
+              });
+        } else {
+          return std::move(deferred_op);
+        }
       }
 
       auto have_sibling(tx_type tx, cycle_ptr::cycle_gptr<intr_type> parent, cycle_ptr::cycle_gptr<PageType> sibling_page) {
@@ -4753,11 +4925,34 @@ class bplus_tree
                   });
             }
 
-            self_op.update_disk_representation(std::move(tx), std::move(ps));
+            self_op.decide_shift_and_lock_shifted_children(std::move(tx), std::move(ps));
           };
       }
 
-      auto update_disk_representation(tx_type tx, std::shared_ptr<page_selection> ps) {
+      auto decide_shift_and_lock_shifted_children(tx_type tx, std::shared_ptr<page_selection> ps) -> void {
+        auto get_shift = [this]() -> std::uint32_t {
+          if constexpr(std::is_same_v<PageType, intr_type>)
+            return this->page->index_size() / 2u;
+          else
+            return this->page->elements().size() / 2u;
+        };
+        const std::uint32_t shift = get_shift();
+
+        if constexpr(std::is_same_v<PageType, intr_type>) {
+          auto page = this->page; // Make a copy, since we'll move *this.
+          ps->load_child_pages(page, shift)
+          | [self_op=std::move(*this), tx, ps, shift](std::error_code ec) mutable {
+              if (ec)
+                self_op.error_invoke(ec);
+              else
+                self_op.update_disk_representation(tx, ps, shift);
+            };
+        } else {
+          update_disk_representation(std::move(tx), std::move(ps), std::move(shift));
+        }
+      }
+
+      auto update_disk_representation(tx_type tx, std::shared_ptr<page_selection> ps, std::uint32_t shift) -> void {
         assert(ps->uplocks[0].is_locked());
         assert(ps->uplocks[1].is_locked());
         assert(ps->uplocks[2].is_locked());
@@ -4765,13 +4960,6 @@ class bplus_tree
         auto page = this->page; // Make a copy, since we'll move *this.
         auto tree = this->tree; // Make a copy, since we'll move *this.
         [[maybe_unused]] auto tx_alloc = this->tx_alloc; // Make a copy, since we'll move *this.
-        auto get_shift = [page]() -> std::uint32_t {
-          if constexpr(std::is_same_v<PageType, intr_type>)
-            return page->index_size() / 2u;
-          else
-            return page->elements().size() / 2u;
-        };
-        const std::uint32_t shift = get_shift();
         if (shift == 0u) {
           // Not enough elements to shift.
           error_invoke(make_error_code(bplus_tree_errc::page_too_small_for_split));
@@ -4809,6 +4997,9 @@ class bplus_tree
           ps->level_pages[1]->async_set_elements_diskonly_op(tx, 0, page->element_multispan(copy_begin, copy_end), ++barrier);
           ps->level_pages[1]->async_set_augments_diskonly_op(tx, 0, page->augment_multispan(copy_begin, copy_end), ++barrier);
           ps->level_pages[1]->async_set_keys_diskonly_op(tx, 0, page->key_multispan(copy_begin, copy_end - 1u), ++barrier);
+
+          for (const auto& child_page : ps->reparent)
+            child_page.page->async_set_parent_diskonly_op(tx, ps->level_pages[1]->address.offset, ++barrier);
         } else {
           static_assert(std::is_same_v<PageType, leaf_type>);
 
@@ -4907,7 +5098,7 @@ class bplus_tree
         std::invoke(barrier, std::error_code());
       }
 
-      auto commit_to_disk(tx_type tx, std::shared_ptr<page_selection> ps, std::size_t shift) {
+      auto commit_to_disk(tx_type tx, std::shared_ptr<page_selection> ps, std::size_t shift) -> void {
         tx.async_commit(
             [self_op=std::move(*this), ps=std::move(ps), shift](std::error_code ec) mutable -> void {
               if (ec) {
@@ -4927,9 +5118,6 @@ class bplus_tree
         const std::optional<std::size_t> index_in_parent = ps->parent->find_index(ps->level_pages[0]->address);
         assert(index_in_parent.has_value()); // Already accounted for in update_disk_representation.
         const std::size_t new_sibling_index_in_parent = index_in_parent.value() + 1u;
-
-        ps->parent->maybe_log_dump("parent before in-memory changes");
-        ps->level_pages[0]->maybe_log_dump("level_pages[0] before in-memory changes");
 
         auto new_key = std::vector<std::byte, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::byte>>(tx_alloc);
         if constexpr(std::is_same_v<PageType, intr_type>) {
@@ -4953,6 +5141,9 @@ class bplus_tree
           span_copy(ps->level_pages[1]->element_multispan(0, shift), page->element_multispan(copy_begin, copy_end));
           span_copy(ps->level_pages[1]->augment_multispan(0, shift), page->augment_multispan(copy_begin, copy_end));
           span_copy(ps->level_pages[1]->key_multispan(0, shift - 1u), page->key_multispan(copy_begin, copy_end - 1u));
+
+          for (const auto& child_page : ps->reparent)
+            child_page.page->parent_offset = ps->level_pages[1]->address.offset;
         } else {
           static_assert(std::is_same_v<PageType, leaf_type>);
 
@@ -5024,7 +5215,7 @@ class bplus_tree
         ++ps->level_pages[1]->versions.augment;
 
         // We're done \o/
-#if 1
+#if 0
         std::clog << "Done splitting page \\o/\n";
         ps->parent->maybe_log_dump("ps->parent");
         for (std::size_t i = 0; i < ps->level_pages.size(); ++i) {
@@ -5759,6 +5950,224 @@ class bplus_tree
         token, this->shared_from_this(this), std::move(tx_alloc), std::forward<AcceptorFn>(acceptor));
   }
 
+  template<typename TreeLockType, typename CompletionToken>
+  requires std::same_as<TreeLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock>
+      || std::same_as<TreeLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock>
+      || std::same_as<TreeLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>
+  auto async_log_dump(std::ostream& out, TreeLockType tree_lock, CompletionToken&& token) const {
+    using namespace std::literals;
+
+    return asio::async_initiate<CompletionToken, void()>(
+        [](auto handler, cycle_ptr::cycle_gptr<const bplus_tree> self, std::ostream& out, TreeLockType tree_lock) -> void {
+          if (!tree_lock.holds_monitor(self->page_lock)) throw std::logic_error("tree not locked");
+
+          out << "tree " << self->address << (self->erased_ ? " (erased)"sv : ""sv) << "\n"sv;
+          if (self->erased_) {
+            std::invoke(handler);
+            return;
+          }
+
+          cycle_ptr::cycle_gptr<raw_db_type> raw_db = self->raw_db.lock();
+          if (raw_db == nullptr) {
+            out << "  raw-db is null\n"sv;
+            std::invoke(handler);
+            return;
+          }
+
+          async_log_dump_pg_(
+              out,
+              std::move(raw_db), self->spec,
+              self, std::move(tree_lock),
+              db_address(self->address.file, self->hdr_.root),
+              db_address(self->address.file, nil_page),
+              "  "s,
+              std::move(handler));
+        },
+        token, this->shared_from_this(this), std::ref(out), std::move(tree_lock));
+  }
+
+  template<typename CompletionToken>
+  auto async_log_dump(std::ostream& out, CompletionToken&& token) const {
+    return async_initiate<CompletionToken, void()>(
+        [](auto handler, cycle_ptr::cycle_gptr<const bplus_tree> self, std::ostream& out) -> void {
+          self->page_lock.async_shared(
+              completion_wrapper<void(typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock)>(
+                  std::move(handler),
+                  [self, &out](auto handler, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock tree_lock) {
+                    self->async_log_dump(out, std::move(tree_lock), std::move(handler));
+                  }));
+        },
+        token, this->shared_from_this(this), std::ref(out));
+  }
+
+  private:
+  template<typename LockType>
+  static auto async_log_dump_pg_(
+      std::ostream& out,
+      cycle_ptr::cycle_gptr<raw_db_type> raw_db, std::shared_ptr<const bplus_tree_spec> spec,
+      cycle_ptr::cycle_gptr<const void> from_ref, LockType&& from_lock,
+      db_address page_addr, db_address parent_addr,
+      std::string indent, move_only_function<void()> handler) -> void {
+    using namespace std::literals;
+    using page_variant = std::variant<cycle_ptr::cycle_gptr<intr_type>, cycle_ptr::cycle_gptr<leaf_type>>;
+
+    struct op
+    : public std::enable_shared_from_this<op>
+    {
+      op(std::ostream& out, std::string indent,
+          db_address parent_addr,
+          cycle_ptr::cycle_gptr<const void> from_ref, std::remove_cvref_t<LockType> from_lock,
+          cycle_ptr::cycle_gptr<raw_db_type> raw_db, std::shared_ptr<const bplus_tree_spec> spec,
+          move_only_function<void()> handler)
+      : out(out),
+        raw_db(std::move(raw_db)),
+        spec(std::move(spec)),
+        indent(std::move(indent)),
+        parent_addr(std::move(parent_addr)),
+        from_ref(std::move(from_ref)),
+        from_lock(std::move(from_lock)),
+        handler(std::move(handler))
+      {}
+
+      auto operator()(db_address page_addr) -> void {
+        // Under normal operation, you shouldn't hold a lock while loading a page.
+        // But this is a debug function, so we're kinda-okay with it.
+        page_type::async_load_op(
+            spec, raw_db, page_addr,
+            []() {
+              // Because we hold from_ref and from_lock.
+              return asio::deferred.values(std::error_code());
+            })
+        | [self_op=this->shared_from_this(), page_addr](std::error_code ec, page_variant page) -> void {
+            if (ec == make_error_code(bplus_tree_errc::restart)) {
+              std::invoke(*self_op, page_addr);
+            } else if (ec) {
+              self_op->out << self_op->first_indent() << "page "sv << page_addr << " error: "sv << ec << "("sv << ec.message() << ")\n"sv;
+              self_op->complete();
+            } else {
+              std::visit(
+                  [&](auto page_ptr) {
+                    if (page_ptr == nullptr) [[unlikely]] {
+                      self_op->out << self_op->first_indent() << "page "sv << page_addr << " nullptr\n"sv;
+                      self_op->complete();
+                    } else {
+                      page_ptr->page_lock.async_shared(
+                          [self_op, page_ptr](typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock lock) mutable -> void {
+                            self_op->print_page(std::move(page_ptr), std::move(lock));
+                          });
+                    }
+                  },
+                  std::move(page));
+            }
+          };
+      }
+
+      private:
+      auto print_page(cycle_ptr::cycle_gptr<const intr_type> page, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock lock) -> void {
+        print_page_header("interior page"sv, *page);
+        print_child_pages(std::move(page), std::move(lock));
+      }
+
+      auto print_child_pages(cycle_ptr::cycle_gptr<const intr_type> page, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock lock, std::size_t idx = 0) -> void {
+        for (/* skip */; idx < page->index_size(); ++idx) {
+          if (idx != 0)
+            out << indent << "key["sv <<  (idx - 1u) << "]: "sv << byte_span_printer(page->key_span(idx - 1u)) << "\n"sv;
+
+          if (page->element(idx) == nil_page) [[unlikely]] {
+            out << indent << "error: nil page";
+          } else {
+            std::string next_indent = indent;
+            next_indent += "  "sv;
+
+            async_log_dump_pg_(
+                out,
+                raw_db, spec,
+                page, lock,
+                db_address(page->address.file, page->element(idx)), page->address,
+                std::move(next_indent),
+                [self_op=this->shared_from_this(), page, lock, idx]() mutable {
+                  self_op->print_child_pages(std::move(page), std::move(lock), idx + 1u);
+                });
+            return; // callback will resume the loop
+          }
+        }
+
+        lock.reset();
+        complete();
+      }
+
+      auto print_page(cycle_ptr::cycle_gptr<const leaf_type> page, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock lock) -> void {
+        print_page_header("leaf page"sv, *page);
+        out << indent << "next_page_address: "sv << page->next_page_address() << "\n"sv
+            << indent << "prev_page_address: "sv << page->prev_page_address() << "\n"sv;
+        lock_elems(std::move(page), std::move(lock));
+      }
+
+      auto lock_elems(cycle_ptr::cycle_gptr<const leaf_type> page, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock lock) -> void {
+        while (elem_locks.size() < page->elements().size()) {
+          cycle_ptr::cycle_gptr<typename leaf_type::element> elem_ptr = page->elements().at(elem_locks.size());
+          auto opt_elem_lock = elem_ptr->element_lock.try_shared();
+          if (opt_elem_lock.has_value()) {
+            elem_locks.emplace_back(std::move(opt_elem_lock).value());
+          } else {
+            elem_ptr->element_lock.async_shared(
+                [ self_op=this->shared_from_this(),
+                  page=std::move(page),
+                  lock=std::move(lock)
+                ](typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock elem_lock) mutable {
+                  self_op->elem_locks.emplace_back(std::move(elem_lock));
+                  self_op->lock_elems(std::move(page), std::move(lock));
+                });
+            return; // Loop will be resumed from callback.
+          }
+        }
+
+        print_elems(std::move(page), std::move(lock));
+      }
+
+      auto print_elems(cycle_ptr::cycle_gptr<const leaf_type> page, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock lock) -> void {
+        for (const auto& elem_ptr : page->elements()) {
+          out << indent << "- "sv << elem_ptr->index << ": "sv << elem_ptr->type() << ", "sv
+              << byte_span_printer(elem_ptr->key_span()) << " => "sv << byte_span_printer(elem_ptr->value_span()) << "\n"sv;
+          if (elem_ptr->owner != page)
+            out << indent << "  error: wrong owner "sv << elem_ptr->owner << " (expected "sv << page << ")\n"sv;
+        }
+
+        lock.reset();
+        complete();
+      }
+
+      auto complete() -> void {
+        asio::post(raw_db->get_executor(), std::move(handler));
+      }
+
+      auto print_page_header(std::string_view type, const page_type& page) -> void {
+        out << first_indent() << type << " "sv << page.address << "\n"sv;
+        if (page.parent_page_address() != parent_addr)
+          out << indent << "parent address: "sv << page.parent_page_address() << " (expected: "sv << parent_addr << ")\n"sv;
+      }
+
+      auto first_indent() const -> std::string {
+        std::string s = indent;
+        if (s.size() >= 2) s[s.size() - 2u] = '-';
+        return s;
+      }
+
+      std::ostream& out;
+      std::vector<typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock> elem_locks;
+      const cycle_ptr::cycle_gptr<raw_db_type> raw_db;
+      const std::shared_ptr<const bplus_tree_spec> spec;
+      const std::string indent;
+      const db_address parent_addr;
+      [[maybe_unused]] const cycle_ptr::cycle_gptr<const void> from_ref;
+      [[maybe_unused]] const std::remove_cvref_t<LockType> from_lock;
+      move_only_function<void()> handler;
+    };
+
+    std::invoke(*std::make_shared<op>(out, std::move(indent), std::move(parent_addr), std::move(from_ref), std::move(from_lock), std::move(raw_db), std::move(spec), std::move(handler)), std::move(page_addr));
+  }
+
+  public:
   const db_address address;
 
   protected:

@@ -99,7 +99,7 @@ NEW_TEST(insert) {
 
 NEW_TEST(insert_many_sequentially) {
   read_kv_vector expect;
-  for (int seq = 0; seq < 100 - 2 + 1; ++seq) {
+  for (int seq = 0; seq < 1'000; ++seq) {
     auto key = std::string(
         {
           static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
@@ -111,15 +111,15 @@ NEW_TEST(insert_many_sequentially) {
 
     expect.emplace_back(key, value);
     insert(key, value, true);
-
-    REQUIRE CHECK_EQUAL(expect, read_all());
   }
+
+  REQUIRE CHECK_EQUAL(expect, read_all());
 }
 
 #if 0
 NEW_TEST(insert_many_concurrently) {
   read_kv_vector expect;
-  for (int seq = 0; seq < 100; ++seq) {
+  for (int seq = 0; seq < 1'000; ++seq) {
     auto key = std::string(
         {
           static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
@@ -307,10 +307,13 @@ auto fixture::insert(std::string_view key, std::string_view value, bool sync) ->
       std::as_bytes(std::span<const char>(state_ptr->key.data(), state_ptr->key.size())),
       std::as_bytes(std::span<const char>(state_ptr->value.data(), state_ptr->value.size())),
       std::allocator<std::byte>(),
-      [state_ptr](std::error_code ec, [[maybe_unused]] auto elem_ref) {
-        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+      [tree=this->tree, state_ptr](std::error_code ec, [[maybe_unused]] auto elem_ref) {
+        CHECK_EQUAL(std::error_code(), ec);
         state_ptr->callback_called = true;
         std::clog << "  inserted " << state_ptr->printable_key() << " => " << state_ptr->printable_value() << "\n";
+
+        if (ec)
+          tree->async_log_dump(std::clog, []() { /* skip */ });
       });
 
   if (sync) {
