@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <sstream>
 #include <type_traits>
 #include <utility>
 
@@ -19,6 +20,8 @@ struct db_address {
 
   auto operator<=>(const db_address& y) const noexcept = default;
 
+  auto to_string() const -> std::string;
+
   file_id file;
   std::uint64_t offset = 0;
 };
@@ -27,6 +30,12 @@ struct db_address {
 template<typename CharT, typename Traits>
 inline auto operator<<(std::basic_ostream<CharT, Traits>& out, const db_address& address) -> std::basic_ostream<CharT, Traits>& {
   return out << address.offset << "@" << address.file;
+}
+
+inline auto db_address::to_string() const -> std::string {
+  std::ostringstream s;
+  s << *this;
+  return std::move(s).str();
 }
 
 

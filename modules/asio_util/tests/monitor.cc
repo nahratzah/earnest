@@ -10,7 +10,7 @@ struct fixture {
 
   fixture()
   : ioctx(),
-    mon(ioctx.get_executor())
+    mon(ioctx.get_executor(), "fixture-mon")
   {}
 
   auto enqueue_shared() -> void {

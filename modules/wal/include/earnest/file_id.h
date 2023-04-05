@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <iosfwd>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -32,6 +33,8 @@ struct file_id {
   auto operator<=>(const file_id& y) const noexcept = default;
   auto operator==(const file_id& y) const noexcept -> bool = default;
 
+  auto to_string() const -> std::string;
+
   std::string ns; // Namespace in which the file is located.
   std::string filename; // Name of the file.
 };
@@ -48,6 +51,12 @@ inline auto operator<<(std::basic_ostream<CharT, Traits>& out, const file_id& fi
   using namespace std::string_view_literals;
 
   return out << "file_id{ns=\""sv << fid.ns << "\", filename=\""sv << fid.filename << "\"}"sv;
+}
+
+inline auto file_id::to_string() const -> std::string {
+  std::ostringstream s;
+  s << *this;
+  return std::move(s).str();
 }
 
 

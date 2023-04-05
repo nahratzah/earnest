@@ -543,9 +543,9 @@ struct bplus_tree_siblings {
                 deferred=asio::append(asio::deferred, locks...)
               ]() mutable {
                 if constexpr(ForWrite)
-                  return ptr->page_lock.dispatch_upgrade(std::move(deferred));
+                  return ptr->page_lock.dispatch_upgrade(std::move(deferred), __FILE__, __LINE__);
                 else
-                  return ptr->page_lock.dispatch_shared(std::move(deferred));
+                  return ptr->page_lock.dispatch_shared(std::move(deferred), __FILE__, __LINE__);
               });
     };
 
@@ -731,10 +731,10 @@ class bplus_tree_page
 
   public:
   explicit bplus_tree_page(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, const bplus_tree_page_header& h = bplus_tree_page_header{.parent=nil_page}) noexcept(std::is_nothrow_move_constructible_v<db_address>)
-  : address(std::move(address)),
+  : address(address),
     raw_db(raw_db),
     spec(std::move(spec)),
-    page_lock(raw_db->get_executor(), raw_db->get_allocator()),
+    page_lock(raw_db->get_executor(), "earnest::detail::bplus_tree_page{" + address.to_string() + "}", raw_db->get_allocator()),
     augment_propagation_required(h.augment_propagation_required),
     ex_(raw_db->get_executor()),
     alloc_(raw_db->get_cache_allocator()),
@@ -904,7 +904,8 @@ class bplus_tree_page
         self->page_lock.dispatch_shared(
             [self_op=this->shared_from_this()](monitor_shlock_type lock) mutable -> void {
               self_op->load_target_page(std::move(lock));
-            });
+            },
+            __FILE__, __LINE__);
       }
 
       private:
@@ -929,7 +930,7 @@ class bplus_tree_page
             std::move(raw_db),
             target_addr,
             [self_op=this->shared_from_this(), target_addr]() {
-              return self_op->self->page_lock.dispatch_shared(asio::deferred)
+              return self_op->self->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
               | asio::deferred(
                   [self_op, target_addr]([[maybe_unused]] monitor_shlock_type self_lock) {
                     std::error_code ec;
@@ -966,14 +967,16 @@ class bplus_tree_page
                 self_op=this->shared_from_this()
               ](monitor_uplock_type target_lock) mutable {
                 self_op->validate(std::move(target_page), std::move(target_lock));
-              });
+              },
+              __FILE__, __LINE__);
         } else {
           raw_ptr->page_lock.dispatch_shared(
               [ target_page=std::move(target_page),
                 self_op=this->shared_from_this()
               ](monitor_shlock_type target_lock) mutable {
                 self_op->validate(std::move(target_page), std::move(target_lock));
-              });
+              },
+              __FILE__, __LINE__);
         }
       }
 
@@ -1011,7 +1014,8 @@ class bplus_tree_page
                         self_op->error_invoke(make_error_code(bplus_tree_errc::bad_tree));
                       }),
                   std::move(target_page));
-            });
+            },
+            __FILE__, __LINE__);
       }
 
       static auto get_raw_ptr(const ptr_type& p) -> bplus_tree_page* {
@@ -1192,7 +1196,8 @@ class bplus_tree_page
                     false,
                     raw_db_allocator,
                     std::move(lock));
-              });
+              },
+              __FILE__, __LINE__);
         });
   }
 
@@ -1237,7 +1242,8 @@ class bplus_tree_page
         self->page_lock.dispatch_shared(
             [self_op=this->shared_from_this()](monitor_shlock_type lock) {
               std::invoke(*self_op, std::move(lock));
-            });
+            },
+            __FILE__, __LINE__);
       }
 
       auto operator()(monitor_shlock_type lock) -> void {
@@ -1292,7 +1298,8 @@ class bplus_tree_page
                         // We're done. Even if the page acquired a parent in the meantime.
                         self_lock.reset();
                         self_op->complete_invoke(nullptr);
-                      });
+                      },
+                      __FILE__, __LINE__);
                   return;
                 }
 
@@ -1332,7 +1339,8 @@ class bplus_tree_page
                   parent_lock.reset();
                   self_op->complete_invoke(parent);
                 }
-              });
+              },
+              __FILE__, __LINE__);
           return;
         }
 
@@ -1352,7 +1360,8 @@ class bplus_tree_page
                       self_op, tx, parent, offset
                     ](monitor_uplock_type self_uplock) {
                       self_op->commit(tx, std::move(parent), std::move(parent_lock), std::move(self_uplock), offset);
-                    });
+                    },
+                    __FILE__, __LINE__);
               }
             });
       }
@@ -1544,7 +1553,8 @@ class bplus_tree_page
         self->page_lock.dispatch_shared(
             [self_op=this->shared_from_this()](monitor_shlock_type lock) mutable -> void {
               self_op->load_target_page(std::move(lock));
-            });
+            },
+            __FILE__, __LINE__);
       }
 
       private:
@@ -1569,7 +1579,7 @@ class bplus_tree_page
             std::move(raw_db),
             target_addr,
             [self_op=this->shared_from_this(), target_addr]() mutable {
-              return self_op->self->page_lock.dispatch_shared(asio::append(asio::deferred, std::move(self_op), std::move(target_addr)))
+              return self_op->self->page_lock.dispatch_shared(asio::append(asio::deferred, std::move(self_op), std::move(target_addr)), __FILE__, __LINE__)
               | asio::deferred(
                   []([[maybe_unused]] monitor_shlock_type self_lock, std::shared_ptr<op> self_op, db_address target_addr) {
                     std::error_code ec;
@@ -1633,7 +1643,8 @@ class bplus_tree_page
                       self_op->validate(std::move(target_page), std::move(target_lock), std::move(self_lock));
                     });
               }
-            });
+            },
+            __FILE__, __LINE__);
       }
 
       auto validate(ptr_type target_page, target_lock_type target_lock, monitor_shlock_type self_lock) -> void {
@@ -2157,7 +2168,7 @@ class bplus_tree_leaf final
 
     element(executor_type ex, std::size_t index, cycle_ptr::cycle_gptr<bplus_tree_leaf> owner, typename raw_db_type::allocator_type alloc)
     : index(std::move(index)),
-      element_lock(std::move(ex), std::move(alloc)),
+      element_lock(std::move(ex), lock_name_(this), std::move(alloc)),
       owner(std::move(owner))
     {}
 
@@ -2267,7 +2278,7 @@ class bplus_tree_leaf final
         {}
 
         auto operator()() -> void {
-          elem->element_lock.async_shared(asio::deferred)
+          elem->element_lock.async_shared(asio::deferred, __FILE__, __LINE__)
           | asio::deferred(
               [self_op=this->shared_from_this()]([[maybe_unused]] monitor_shlock_type elem_shlock) {
                 return asio::deferred.values(cycle_ptr::cycle_gptr<bplus_tree_leaf>(self_op->elem->owner));
@@ -2275,12 +2286,12 @@ class bplus_tree_leaf final
           | asio::deferred(
               [](cycle_ptr::cycle_gptr<bplus_tree_leaf> owner) {
                 if constexpr(std::is_same_v<monitor_exlock_type, LeafLockType>) {
-                  return owner->page_lock.async_exclusive(asio::append(asio::deferred, owner));
+                  return owner->page_lock.async_exclusive(asio::append(asio::deferred, owner), __FILE__, __LINE__);
                 } else if constexpr(std::is_same_v<monitor_uplock_type, LeafLockType>) {
-                  return owner->page_lock.async_upgrade(asio::append(asio::deferred, owner));
+                  return owner->page_lock.async_upgrade(asio::append(asio::deferred, owner), __FILE__, __LINE__);
                 } else {
                   static_assert(std::is_same_v<monitor_shlock_type, LeafLockType>);
-                  return owner->page_lock.async_shared(asio::append(asio::deferred, owner));
+                  return owner->page_lock.async_shared(asio::append(asio::deferred, owner), __FILE__, __LINE__);
                 }
               })
           | [self_op=this->shared_from_this()](LeafLockType leaf_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf> owner) {
@@ -2308,6 +2319,12 @@ class bplus_tree_leaf final
       };
 
       std::invoke(*std::allocate_shared<op>(tx_alloc, this->shared_from_this(this), std::move(handler)));
+    }
+
+    static auto lock_name_(const void* this_ptr) -> std::string {
+      std::ostringstream s;
+      s << "earnest::detail::bplus_tree_leaf::element{" << this_ptr << "}";
+      return std::move(s).str();
     }
 
     public:
@@ -2464,7 +2481,8 @@ class bplus_tree_leaf final
 
               self_lock.reset(); // No longer need the lock.
               self_op->load_page(std::move(target));
-            });
+            },
+            __FILE__, __LINE__);
       }
 
       private:
@@ -2483,7 +2501,7 @@ class bplus_tree_leaf final
         bplus_tree_page<raw_db_type>::async_load_op(
             self->spec, raw_db, address,
             [self_page=this->self, address]() {
-              return self_page->page_lock.dispatch_shared(asio::deferred)
+              return self_page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
               | asio::deferred(
                   [self_page, address]([[maybe_unused]] monitor_shlock_type self_lock) {
                     std::error_code ec;
@@ -2519,12 +2537,12 @@ class bplus_tree_leaf final
 
         auto other_lock_op = [other_page](monitor_shlock_type self_lock) {
           if constexpr(std::is_same_v<LeafLockType, monitor_exlock_type>) {
-            return other_page->page_lock.dispatch_exclusive(asio::append(asio::deferred, other_page, std::move(self_lock)));
+            return other_page->page_lock.dispatch_exclusive(asio::append(asio::deferred, other_page, std::move(self_lock)), __FILE__, __LINE__);
           } else if constexpr(std::is_same_v<LeafLockType, monitor_uplock_type>) {
-            return other_page->page_lock.dispatch_upgrade(asio::append(asio::deferred, other_page, std::move(self_lock)));
+            return other_page->page_lock.dispatch_upgrade(asio::append(asio::deferred, other_page, std::move(self_lock)), __FILE__, __LINE__);
           } else {
             static_assert(std::is_same_v<LeafLockType, monitor_shlock_type>);
-            return other_page->page_lock.dispatch_shared(asio::append(asio::deferred, other_page, std::move(self_lock)));
+            return other_page->page_lock.dispatch_shared(asio::append(asio::deferred, other_page, std::move(self_lock)), __FILE__, __LINE__);
           }
         };
 
@@ -2532,14 +2550,14 @@ class bplus_tree_leaf final
         | asio::deferred(
             [](std::shared_ptr<op> self_op) {
               return asio::deferred.when(Direction > 0)
-                  .then(self_op->self->page_lock.async_shared(asio::deferred))
+                  .then(self_op->self->page_lock.async_shared(asio::deferred, __FILE__, __LINE__))
                   .otherwise(asio::deferred.values(monitor_shlock_type{}));
             })
         | asio::deferred(std::move(other_lock_op))
         | asio::deferred(
             [self_op=this->shared_from_this()](LeafLockType other_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf> other_leaf, monitor_shlock_type self_lock) {
               return asio::deferred.when(Direction < 0)
-                  .then(self_op->self->page_lock.async_shared(asio::append(asio::deferred, other_lock, other_leaf)))
+                  .then(self_op->self->page_lock.async_shared(asio::append(asio::deferred, other_lock, other_leaf), __FILE__, __LINE__))
                   .otherwise(asio::deferred.values(std::move(self_lock), other_lock, other_leaf));
             })
         | [self_op=this->shared_from_this()](monitor_shlock_type self_lock, LeafLockType other_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf> other_leaf) -> void {
@@ -2814,7 +2832,8 @@ class bplus_tree_leaf final
             [self_op=this->shared_from_this()](monitor_uplock_type lock) {
               self_op->page_uplock = std::move(lock);
               self_op->gather_cleanups();
-            });
+            },
+            __FILE__, __LINE__);
       }
 
       auto get_allocator() const -> typename cleanup_data_vector::allocator_type { return cleanups.get_allocator(); }
@@ -2826,7 +2845,7 @@ class bplus_tree_leaf final
 
         for (; idx < page->elements_.size(); ++idx) {
           const element_ptr& elem_ptr = page->elements_[idx];
-          std::optional<monitor_uplock_type> opt_elem_uplock = elem_ptr->element_lock.try_upgrade();
+          std::optional<monitor_uplock_type> opt_elem_uplock = elem_ptr->element_lock.try_upgrade(__FILE__, __LINE__);
           if (opt_elem_uplock.has_value()) {
             switch (elem_ptr->type()) {
               default:
@@ -2850,7 +2869,8 @@ class bplus_tree_leaf final
                       break;
                   }
                   self_op->gather_cleanups(idx + 1u);
-                });
+                },
+                __FILE__, __LINE__);
             return; // Callback will restart the loop.
           }
         }
@@ -3040,7 +3060,7 @@ class bplus_tree_leaf final
 
       auto lock_all(typename element_ptr_vector::iterator iter, bool skip_first) -> void {
         for (/* skip */; iter != ptr_vector.end(); ++iter) {
-          auto opt_elem_lock = iter->elem->element_lock.try_shared();
+          auto opt_elem_lock = iter->elem->element_lock.try_shared(__FILE__, __LINE__);
           if (opt_elem_lock.has_value()) {
             iter->lock = std::move(opt_elem_lock).value();
           } else {
@@ -3048,7 +3068,8 @@ class bplus_tree_leaf final
                 [self_op=this->shared_from_this(), iter, skip_first](monitor_shlock_type elem_lock) {
                   iter->lock = std::move(elem_lock);
                   self_op->lock_all(std::next(iter), skip_first);
-                });
+                },
+                __FILE__, __LINE__);
             return; // Callback will resume the loop.
           }
         }
@@ -3129,7 +3150,7 @@ class bplus_tree_leaf final
                 leaf->async_next_page(self_op->get_allocator(), asio::deferred)
                 | [self_op, leaf](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf> next_page, monitor_shlock_type next_page_lock, monitor_shlock_type leaf_lock) {
                     if (ec == make_error_code(db_errc::data_expired)) {
-                      self_op->last_elem->element_lock.async_shared(asio::deferred)
+                      self_op->last_elem->element_lock.async_shared(asio::deferred, __FILE__, __LINE__)
                       | [self_op, leaf, ec]([[maybe_unused]] monitor_shlock_type last_elem_lock) {
                           if (self_op->last_elem->owner == leaf) {
                             std::invoke(self_op->handler, ec);
@@ -3216,7 +3237,7 @@ class bplus_tree_leaf final
   template<bool ForWrite, typename GetAddrFn, typename InverseGetAddrFn>
   [[deprecated]]
   auto nextprev_page_op_(std::bool_constant<ForWrite> for_write, GetAddrFn get_addr_fn, InverseGetAddrFn inverse_get_addr_fn) {
-    return this->page_lock.async_shared(asio::deferred)
+    return this->page_lock.async_shared(asio::deferred, __FILE__, __LINE__)
     | asio::deferred(
         [ self=this->shared_from_this(this),
           for_write=std::move(for_write),
@@ -3354,7 +3375,8 @@ class bplus_tree_leaf final
                   (*augments)[i] = self->augments_for_value_(*eptr);
                   lock.reset();
                   std::invoke(handler, std::error_code());
-                }));
+                }),
+            __FILE__, __LINE__);
       }
     }
 
@@ -3455,10 +3477,10 @@ class bplus_tree
   static inline constexpr std::uint64_t nil_page = page_type::nil_page;
 
   bplus_tree(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, DBAllocator db_allocator) noexcept(std::is_nothrow_move_constructible_v<db_address>)
-  : address(std::move(address)),
+  : address(address),
     raw_db(raw_db),
     spec(std::move(spec)),
-    page_lock(raw_db->get_executor(), raw_db->get_allocator()),
+    page_lock(raw_db->get_executor(), "earnest::detail::bplus_tree{" + address.to_string() + "}", raw_db->get_allocator()),
     ex_(raw_db->get_executor()),
     alloc_(raw_db->get_cache_allocator()),
     db_alloc_(std::move(db_allocator))
@@ -3625,7 +3647,7 @@ class bplus_tree
           | asio::deferred(
               [self](std::error_code ec, cycle_ptr::cycle_gptr<leaf_type> leaf) {
                 return asio::deferred.when(!ec)
-                    .then(self->page_lock.dispatch_upgrade(asio::append(asio::deferred, ec, leaf)))
+                    .then(self->page_lock.dispatch_upgrade(asio::append(asio::deferred, ec, leaf), __FILE__, __LINE__))
                     .otherwise(asio::deferred.values(monitor_uplock_type(), ec, leaf));
               })
           | asio::deferred(
@@ -3674,7 +3696,7 @@ class bplus_tree
 
     auto self = this->shared_from_this(this);
 
-    return self->page_lock.dispatch_shared(asio::deferred)
+    return self->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
     | asio::deferred(
         [self](monitor_shlock_type tree_lock) {
           const auto load_offset = self->hdr_.root;
@@ -3691,7 +3713,7 @@ class bplus_tree
                       raw_db,
                       db_address(self->address.file, load_offset),
                       [self, load_offset]() {
-                        return self->page_lock.dispatch_shared(asio::deferred)
+                        return self->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
                         | asio::deferred(
                             [self, load_offset]([[maybe_unused]] monitor_shlock_type tree_lock) {
                               std::error_code ec;
@@ -3704,7 +3726,7 @@ class bplus_tree
                       [self, load_offset](std::error_code ec, page_variant page) {
                         return asio::deferred.when(!ec)
                             .then(
-                                self->page_lock.dispatch_shared(asio::append(asio::deferred, page))
+                                self->page_lock.dispatch_shared(asio::append(asio::deferred, page), __FILE__, __LINE__)
                                 | asio::deferred(
                                     [self, load_offset](monitor_shlock_type tree_lock, page_variant page) {
                                       std::error_code ec;
@@ -3714,8 +3736,7 @@ class bplus_tree
                                         ec = make_error_code(bplus_tree_errc::restart);
 
                                       return asio::deferred.values(std::move(ec), std::move(page), std::move(tree_lock));
-                                    }
-                                ))
+                                    }))
                             .otherwise(asio::deferred.values(ec, page, monitor_shlock_type{}));
                       }))
               .otherwise(asio::deferred.values(std::error_code(), page_variant(), tree_lock));
@@ -3842,7 +3863,7 @@ class bplus_tree
             };
         } else { // !path.interior_pages.empty()
           auto page = path.interior_pages.back().page; // Make a copy, since we'll move path.
-          page->page_lock.dispatch_shared(asio::deferred)
+          page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
           | [ self_op=std::move(*this),
               path=std::move(path)
             ](monitor_shlock_type last_page_lock) mutable -> void {
@@ -3872,12 +3893,12 @@ class bplus_tree
               self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
             };
         if constexpr(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock>) {
-          page->page_lock.dispatch_shared(std::move(callback));
+          page->page_lock.dispatch_shared(std::move(callback), __FILE__, __LINE__);
         } else if constexpr(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock>) {
-          page->page_lock.dispatch_upgrade(std::move(callback));
+          page->page_lock.dispatch_upgrade(std::move(callback), __FILE__, __LINE__);
         } else {
           static_assert(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>);
-          page->page_lock.dispatch_exclusive(std::move(callback));
+          page->page_lock.dispatch_exclusive(std::move(callback), __FILE__, __LINE__);
         }
       }
 
@@ -3891,7 +3912,8 @@ class bplus_tree
               std::visit([](auto& lock) { lock.reset(); }, parent_lock); // No longer needed, now that `page_lock` is locked.
               path.interior_pages.emplace_back(page);
               self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
-            });
+            },
+            __FILE__, __LINE__);
       }
 
       auto search_with_page_locked(tree_path<TxAlloc> path, [[maybe_unused]] cycle_ptr::cycle_gptr<leaf_type> page, LeafLockType page_lock) -> void {
@@ -3931,7 +3953,7 @@ class bplus_tree
         page_type::async_load_op(
             intr->spec, std::move(raw_db), child_page_address,
             [intr, child_page_address]() {
-              return intr->page_lock.dispatch_shared(asio::deferred)
+              return intr->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
               | asio::deferred(
                   [intr, child_page_address]([[maybe_unused]] monitor_shlock_type intr_lock) {
                     std::error_code ec;
@@ -3943,7 +3965,7 @@ class bplus_tree
         | asio::deferred(
             [intr](std::error_code ec, page_variant child_page) {
               return asio::deferred.when(!ec)
-                  .then(intr->page_lock.dispatch_shared(asio::append(asio::deferred, ec, child_page)))
+                  .then(intr->page_lock.dispatch_shared(asio::append(asio::deferred, ec, child_page), __FILE__, __LINE__))
                   .otherwise(asio::deferred.values(monitor_shlock_type{}, ec, child_page));
             })
         | [ self_op=std::move(*this),
@@ -4076,7 +4098,7 @@ class bplus_tree
         auto tree = this->tree; // Make a copy, since we'll move *this.
         auto page = this->page; // Make a copy, since we'll move *this.
         auto tx_alloc = this->tx_alloc; // Make a copy, since we'll move *this.
-        page->page_lock.dispatch_shared(asio::deferred)
+        page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
         | asio::deferred(
             [page](monitor_shlock_type page_shlock) {
               return page->async_compute_page_augments(asio::append(asio::deferred, page->versions, std::move(page_shlock)));
@@ -4106,10 +4128,10 @@ class bplus_tree
       auto verify_augment_and_install_page(tx_type tx, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) -> void {
         auto tree = this->tree; // Make a copy, since we'll move *this.
         auto page = this->page; // Make a copy, since we'll move *this.
-        tree->page_lock.dispatch_upgrade(asio::append(asio::deferred, std::move(parent_page), std::move(page_versions)))
+        tree->page_lock.dispatch_upgrade(asio::append(asio::deferred, std::move(parent_page), std::move(page_versions)), __FILE__, __LINE__)
         | asio::deferred(
             [page](monitor_uplock_type tree_uplock, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) {
-              return page->page_lock.dispatch_upgrade(asio::append(asio::deferred, std::move(tree_uplock), std::move(parent_page), std::move(page_versions)));
+              return page->page_lock.dispatch_upgrade(asio::append(asio::deferred, std::move(tree_uplock), std::move(parent_page), std::move(page_versions)), __FILE__, __LINE__);
             })
         | [tx, self_op=std::move(*this)](monitor_uplock_type page_uplock, monitor_uplock_type tree_uplock, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) mutable {
             if (self_op.page->erased_ || self_op.tree->erased_) [[unlikely]] {
@@ -4181,7 +4203,7 @@ class bplus_tree
 
       auto fix_augmentation(tx_type tx, cycle_ptr::cycle_gptr<intr_type> parent_page) -> void {
         auto page = this->page; // Make a copy, since we'll move *this.
-        page->page_lock.dispatch_shared(asio::deferred)
+        page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
         | asio::deferred(
             [page](monitor_shlock_type page_shlock) {
               return page->async_compute_page_augments(asio::append(asio::deferred, page->versions, std::move(page_shlock)));
@@ -4437,7 +4459,7 @@ class bplus_tree
                   for (/* skip */; i < shift; ++i) {
                     assert(!self->reparent[i].uplock.is_locked());
 
-                    auto opt_uplock = self->reparent[i].page->page_lock.try_upgrade();
+                    auto opt_uplock = self->reparent[i].page->page_lock.try_upgrade(__FILE__, __LINE__);
                     if (opt_uplock.has_value()) {
                       self->reparent[i].uplock = std::move(opt_uplock).value();
                     } else {
@@ -4445,7 +4467,8 @@ class bplus_tree
                           [self_op=this->shared_from_this(), i](monitor_uplock_type uplock) -> void {
                             self_op->self->reparent[i].uplock = std::move(uplock);
                             self_op->lock_for_upgrade(i + 1u);
-                          });
+                          },
+                          __FILE__, __LINE__);
                     }
                   }
 
@@ -4619,7 +4642,7 @@ class bplus_tree
         if constexpr(std::is_same_v<PageType, intr_type>) {
           return asio::deferred.values(std::error_code(), std::move(ps));
         } else {
-          return page->page_lock.dispatch_shared(asio::deferred)
+          return page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
           | asio::deferred(
               [page](monitor_shlock_type lock) {
                 db_address next_page_address = page->next_page_address();
@@ -4635,7 +4658,7 @@ class bplus_tree
                         page_type::async_load_op(
                             page->spec, raw_db, next_page_address,
                             [page, next_page_address]() {
-                              return page->page_lock.dispatch_shared(asio::deferred)
+                              return page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
                               | asio::deferred(
                                   [=]([[maybe_unused]] auto lock) {
                                     std::error_code ec;
@@ -4679,7 +4702,7 @@ class bplus_tree
               }
 
               if (next_page_to_lock != nullptr) {
-                auto opt_lock = next_page_to_lock->page_lock.try_upgrade();
+                auto opt_lock = next_page_to_lock->page_lock.try_upgrade(__FILE__, __LINE__);
                 if (opt_lock.has_value()) {
                   ps->uplocks[idx] = std::move(opt_lock).value();
                 } else {
@@ -4689,7 +4712,8 @@ class bplus_tree
                           [self_op=std::move(*this), idx](auto handler, monitor_uplock_type lock) mutable {
                             self_op.ps->uplocks[idx] = std::move(lock);
                             self_op.do_page_lock(std::move(handler), idx + 1u);
-                          }));
+                          }),
+                      __FILE__, __LINE__);
                   return; // Callback will restart this loop.
                 }
               }
@@ -4707,7 +4731,7 @@ class bplus_tree
               for (/*skip*/; idx < ps->rebalance.size(); ++idx) {
                 const typename leaf_type::element& elem_to_lock = *ps->rebalance[idx].elem;
 
-                auto opt_lock = elem_to_lock.element_lock.try_upgrade();
+                auto opt_lock = elem_to_lock.element_lock.try_upgrade(__FILE__, __LINE__);
                 if (opt_lock.has_value()) {
                   ps->rebalance[idx].uplock = std::move(opt_lock).value();
                 } else {
@@ -4720,7 +4744,8 @@ class bplus_tree
                           [self_op=*this, idx](auto handler, monitor_uplock_type lock) mutable {
                             self_op.ps->rebalance[idx].uplock = std::move(lock);
                             self_op.do_elem_lock(std::move(handler), idx + 1u);
-                          }));
+                          }),
+                      __FILE__, __LINE__);
                   return; // Callback will restart this loop.
                 }
               }
@@ -4901,7 +4926,8 @@ class bplus_tree
               }
 
               self_op.continue_with_locked_parent(std::move(tx), std::move(ps));
-            });
+            },
+            __FILE__, __LINE__);
       }
 
       auto continue_with_locked_parent([[maybe_unused]] tx_type tx, std::shared_ptr<page_selection> ps) -> void {
@@ -5215,15 +5241,6 @@ class bplus_tree
         ++ps->level_pages[1]->versions.augment;
 
         // We're done \o/
-#if 0
-        std::clog << "Done splitting page \\o/\n";
-        ps->parent->maybe_log_dump("ps->parent");
-        for (std::size_t i = 0; i < ps->level_pages.size(); ++i) {
-          if (ps->level_pages[i] != nullptr)
-            ps->level_pages[i]->maybe_log_dump("ps->level_pages[" + std::to_string(i) + "]");
-        }
-        // if constexpr(std::is_same_v<PageType, intr_type>) assert(false);
-#endif
         done_invoke();
 
         // We want the augmentations to start updating, so we'll kick that off.
@@ -5363,7 +5380,7 @@ class bplus_tree
         const typename element_vector::const_iterator m = b + delta / 2u;
         assert(b <= m && m < e);
 
-        auto opt_elem_shlock = (*m)->element_lock.try_shared();
+        auto opt_elem_shlock = (*m)->element_lock.try_shared(__FILE__, __LINE__);
         if (opt_elem_shlock.has_value()) {
           if ((*m)->key_compare(key_span()) == std::strong_ordering::greater)
             e = m;
@@ -5379,7 +5396,8 @@ class bplus_tree
                   elem_shlock.reset();
                   self_op->find_insert_position(m + 1, e, std::move(leaf_lock));
                 }
-              });
+              },
+              __FILE__, __LINE__);
           return; // Callback will restart the loop.
         }
       }
@@ -5560,7 +5578,7 @@ class bplus_tree
     template<typename Handler>
     auto shift_lock_all_for_upgrade_impl_(typename shift_elem_vector::iterator i, Handler&& handler) -> void {
       for (/* skip */; i != shift_elems.end(); ++i) {
-        auto opt_elem_uplock = i->elem->element_lock.try_upgrade();
+        auto opt_elem_uplock = i->elem->element_lock.try_upgrade(__FILE__, __LINE__);
         if (opt_elem_uplock.has_value()) {
           i->uplock = std::move(opt_elem_uplock).value();
         } else {
@@ -5571,7 +5589,8 @@ class bplus_tree
               ](monitor_uplock_type elem_uplock) mutable {
                 i->uplock = std::move(elem_uplock);
                 self_op->shift_lock_all_for_upgrade_impl_(std::next(i), std::move(handler));
-              });
+              },
+              __FILE__, __LINE__);
           return; // Callback will resume the loop.
         }
       }
@@ -5668,18 +5687,20 @@ class bplus_tree
           })
       | asio::deferred(
           [self_op=this->shared_from_this(), new_element](std::error_code ec) {
-            return asio::deferred.when(!ec)
-                .then(new_element->template async_lock_owner<monitor_shlock_type>(self_op->get_allocator(), asio::append(asio::deferred, ec)))
-                .otherwise(asio::deferred.values(cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>>{}, monitor_shlock_type{}, ec));
-          })
-      | asio::deferred(
-          [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, std::error_code ec) {
+            assert(self_op->shift_elems.empty());
+
             // Clear tree path. Path elements are likely to be invalidated.
             // And in any way, we no longer need them.
             // By releasing them, we allow the cache to forget about them.
             // It's good to be nice to the cache.
             self_op->path.clear();
 
+            return asio::deferred.when(!ec)
+                .then(new_element->template async_lock_owner<monitor_shlock_type>(self_op->get_allocator(), asio::append(asio::deferred, ec)))
+                .otherwise(asio::deferred.values(cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>>{}, monitor_shlock_type{}, ec));
+          })
+      | asio::deferred(
+          [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, std::error_code ec) {
             // We release all our locks while doing the augmentation, which can take a long time.
             // That way, other operations (both read and write) can take place.
             return asio::deferred.when(!ec)
@@ -5695,6 +5716,8 @@ class bplus_tree
     }
 
     auto promote_element(bplus_element_reference<raw_db_type, false> elem_ref) -> void {
+      assert(shift_elems.empty());
+
       auto raw_db = tree->raw_db.lock();
       if (raw_db == nullptr) [[unlikely]] {
         error_invoke(make_error_code(db_errc::data_expired));
@@ -5702,30 +5725,30 @@ class bplus_tree
       }
       tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, get_allocator());
 
-      elem_ref->template async_lock_owner<monitor_shlock_type>(this->get_allocator(), asio::deferred)
+      elem_ref->template async_lock_owner<monitor_uplock_type>(this->get_allocator(), asio::deferred)
       | asio::deferred(
-          [elem_ref](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock) {
-            return elem_ref->element_lock.async_upgrade(asio::append(asio::deferred, std::move(leaf), std::move(leaf_lock)));
+          [elem_ref](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
+            return elem_ref->element_lock.async_upgrade(asio::append(asio::deferred, std::move(leaf), std::move(leaf_lock)), __FILE__, __LINE__);
           })
       | asio::deferred(
-          [tx, elem_ref](monitor_uplock_type elem_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock) {
+          [tx, elem_ref](monitor_uplock_type elem_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
             return leaf->async_set_use_list_diskonly_op(tx, elem_ref->index, bplus_tree_leaf_use_element::used,
                 asio::append(asio::deferred, leaf, std::move(leaf_lock), std::move(elem_lock)));
           })
       | asio::deferred(
-          [tx](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, monitor_uplock_type elem_lock) mutable {
+          [tx](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, monitor_uplock_type elem_lock) mutable {
             return asio::deferred.when(!ec)
                 .then(tx.async_commit(asio::append(asio::deferred, leaf, leaf_lock, elem_lock)))
                 .otherwise(asio::deferred.values(ec, leaf, leaf_lock, elem_lock));
           })
       | asio::deferred(
-          [](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, monitor_uplock_type elem_lock) {
+          [](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, monitor_uplock_type elem_lock) {
             return asio::deferred.when(!ec)
                 .then(elem_lock.async_exclusive(asio::append(asio::deferred, ec, leaf, leaf_lock)))
                 .otherwise(asio::deferred.values(monitor_exlock_type{}, ec, leaf, leaf_lock));
           })
       | asio::deferred(
-          [elem_ref]([[maybe_unused]] monitor_exlock_type elem_lock, std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, [[maybe_unused]] monitor_shlock_type leaf_lock) {
+          [elem_ref]([[maybe_unused]] monitor_exlock_type elem_lock, std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, [[maybe_unused]] monitor_uplock_type leaf_lock) {
             if (!ec) leaf->use_list_span()[elem_ref->index] = bplus_tree_leaf_use_element::used;
             return asio::deferred.values(ec);
           })
@@ -5820,7 +5843,8 @@ class bplus_tree
                                 auto elem_ref = elem_ref_type(std::move(elem_ptr), elem_lock);
                                 elem_lock.reset(); // No longer need the element-lock.
                                 std::invoke(handler, std::error_code{}, std::move(elem_ref));
-                              }));
+                              }),
+                          __FILE__, __LINE__);
                     }
                   }));
         },
@@ -5885,7 +5909,8 @@ class bplus_tree
                                 auto elem_ref = elem_ref_type(std::move(elem_ptr), elem_lock);
                                 elem_lock.reset(); // No longer need the element-lock.
                                 std::invoke(handler, std::error_code{}, std::move(elem_ref));
-                              }));
+                              }),
+                          __FILE__, __LINE__);
                     }
                   }));
         },
@@ -5995,7 +6020,8 @@ class bplus_tree
                   std::move(handler),
                   [self, &out](auto handler, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock tree_lock) {
                     self->async_log_dump(out, std::move(tree_lock), std::move(handler));
-                  }));
+                  }),
+              __FILE__, __LINE__);
         },
         token, this->shared_from_this(this), std::ref(out));
   }
@@ -6054,7 +6080,8 @@ class bplus_tree
                       page_ptr->page_lock.async_shared(
                           [self_op, page_ptr](typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock lock) mutable -> void {
                             self_op->print_page(std::move(page_ptr), std::move(lock));
-                          });
+                          },
+                          __FILE__, __LINE__);
                     }
                   },
                   std::move(page));
@@ -6106,7 +6133,7 @@ class bplus_tree
       auto lock_elems(cycle_ptr::cycle_gptr<const leaf_type> page, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock lock) -> void {
         while (elem_locks.size() < page->elements().size()) {
           cycle_ptr::cycle_gptr<typename leaf_type::element> elem_ptr = page->elements().at(elem_locks.size());
-          auto opt_elem_lock = elem_ptr->element_lock.try_shared();
+          auto opt_elem_lock = elem_ptr->element_lock.try_shared(__FILE__, __LINE__);
           if (opt_elem_lock.has_value()) {
             elem_locks.emplace_back(std::move(opt_elem_lock).value());
           } else {
@@ -6117,7 +6144,8 @@ class bplus_tree
                 ](typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock elem_lock) mutable {
                   self_op->elem_locks.emplace_back(std::move(elem_lock));
                   self_op->lock_elems(std::move(page), std::move(lock));
-                });
+                },
+                __FILE__, __LINE__);
             return; // Loop will be resumed from callback.
           }
         }

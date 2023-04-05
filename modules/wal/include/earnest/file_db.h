@@ -948,7 +948,7 @@ class transaction {
     m_(m),
     writes_map_(std::allocate_shared<writes_map>(allocator, allocator)),
     read_barrier_(fdb->get_executor(), allocator),
-    writes_mon_(fdb->get_executor(), allocator),
+    writes_mon_(fdb->get_executor(), "file_db::transaction", allocator),
     wait_for_writes_(fdb->get_executor(), allocator),
     on_commit_events_(std::allocate_shared<detail::on_commit_events<allocator_type>>(allocator, allocator))
   {

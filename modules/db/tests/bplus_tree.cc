@@ -116,7 +116,6 @@ NEW_TEST(insert_many_sequentially) {
   REQUIRE CHECK_EQUAL(expect, read_all());
 }
 
-#if 0
 NEW_TEST(insert_many_concurrently) {
   read_kv_vector expect;
   for (int seq = 0; seq < 1'000; ++seq) {
@@ -137,7 +136,6 @@ NEW_TEST(insert_many_concurrently) {
 
   CHECK_EQUAL(expect, read_all());
 }
-#endif
 
 int main(int argc, char** argv) {
   if (argc < 2) {

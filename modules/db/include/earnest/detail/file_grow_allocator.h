@@ -19,12 +19,12 @@ class file_grow_allocator {
   using executor_type = typename raw_db_type::executor_type;
   using allocator_type = typename raw_db_type::allocator_type;
 
-  file_grow_allocator(const cycle_ptr::cycle_gptr<raw_db_type>& raw_db, file_id id)
+  file_grow_allocator(const cycle_ptr::cycle_gptr<raw_db_type>& raw_db, const file_id& id)
   : raw_db_(raw_db),
-    id_(std::move(id)),
+    id_(id),
     ex_(raw_db->get_executor()),
     alloc_(raw_db->get_allocator()),
-    lock_(raw_db->get_executor(), raw_db->get_allocator())
+    lock_(raw_db->get_executor(), "file_grow_allocator{" + id.to_string() + "}", raw_db->get_allocator())
   {}
 
   auto id() const noexcept -> const file_id& {
