@@ -1238,6 +1238,9 @@ class bplus_tree_page
         must_complete(must_complete)
       {}
 
+      op(const op&) = delete;
+      op(op&&) = delete;
+
       auto operator()() -> void {
         self->page_lock.dispatch_shared(
             [self_op=this->shared_from_this()](monitor_shlock_type lock) {
@@ -1579,7 +1582,7 @@ class bplus_tree_page
             std::move(raw_db),
             target_addr,
             [self_op=this->shared_from_this(), target_addr]() mutable {
-              return self_op->self->page_lock.dispatch_shared(asio::append(asio::deferred, std::move(self_op), std::move(target_addr)), __FILE__, __LINE__)
+              return self_op->self->page_lock.dispatch_shared(asio::append(asio::deferred, self_op, std::move(target_addr)), __FILE__, __LINE__)
               | asio::deferred(
                   []([[maybe_unused]] monitor_shlock_type self_lock, std::shared_ptr<op> self_op, db_address target_addr) {
                     std::error_code ec;
@@ -1630,7 +1633,7 @@ class bplus_tree_page
                 raw_ptr->page_lock.dispatch_upgrade(
                     [ target_page=std::move(target_page),
                       self_lock=std::move(self_lock),
-                      self_op=std::move(self_op)
+                      self_op
                     ](monitor_uplock_type target_lock) mutable {
                       self_op->validate(std::move(target_page), std::move(target_lock), std::move(self_lock));
                     });
@@ -1638,7 +1641,7 @@ class bplus_tree_page
                 raw_ptr->page_lock.dispatch_shared(
                     [ target_page=std::move(target_page),
                       self_lock=std::move(self_lock),
-                      self_op=std::move(self_op)
+                      self_op
                     ](monitor_shlock_type target_lock) mutable {
                       self_op->validate(std::move(target_page), std::move(target_lock), std::move(self_lock));
                     });
@@ -2277,6 +2280,9 @@ class bplus_tree_leaf final
           handler(std::move(handler))
         {}
 
+        op(const op&) = delete;
+        op(op&&) = delete;
+
         auto operator()() -> void {
           elem->element_lock.async_shared(asio::deferred, __FILE__, __LINE__)
           | asio::deferred(
@@ -2464,6 +2470,9 @@ class bplus_tree_leaf final
       : self(std::move(self)),
         handler(std::move(handler))
       {}
+
+      op(const op&) = delete;
+      op(op&&) = delete;
 
       auto operator()() -> void {
         self->page_lock.dispatch_shared(
@@ -2827,6 +2836,9 @@ class bplus_tree_leaf final
         cleanups(raw_db->get_allocator())
       {}
 
+      op(const op&) = delete;
+      op(op&&) = delete;
+
       auto operator()() -> void {
         page->page_lock.dispatch_upgrade(
             [self_op=this->shared_from_this()](monitor_uplock_type lock) {
@@ -3017,6 +3029,9 @@ class bplus_tree_leaf final
         acceptor(std::move(acceptor)),
         handler(std::move(handler))
       {}
+
+      op(const op&) = delete;
+      op(op&&) = delete;
 
       auto get_allocator() const -> allocator_type { return ptr_vector.get_allocator(); }
 
@@ -3786,31 +3801,33 @@ class bplus_tree
         []<typename HandlerType>(HandlerType handler, cycle_ptr::cycle_gptr<bplus_tree> self, TxAlloc tx_alloc) -> void {
           using handler_type = decltype(completion_handler_fun(std::declval<HandlerType>(), std::declval<executor_type>()));
 
-          struct op {
+          struct op
+          : public std::enable_shared_from_this<op>
+          {
             explicit op(cycle_ptr::cycle_gptr<bplus_tree> tree, handler_type handler, TxAlloc tx_alloc)
             : handler(std::move(handler)),
               tx_alloc(std::move(tx_alloc)),
               tree(std::move(tree))
             {}
 
+            op(const op&) = delete;
+            op(op&&) = delete;
+
             auto operator()() -> void {
               const cycle_ptr::cycle_gptr<bplus_tree> tree = this->tree; // copy, so we can move self_op.
               tree->load_root_page_nocreate_op_()
-              | [ self_op=std::move(*this)
+              | [ self_op=this->shared_from_this()
                 ](std::error_code ec, page_variant root_page, monitor_shlock_type tree_lock) mutable {
                   if (ec || std::visit([](const auto& pg) { return pg != nullptr; }, root_page)) {
-                    std::invoke(self_op.handler, std::move(ec), std::move(root_page), lock_variant(std::move(tree_lock)));
+                    std::invoke(self_op->handler, std::move(ec), std::move(root_page), lock_variant(std::move(tree_lock)));
                   } else {
-                    const cycle_ptr::cycle_gptr<bplus_tree> tree = self_op.tree; // copy, so we can move self_op.
-                    TxAlloc tx_alloc = self_op.tx_alloc; // copy, so we can move self_op.
-                    tree->install_root_page_(
-                        tx_alloc,
-                        [ self_op=std::move(self_op)
-                        ](std::error_code ec, cycle_ptr::cycle_gptr<leaf_type> leaf, monitor_uplock_type tree_lock) mutable {
+                    self_op->tree->install_root_page_(
+                        self_op->tx_alloc,
+                        [self_op](std::error_code ec, cycle_ptr::cycle_gptr<leaf_type> leaf, monitor_uplock_type tree_lock) {
                           if (ec == make_error_code(bplus_tree_errc::root_page_present))
-                            std::invoke(self_op);
+                            std::invoke(*self_op);
                           else
-                            std::invoke(self_op.handler, std::move(ec), page_variant(std::move(leaf)), lock_variant(std::move(tree_lock)));
+                            std::invoke(self_op->handler, std::move(ec), page_variant(std::move(leaf)), lock_variant(std::move(tree_lock)));
                         });
                   }
                 };
@@ -3822,7 +3839,7 @@ class bplus_tree
             cycle_ptr::cycle_gptr<bplus_tree> tree;
           };
 
-          std::invoke(op(self, completion_handler_fun(std::move(handler), self->get_executor()), std::move(tx_alloc)));
+          std::invoke(*std::allocate_shared<op>(tx_alloc, self, completion_handler_fun(std::move(handler), self->get_executor()), tx_alloc));
         },
         asio::deferred, this->shared_from_this(this), std::move(tx_alloc));
   }
@@ -3837,26 +3854,31 @@ class bplus_tree
     using page_variant = std::variant<cycle_ptr::cycle_gptr<intr_type>, cycle_ptr::cycle_gptr<leaf_type>>;
     using handler_type = move_only_function<void(std::error_code, tree_path<TxAlloc>, LeafLockType)>;
 
-    struct op {
+    struct op
+    : public std::enable_shared_from_this<op>
+    {
       explicit op(address_selector_fn_type address_selector_fn, handler_type handler)
       : handler(std::move(handler)),
         address_selector_fn(std::move(address_selector_fn))
       {}
+
+      op(const op&) = delete;
+      op(op&&) = delete;
 
       auto start(tree_path<TxAlloc> path) -> void {
         if (path.interior_pages.empty()) {
           auto tx_alloc = path.get_allocator(); // Make a copy, since we'll move path.
           auto tree = path.tree; // Make a copy, since we'll move path.
           tree->install_or_get_root_page_op_(tx_alloc)
-          | [ self_op=std::move(*this),
+          | [ self_op=this->shared_from_this(),
               path=std::move(path)
             ](std::error_code ec, page_variant page, lock_variant parent_lock) mutable -> void {
               if (ec) {
-                self_op.error_invoke_(std::move(ec));
+                self_op->error_invoke_(std::move(ec));
               } else {
                 std::visit(
                     [&](auto page) -> void {
-                      self_op.search(std::move(path), std::move(page), std::move(parent_lock));
+                      self_op->search(std::move(path), std::move(page), std::move(parent_lock));
                     },
                     std::move(page));
               }
@@ -3864,17 +3886,17 @@ class bplus_tree
         } else { // !path.interior_pages.empty()
           auto page = path.interior_pages.back().page; // Make a copy, since we'll move path.
           page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
-          | [ self_op=std::move(*this),
+          | [ self_op=this->shared_from_this(),
               path=std::move(path)
             ](monitor_shlock_type last_page_lock) mutable -> void {
               auto& last_page = path.interior_pages.back();
               if (last_page.page->erased_ || last_page.page->versions.page_split != last_page.versions.page_split) {
                 // We want to restart the search from the most recent page that hasn't been split/merged since we last observed it.
                 path.interior_pages.pop_back();
-                self_op.start(std::move(path));
+                self_op->start(std::move(path));
               } else {
                 auto page = last_page.page;
-                self_op.search_with_page_locked(std::move(path), std::move(page), std::move(last_page_lock));
+                self_op->search_with_page_locked(std::move(path), std::move(page), std::move(last_page_lock));
               }
             };
         }
@@ -3883,14 +3905,14 @@ class bplus_tree
       private:
       auto search(tree_path<TxAlloc> path, cycle_ptr::cycle_gptr<leaf_type> page, lock_variant parent_lock) -> void {
         auto callback =
-            [ self_op=std::move(*this),
+            [ self_op=this->shared_from_this(),
               path=std::move(path),
               page,
               parent_lock=std::move(parent_lock)
             ](auto page_lock) mutable -> void {
               std::visit([](auto& lock) { lock.reset(); }, parent_lock); // No longer needed, now that `page_lock` is locked.
               path.leaf_page.assign(page);
-              self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
+              self_op->search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
             };
         if constexpr(std::is_same_v<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock>) {
           page->page_lock.dispatch_shared(std::move(callback), __FILE__, __LINE__);
@@ -3904,14 +3926,14 @@ class bplus_tree
 
       auto search(tree_path<TxAlloc> path, cycle_ptr::cycle_gptr<intr_type> page, lock_variant parent_lock) -> void {
         page->page_lock.dispatch_shared(
-            [ self_op=std::move(*this),
+            [ self_op=this->shared_from_this(),
               path=std::move(path),
               page,
               parent_lock=std::move(parent_lock)
             ](auto page_lock) mutable -> void {
               std::visit([](auto& lock) { lock.reset(); }, parent_lock); // No longer needed, now that `page_lock` is locked.
               path.interior_pages.emplace_back(page);
-              self_op.search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
+              self_op->search_with_page_locked(std::move(path), std::move(page), std::move(page_lock));
             },
             __FILE__, __LINE__);
       }
@@ -3968,7 +3990,7 @@ class bplus_tree
                   .then(intr->page_lock.dispatch_shared(asio::append(asio::deferred, ec, child_page), __FILE__, __LINE__))
                   .otherwise(asio::deferred.values(monitor_shlock_type{}, ec, child_page));
             })
-        | [ self_op=std::move(*this),
+        | [ self_op=this->shared_from_this(),
             path=std::move(path),
             intr, intr_version
           ](monitor_shlock_type intr_lock, std::error_code ec, page_variant child_page) mutable -> void {
@@ -3991,18 +4013,18 @@ class bplus_tree
                           if (addr != child_address) [[unlikely]]
                             ec = make_error_code(bplus_tree_errc::restart);
                         }),
-                    std::invoke(self_op.address_selector_fn, intr));
+                    std::invoke(self_op->address_selector_fn, intr));
               }
             }
 
             if (ec == make_error_code(bplus_tree_errc::restart)) {
-              self_op.start(std::move(path));
+              self_op->start(std::move(path));
             } else if (ec) {
-              self_op.error_invoke_(std::move(ec));
+              self_op->error_invoke_(std::move(ec));
             } else {
               std::visit(
                   [&](auto page) -> void {
-                    self_op.search(std::move(path), std::move(page), std::move(intr_lock));
+                    self_op->search(std::move(path), std::move(page), std::move(intr_lock));
                   },
                   std::move(child_page));
             }
@@ -4018,7 +4040,8 @@ class bplus_tree
       address_selector_fn_type address_selector_fn;
     };
 
-    op(std::move(address_selector_fn), std::move(handler)).start(std::move(path));
+    auto op_ptr = std::allocate_shared<op>(path.get_allocator(), std::move(address_selector_fn), std::move(handler));
+    op_ptr->start(std::move(path));
   }
 
   template<typename LeafLockType = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock, typename TxAlloc, typename CompletionToken>
@@ -4067,7 +4090,9 @@ class bplus_tree
     using tx_file_type = typename tx_type::file;
     using handler_type = move_only_function<void(std::error_code, cycle_ptr::cycle_gptr<intr_type>)>;
 
-    struct op {
+    struct op
+    : public std::enable_shared_from_this<op>
+    {
       op(cycle_ptr::cycle_gptr<bplus_tree> tree, cycle_ptr::cycle_gptr<page_type> page, TxAlloc tx_alloc, handler_type handler)
       : tx_alloc(std::move(tx_alloc)),
         page(std::move(page)),
@@ -4075,15 +4100,18 @@ class bplus_tree
         handler(std::move(handler))
       {}
 
+      op(const op&) = delete;
+      op(op&&) = delete;
+
       auto operator()() -> void {
         auto tree = this->tree; // Make a copy, since we'll move *this.
         auto page = this->page; // Make a copy, since we'll move *this.
         page->async_parent_page(std::false_type(), asio::deferred)
-        | [self_op=std::move(*this)](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent, [[maybe_unused]] monitor_shlock_type parent_lock) mutable {
+        | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent, [[maybe_unused]] monitor_shlock_type parent_lock) -> void {
             if (ec || parent != nullptr)
-              std::invoke(self_op.handler, std::move(ec), std::move(parent));
+              std::invoke(self_op->handler, std::move(ec), std::move(parent));
             else
-              self_op.create_new_parent();
+              self_op->create_new_parent();
           };
       }
 
@@ -4115,13 +4143,13 @@ class bplus_tree
                   page->address.offset, *augment_ptr,
                   asio::append(asio::deferred, augment_ptr, std::move(page_versions), tx));
             })
-        | [self_op=std::move(*this)](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent_page, [[maybe_unused]] auto augment_ptr, bplus_tree_versions page_versions, tx_type tx) mutable {
+        | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent_page, [[maybe_unused]] auto augment_ptr, bplus_tree_versions page_versions, tx_type tx) {
             if (ec) {
-              self_op.error_invoke(ec);
+              self_op->error_invoke(ec);
               return;
             }
 
-            self_op.verify_augment_and_install_page(std::move(tx), std::move(parent_page), std::move(page_versions));
+            self_op->verify_augment_and_install_page(std::move(tx), std::move(parent_page), std::move(page_versions));
           };
       }
 
@@ -4133,71 +4161,69 @@ class bplus_tree
             [page](monitor_uplock_type tree_uplock, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) {
               return page->page_lock.dispatch_upgrade(asio::append(asio::deferred, std::move(tree_uplock), std::move(parent_page), std::move(page_versions)), __FILE__, __LINE__);
             })
-        | [tx, self_op=std::move(*this)](monitor_uplock_type page_uplock, monitor_uplock_type tree_uplock, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) mutable {
-            if (self_op.page->erased_ || self_op.tree->erased_) [[unlikely]] {
+        | [tx, self_op=this->shared_from_this()](monitor_uplock_type page_uplock, monitor_uplock_type tree_uplock, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) mutable {
+            if (self_op->page->erased_ || self_op->tree->erased_) [[unlikely]] {
               page_uplock.reset();
               tree_uplock.reset();
-              self_op.error_invoke(make_error_code(db_errc::data_expired));
+              self_op->error_invoke(make_error_code(db_errc::data_expired));
               return;
             }
 
-            if (self_op.page->versions.augment != page_versions.augment) {
+            if (self_op->page->versions.augment != page_versions.augment) {
               page_uplock.reset();
               tree_uplock.reset();
-              self_op.fix_augmentation(std::move(tx), std::move(parent_page));
+              self_op->fix_augmentation(std::move(tx), std::move(parent_page));
               return;
             }
 
-            if (self_op.page->parent_page_offset() != nil_page) {
+            if (self_op->page->parent_page_offset() != nil_page) {
               page_uplock.reset();
               tree_uplock.reset();
-              std::invoke(self_op); // restart
+              std::invoke(*self_op); // restart
               return;
             }
 
-            if (self_op.tree->address.file != self_op.page->address.file) [[unlikely]] {
+            if (self_op->tree->address.file != self_op->page->address.file) [[unlikely]] {
               page_uplock.reset();
               tree_uplock.reset();
-              std::clog << "bplus-tree: bad-tree, tree and page are in different files (tree file: " << self_op.tree->address.file << ", page file: " << self_op.page->address.file << ")\n";
-              self_op.page->maybe_log_dump();
-              self_op.error_invoke(make_error_code(bplus_tree_errc::bad_tree));
+              std::clog << "bplus-tree: bad-tree, tree and page are in different files (tree file: " << self_op->tree->address.file << ", page file: " << self_op->page->address.file << ")\n";
+              self_op->page->maybe_log_dump();
+              self_op->error_invoke(make_error_code(bplus_tree_errc::bad_tree));
               return;
             }
 
-            if (self_op.tree->hdr_.root != self_op.page->address.offset) {
+            if (self_op->tree->hdr_.root != self_op->page->address.offset) {
               // XXX maybe this should be bplus_tree_errc::bad_tree,
               // because:
               // - if this page had acquired a root, it would have shown above
               // - if this page was erased, it would have been caught above
               page_uplock.reset();
               tree_uplock.reset();
-              std::invoke(self_op); // restart
+              std::invoke(*self_op); // restart
               return;
             }
 
             tx.async_commit(
-                completion_wrapper<void(std::error_code)>(
-                    std::move(self_op),
-                    [tree_uplock, page_uplock, parent_page](op self_op, std::error_code ec) {
-                      if (ec) {
-                        std::invoke(self_op.handler, ec, nullptr);
-                        return;
-                      }
+                [self_op, tree_uplock, page_uplock, parent_page](std::error_code ec) -> void {
+                  if (ec) {
+                    std::invoke(self_op->handler, ec, nullptr);
+                    return;
+                  }
 
-                      tree_uplock.dispatch_exclusive(asio::deferred)
-                      | asio::deferred(
-                          [page_uplock](monitor_exlock_type tree_exlock) {
-                            return page_uplock.dispatch_exclusive(asio::append(asio::deferred, std::move(tree_exlock)));
-                          })
-                      | asio::deferred(
-                          [page=self_op.page, parent_page, tree=self_op.tree](monitor_exlock_type page_exlock, monitor_exlock_type tree_exlock) {
-                            page->parent_offset = tree->hdr_.root = parent_page->address.offset;
-                            page_exlock.reset();
-                            tree_exlock.reset();
-                            return asio::deferred.values(std::error_code{}, parent_page);
-                          })
-                      | std::move(self_op.handler);
-                    }));
+                  tree_uplock.dispatch_exclusive(asio::deferred)
+                  | asio::deferred(
+                      [page_uplock](monitor_exlock_type tree_exlock) {
+                        return page_uplock.dispatch_exclusive(asio::append(asio::deferred, std::move(tree_exlock)));
+                      })
+                  | asio::deferred(
+                      [page=self_op->page, parent_page, tree=self_op->tree](monitor_exlock_type page_exlock, monitor_exlock_type tree_exlock) {
+                        page->parent_offset = tree->hdr_.root = parent_page->address.offset;
+                        page_exlock.reset();
+                        tree_exlock.reset();
+                        return asio::deferred.values(std::error_code{}, parent_page);
+                      })
+                  | std::move(self_op->handler);
+                });
           };
       }
 
@@ -4229,11 +4255,11 @@ class bplus_tree
                           asio::append(asio::deferred, page_versions, file_ptr)))
                   .otherwise(asio::deferred.values(ec, std::size_t(0), page_versions, file_ptr));
             })
-        | [self_op=std::move(*this), tx, parent_page](std::error_code ec, [[maybe_unused]] std::size_t nbytes, bplus_tree_versions page_versions, [[maybe_unused]] auto file_ptr) mutable {
+        | [self_op=this->shared_from_this(), tx, parent_page](std::error_code ec, [[maybe_unused]] std::size_t nbytes, bplus_tree_versions page_versions, [[maybe_unused]] auto file_ptr) mutable {
             if (ec)
-              self_op.error_invoke(ec);
+              self_op->error_invoke(ec);
             else
-              self_op.verify_augment_and_install_page(std::move(tx), std::move(parent_page), std::move(page_versions));
+              self_op->verify_augment_and_install_page(std::move(tx), std::move(parent_page), std::move(page_versions));
           };
       }
 
@@ -4250,9 +4276,9 @@ class bplus_tree
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, cycle_ptr::cycle_gptr<intr_type>)>(
         [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> tree, cycle_ptr::cycle_gptr<page_type> page, TxAlloc tx_alloc) {
           if constexpr(handler_has_executor_v<decltype(handler)>)
-            std::invoke(op(tree, std::move(page), std::move(tx_alloc), completion_handler_fun(std::move(handler), tree->get_executor())));
+            std::invoke(*std::allocate_shared<op>(tx_alloc, tree, std::move(page), tx_alloc, completion_handler_fun(std::move(handler), tree->get_executor())));
           else
-            std::invoke(op(std::move(tree), std::move(page), std::move(tx_alloc), std::move(handler)));
+            std::invoke(*std::allocate_shared<op>(tx_alloc, std::move(tree), std::move(page), tx_alloc, std::move(handler)));
         },
         asio::deferred, this->shared_from_this(this), std::move(page), std::move(tx_alloc));
   }
@@ -4413,6 +4439,9 @@ class bplus_tree
                   handler(std::move(handler))
                 {}
 
+                op(const op&) = delete;
+                op(op&&) = delete;
+
                 auto operator()() -> void {
                   auto raw_db = parent->raw_db.lock();
                   if (raw_db == nullptr) {
@@ -4499,6 +4528,9 @@ class bplus_tree
                   handler(std::move(handler))
                 {}
 
+                op(const op&) = delete;
+                op(op&&) = delete;
+
                 auto operator()() -> void {
                   (*this)(0);
                 }
@@ -4571,7 +4603,9 @@ class bplus_tree
       std::array<monitor_exlock_type, num_page_locks_needed> exlocks;
     };
 
-    struct op {
+    struct op
+    : public std::enable_shared_from_this<op>
+    {
       op(cycle_ptr::cycle_gptr<bplus_tree> tree, cycle_ptr::cycle_gptr<PageType> page, bplus_tree_versions::type page_split, TxAlloc tx_alloc, move_only_function<void(std::error_code)> handler) noexcept
       : tx_alloc(std::move(tx_alloc)),
         tree(std::move(tree)),
@@ -4580,55 +4614,53 @@ class bplus_tree
         handler(std::move(handler))
       {}
 
-      auto operator()() -> void {
-        auto tree = this->tree; // Make a copy, since we'll move this.
-        auto page = this->page; // Make a copy, since we'll move this.
-        auto tx_alloc = this->tx_alloc; // Make a copy, since we'll move this.
+      op(const op&) = delete;
+      op(op&&) = delete;
 
+      auto operator()() -> void {
         tree->ensure_parent_op_(page, tx_alloc)
-        | [self_op=std::move(*this)](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent) mutable {
+        | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent) {
             cycle_ptr::cycle_gptr<raw_db_type> raw_db;
             if (!ec) {
-              raw_db = self_op.tree->raw_db.lock();
+              raw_db = self_op->tree->raw_db.lock();
               if (raw_db == nullptr) [[unlikely]] ec = make_error_code(db_errc::data_expired);
             }
 
             if (ec)
-              self_op.error_invoke(ec);
+              self_op->error_invoke(ec);
             else
-              self_op.create_sibling(std::move(raw_db), std::move(parent));
+              self_op->create_sibling(std::move(raw_db), std::move(parent));
           };
       }
 
       private:
       auto create_sibling(cycle_ptr::cycle_gptr<raw_db_type> raw_db, cycle_ptr::cycle_gptr<intr_type> parent) -> void {
-        auto tree = this->tree; // Make a copy, since we'll move this.
         tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, tx_alloc);
 
         if constexpr(std::is_same_v<intr_type, PageType>) {
           intr_type::async_new_page(
               tx, tree->db_alloc_, tree->spec, raw_db, parent->address.offset,
               nil_page, {},
-              [ self_op=std::move(*this),
+              [ self_op=this->shared_from_this(),
                 tx, parent
               ](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> sibling_page) mutable {
                 if (ec)
-                  self_op.error_invoke(ec);
+                  self_op->error_invoke(ec);
                 else
-                  self_op.have_sibling(tx, parent, std::move(sibling_page));
+                  self_op->have_sibling(tx, parent, std::move(sibling_page));
               });
         } else {
           static_assert(std::is_same_v<leaf_type, PageType>);
           leaf_type::async_new_page(
               tx, tree->db_alloc_, tree->spec, raw_db, parent->address.offset,
               nil_page, nil_page, false,
-              [ self_op=std::move(*this),
+              [ self_op=this->shared_from_this(),
                 tx, parent
-              ](std::error_code ec, cycle_ptr::cycle_gptr<leaf_type> sibling_page) mutable {
+              ](std::error_code ec, cycle_ptr::cycle_gptr<leaf_type> sibling_page) {
                 if (ec)
-                  self_op.error_invoke(ec);
+                  self_op->error_invoke(ec);
                 else
-                  self_op.have_sibling(tx, parent, std::move(sibling_page));
+                  self_op->have_sibling(tx, parent, std::move(sibling_page));
               });
         }
       }
@@ -4677,11 +4709,16 @@ class bplus_tree
         }
       }
 
-      static auto lock_ps_for_upgrade(std::shared_ptr<page_selection> ps, std::size_t start_idx = 0) {
-        struct uplock_op {
+      static auto lock_ps_for_upgrade(TxAlloc tx_alloc, std::shared_ptr<page_selection> ps, std::size_t start_idx = 0) {
+        struct uplock_op
+        : public std::enable_shared_from_this<uplock_op>
+        {
           explicit uplock_op(std::shared_ptr<page_selection> ps)
           : ps(std::move(ps))
           {}
+
+          uplock_op(const uplock_op&) = delete;
+          uplock_op(uplock_op&&) = delete;
 
           auto operator()(move_only_function<void(std::shared_ptr<page_selection>)> handler, std::size_t idx) -> void {
             do_page_lock(std::move(handler), idx);
@@ -4709,9 +4746,9 @@ class bplus_tree
                   next_page_to_lock->page_lock.async_upgrade(
                       completion_wrapper<void(monitor_uplock_type)>(
                           std::move(handler),
-                          [self_op=std::move(*this), idx](auto handler, monitor_uplock_type lock) mutable {
-                            self_op.ps->uplocks[idx] = std::move(lock);
-                            self_op.do_page_lock(std::move(handler), idx + 1u);
+                          [self_op=this->shared_from_this(), idx](auto handler, monitor_uplock_type lock) {
+                            self_op->ps->uplocks[idx] = std::move(lock);
+                            self_op->do_page_lock(std::move(handler), idx + 1u);
                           }),
                       __FILE__, __LINE__);
                   return; // Callback will restart this loop.
@@ -4741,9 +4778,9 @@ class bplus_tree
                   elem_to_lock.element_lock.async_upgrade(
                       completion_wrapper<void(monitor_uplock_type)>(
                           std::move(handler),
-                          [self_op=*this, idx](auto handler, monitor_uplock_type lock) mutable {
-                            self_op.ps->rebalance[idx].uplock = std::move(lock);
-                            self_op.do_elem_lock(std::move(handler), idx + 1u);
+                          [self_op=this->shared_from_this(), idx](auto handler, monitor_uplock_type lock) {
+                            self_op->ps->rebalance[idx].uplock = std::move(lock);
+                            self_op->do_elem_lock(std::move(handler), idx + 1u);
                           }),
                       __FILE__, __LINE__);
                   return; // Callback will restart this loop.
@@ -4766,17 +4803,22 @@ class bplus_tree
           assert(!locks.is_locked());
 
         return asio::async_initiate<decltype(asio::deferred), void(std::shared_ptr<page_selection>)>(
-            [](auto handler, std::shared_ptr<page_selection> ps, std::size_t start_idx) -> void {
-              std::invoke(uplock_op(std::move(ps)), move_only_function<void(std::shared_ptr<page_selection>)>(std::move(handler)), std::move(start_idx));
+            [](auto handler, TxAlloc tx_alloc, std::shared_ptr<page_selection> ps, std::size_t start_idx) -> void {
+              std::invoke(*std::allocate_shared<uplock_op>(tx_alloc, std::move(ps)), move_only_function<void(std::shared_ptr<page_selection>)>(std::move(handler)), std::move(start_idx));
             },
-            asio::deferred, std::move(ps), std::move(start_idx));
+            asio::deferred, std::move(tx_alloc), std::move(ps), std::move(start_idx));
       }
 
-      static auto lock_ps_for_exclusive(std::shared_ptr<page_selection> ps) {
-        struct exlock_op {
+      static auto lock_ps_for_exclusive(TxAlloc tx_alloc, std::shared_ptr<page_selection> ps) {
+        struct exlock_op
+        : public std::enable_shared_from_this<exlock_op>
+        {
           explicit exlock_op(std::shared_ptr<page_selection> ps)
           : ps(std::move(ps))
           {}
+
+          exlock_op(const exlock_op&) = delete;
+          exlock_op(exlock_op&&) = delete;
 
           auto operator()(move_only_function<void(std::shared_ptr<page_selection>)> handler) -> void {
             do_page_lock(std::move(handler), 0);
@@ -4806,9 +4848,9 @@ class bplus_tree
                   std::move(lck).dispatch_exclusive(
                       completion_wrapper<void(monitor_exlock_type)>(
                           std::move(handler),
-                          [self_op=std::move(*this), idx](auto handler, monitor_exlock_type lock) mutable {
-                            self_op.ps->exlocks[idx] = std::move(lock);
-                            self_op.do_page_lock(std::move(handler), idx + 1u);
+                          [self_op=this->shared_from_this(), idx](auto handler, monitor_exlock_type lock) {
+                            self_op->ps->exlocks[idx] = std::move(lock);
+                            self_op->do_page_lock(std::move(handler), idx + 1u);
                           }));
                   return; // Callback will restart this loop.
                 }
@@ -4835,9 +4877,9 @@ class bplus_tree
                   std::move(uplock).async_exclusive(
                       completion_wrapper<void(monitor_exlock_type)>(
                           std::move(handler),
-                          [self_op=*this, idx](auto handler, monitor_exlock_type lock) mutable {
-                            self_op.ps->rebalance[idx].exlock = std::move(lock);
-                            self_op.do_elem_lock(std::move(handler), idx + 1u);
+                          [self_op=this->shared_from_this(), idx](auto handler, monitor_exlock_type lock) {
+                            self_op->ps->rebalance[idx].exlock = std::move(lock);
+                            self_op->do_elem_lock(std::move(handler), idx + 1u);
                           }));
                   return; // Callback will restart this loop.
                 }
@@ -4862,10 +4904,10 @@ class bplus_tree
           assert(!locks.is_locked());
 
         auto deferred_op = asio::async_initiate<decltype(asio::deferred), void(std::shared_ptr<page_selection>)>(
-            [](auto handler, std::shared_ptr<page_selection> ps) -> void {
-              std::invoke(exlock_op(std::move(ps)), move_only_function<void(std::shared_ptr<page_selection>)>(std::move(handler)));
+            [](auto handler, TxAlloc tx_alloc, std::shared_ptr<page_selection> ps) -> void {
+              std::invoke(*std::allocate_shared<exlock_op>(tx_alloc, std::move(ps)), move_only_function<void(std::shared_ptr<page_selection>)>(std::move(handler)));
             },
-            asio::deferred, std::move(ps));
+            asio::deferred, std::move(tx_alloc), std::move(ps));
 
         if constexpr(std::is_same_v<PageType, intr_type>) {
           return std::move(deferred_op)
@@ -4883,62 +4925,55 @@ class bplus_tree
       }
 
       auto have_sibling(tx_type tx, cycle_ptr::cycle_gptr<intr_type> parent, cycle_ptr::cycle_gptr<PageType> sibling_page) {
-        auto page = this->page; // Make a copy, since we'll move *this.
-        auto tx_alloc = this->tx_alloc; // Make a copy, since we'll move *this.
         make_ps(std::move(parent), std::move(page), std::move(sibling_page), std::move(tx_alloc))
-        | [self_op=std::move(*this), tx=std::move(tx)](std::error_code ec, std::shared_ptr<page_selection> ps) mutable -> void {
+        | [self_op=this->shared_from_this(), tx=std::move(tx)](std::error_code ec, std::shared_ptr<page_selection> ps) mutable -> void {
             if (ec)
-              self_op.error_invoke(ec);
+              self_op->error_invoke(ec);
             else
-              self_op.lock_parent_and_ensure_enough_space(tx, std::move(ps));
+              self_op->lock_parent_and_ensure_enough_space(tx, std::move(ps));
           };
       }
 
       auto lock_parent_and_ensure_enough_space(tx_type tx, std::shared_ptr<page_selection> ps) -> void {
-        auto parent = ps->parent; // Make a copy, so we can move ps.
-        parent->page_lock.dispatch_upgrade(
-            [self_op=std::move(*this), ps=std::move(ps), tx=std::move(tx)](monitor_uplock_type parent_uplock) mutable -> void {
+        ps->parent->page_lock.dispatch_upgrade(
+            [self_op=this->shared_from_this(), ps, tx=std::move(tx)](monitor_uplock_type parent_uplock) mutable -> void {
               ps->uplocks[0] = std::move(parent_uplock);
 
               if (ps->parent->erased_) {
                 ps->reset();
-                std::invoke(self_op);
+                std::invoke(*self_op);
                 return;
               }
 
               if (ps->parent->index_size() == ps->parent->spec->child_pages_per_intr) {
                 // Parent is full, and cannot accept a new page.
                 // So split it.
-                auto tree = self_op.tree; // Make a copy, since we'll move self_op.
-                auto tx_alloc = self_op.tx_alloc; // Make a copy, since we'll move self_op.
-                tree->split_page_impl_(ps->parent, ps->parent->versions.page_split, tx_alloc,
-                    completion_wrapper<void(std::error_code)>(
-                        std::move(self_op),
-                        [](op self_op, std::error_code ec) {
-                          if (!ec)
-                            std::invoke(self_op); // restart
-                          else if (ec == make_error_code(db_errc::data_expired)) // data_expired could happen if the parent page was cleaned up
-                            std::invoke(self_op); // restart
-                          else
-                            self_op.error_invoke(ec);
-                        }));
+                self_op->tree->split_page_impl_(ps->parent, ps->parent->versions.page_split, self_op->tx_alloc,
+                    [self_op](std::error_code ec) {
+                      if (!ec)
+                        std::invoke(*self_op); // restart
+                      else if (ec == make_error_code(db_errc::data_expired)) // data_expired could happen if the parent page was cleaned up
+                        std::invoke(*self_op); // restart
+                      else
+                        self_op->error_invoke(ec);
+                    });
                 return;
               }
 
-              self_op.continue_with_locked_parent(std::move(tx), std::move(ps));
+              self_op->continue_with_locked_parent(std::move(tx), std::move(ps));
             },
             __FILE__, __LINE__);
       }
 
       auto continue_with_locked_parent([[maybe_unused]] tx_type tx, std::shared_ptr<page_selection> ps) -> void {
         assert(ps->uplocks[0].is_locked());
-        lock_ps_for_upgrade(std::move(ps), 1)
-        | [self_op=std::move(*this), tx=std::move(tx)](std::shared_ptr<page_selection> ps) mutable -> void {
-            if (self_op.page->versions.page_split != self_op.page_split) {
+        lock_ps_for_upgrade(tx_alloc, std::move(ps), 1)
+        | [self_op=this->shared_from_this(), tx=std::move(tx)](std::shared_ptr<page_selection> ps) mutable -> void {
+            if (self_op->page->versions.page_split != self_op->page_split) {
               // The job of this function is to ensure the page gets split,
               // and another thread has just done so for us.
               // So we'll just say we're done.
-              self_op.done_invoke();
+              self_op->done_invoke();
               return;
             }
 
@@ -4951,7 +4986,7 @@ class bplus_tree
                   });
             }
 
-            self_op.decide_shift_and_lock_shifted_children(std::move(tx), std::move(ps));
+            self_op->decide_shift_and_lock_shifted_children(std::move(tx), std::move(ps));
           };
       }
 
@@ -4967,11 +5002,11 @@ class bplus_tree
         if constexpr(std::is_same_v<PageType, intr_type>) {
           auto page = this->page; // Make a copy, since we'll move *this.
           ps->load_child_pages(page, shift)
-          | [self_op=std::move(*this), tx, ps, shift](std::error_code ec) mutable {
+          | [self_op=this->shared_from_this(), tx, ps, shift](std::error_code ec) {
               if (ec)
-                self_op.error_invoke(ec);
+                self_op->error_invoke(ec);
               else
-                self_op.update_disk_representation(tx, ps, shift);
+                self_op->update_disk_representation(tx, ps, shift);
             };
         } else {
           update_disk_representation(std::move(tx), std::move(ps), std::move(shift));
@@ -4993,11 +5028,11 @@ class bplus_tree
         }
 
         auto barrier = make_completion_barrier(
-            [self_op=std::move(*this), tx, ps, shift](std::error_code ec) mutable -> void {
+            [self_op=this->shared_from_this(), tx, ps, shift](std::error_code ec) -> void {
               if (ec)
-                self_op.error_invoke(ec);
+                self_op->error_invoke(ec);
               else
-                self_op.commit_to_disk(tx, std::move(ps), shift);
+                self_op->commit_to_disk(tx, ps, shift);
             },
             tree->get_executor());
 
@@ -5126,16 +5161,14 @@ class bplus_tree
 
       auto commit_to_disk(tx_type tx, std::shared_ptr<page_selection> ps, std::size_t shift) -> void {
         tx.async_commit(
-            [self_op=std::move(*this), ps=std::move(ps), shift](std::error_code ec) mutable -> void {
+            [self_op=this->shared_from_this(), ps=std::move(ps), shift](std::error_code ec) mutable -> void {
               if (ec) {
-                self_op.error_invoke(ec);
+                self_op->error_invoke(ec);
               } else {
-                lock_ps_for_exclusive(std::move(ps))
-                | completion_wrapper<void(std::shared_ptr<page_selection>)>(
-                    std::move(self_op),
-                    [shift](op self_op, std::shared_ptr<page_selection> ps) {
-                      self_op.update_memory_representation(std::move(ps), shift);
-                    });
+                lock_ps_for_exclusive(self_op->tx_alloc, std::move(ps))
+                | [self_op, shift](std::shared_ptr<page_selection> ps) {
+                    self_op->update_memory_representation(std::move(ps), shift);
+                  };
               }
             });
       }
@@ -5258,17 +5291,17 @@ class bplus_tree
       }
 
       TxAlloc tx_alloc;
-      cycle_ptr::cycle_gptr<bplus_tree> tree;
-      cycle_ptr::cycle_gptr<PageType> page;
+      const cycle_ptr::cycle_gptr<bplus_tree> tree;
+      const cycle_ptr::cycle_gptr<PageType> page;
       bplus_tree_versions::type page_split;
       move_only_function<void(std::error_code)> handler;
     };
 
-    std::invoke(op(
+    std::invoke(*std::allocate_shared<op>(tx_alloc,
             this->shared_from_this(this),
             std::move(page),
             std::move(page_split),
-            std::move(tx_alloc),
+            tx_alloc,
             std::move(handler)));
   }
 
@@ -5287,7 +5320,7 @@ class bplus_tree
 
   template<typename TxAlloc>
   struct insert_op
-  : std::enable_shared_from_this<insert_op<TxAlloc>>
+  : public std::enable_shared_from_this<insert_op<TxAlloc>>
   {
     using byte_vector = std::vector<std::byte, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::byte>>;
     using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
@@ -5309,6 +5342,9 @@ class bplus_tree
       tx_alloc(tx_alloc),
       path(tree, tx_alloc)
     {}
+
+    insert_op(const insert_op&) = delete;
+    insert_op(insert_op&&) = delete;
 
     private:
     static auto make_key_and_value(const bplus_tree_spec& spec, std::span<const std::byte> key, std::span<const std::byte> value, TxAlloc tx_alloc) -> byte_vector {
@@ -6054,6 +6090,9 @@ class bplus_tree
         from_lock(std::move(from_lock)),
         handler(std::move(handler))
       {}
+
+      op(const op&) = delete;
+      op(op&&) = delete;
 
       auto operator()(db_address page_addr) -> void {
         // Under normal operation, you shouldn't hold a lock while loading a page.

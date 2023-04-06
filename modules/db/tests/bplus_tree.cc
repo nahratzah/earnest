@@ -2,12 +2,14 @@
 
 #include <UnitTest++/UnitTest++.h>
 
+#include <algorithm>
 #include <asio/deferred.hpp>
 #include <asio/io_context.hpp>
 #include <earnest/detail/file_grow_allocator.h>
 #include <earnest/dir.h>
 #include <earnest/isolation.h>
 #include <iostream>
+#include <random>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -33,6 +35,9 @@ class fixture {
   public:
   static constexpr std::size_t key_bytes = 4;
   static constexpr std::size_t value_bytes = 4;
+  static constexpr std::size_t elements_per_leaf = 3;
+  static constexpr std::size_t child_pages_per_intr = 3;
+  static constexpr std::size_t total_positions_to_fill_tree_3_levels = elements_per_leaf * child_pages_per_intr * child_pages_per_intr;
   static constexpr std::string_view tree_filename = "test.tree";
   static const earnest::db_address tree_address;
   using read_kv_type = std::pair<std::string, std::string>;
@@ -48,6 +53,15 @@ class fixture {
 
   auto insert(std::string_view key, std::string_view value, bool sync) -> void;
   auto read_all() -> std::vector<read_kv_type>;
+  auto ioctx_run(std::size_t threads) -> void;
+
+  template<typename Collection>
+  static auto random_shuffled_collection(Collection c) -> Collection {
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(c.begin(), c.end(), g);
+    return c;
+  }
 
   asio::io_context ioctx;
   const std::shared_ptr<earnest::detail::bplus_tree_spec> spec;
@@ -73,9 +87,6 @@ inline auto operator<<(std::ostream& out, const std::vector<::fixture::read_kv_t
 }
 
 
-NEW_TEST(constructor) {
-}
-
 NEW_TEST(insert) {
   std::array<std::byte, key_bytes> key{ std::byte{'a'}, std::byte{'b'}, std::byte{'b'}, std::byte{'a'} };
   std::array<std::byte, value_bytes> value{ std::byte{'c'}, std::byte{'d'}, std::byte{'e'}, std::byte{'f'} };
@@ -99,7 +110,7 @@ NEW_TEST(insert) {
 
 NEW_TEST(insert_many_sequentially) {
   read_kv_vector expect;
-  for (int seq = 0; seq < 1'000; ++seq) {
+  for (std::size_t seq = 0; seq < total_positions_to_fill_tree_3_levels; ++seq) {
     auto key = std::string(
         {
           static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
@@ -109,16 +120,17 @@ NEW_TEST(insert_many_sequentially) {
         });
     auto value = std::to_string(seq % 10'000);
 
-    expect.emplace_back(key, value);
-    insert(key, value, true);
+    expect.emplace_back(std::move(key), std::move(value));
   }
 
+  for (const auto& e : expect)
+    insert(e.first, e.second, true);
   REQUIRE CHECK_EQUAL(expect, read_all());
 }
 
 NEW_TEST(insert_many_concurrently) {
   read_kv_vector expect;
-  for (int seq = 0; seq < 1'000; ++seq) {
+  for (std::size_t seq = 0; seq < total_positions_to_fill_tree_3_levels; ++seq) {
     auto key = std::string(
         {
           static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
@@ -128,10 +140,35 @@ NEW_TEST(insert_many_concurrently) {
         });
     auto value = std::to_string(seq % 10'000);
 
-    expect.emplace_back(key, value);
-    insert(key, value, false);
+    expect.emplace_back(std::move(key), std::move(value));
   }
+
+  for (const auto& e : expect)
+    insert(e.first, e.second, false);
   ioctx.run();
+  ioctx.restart();
+
+  CHECK_EQUAL(expect, read_all());
+}
+
+NEW_TEST(insert_many_concurrently_with_random_order) {
+  read_kv_vector expect;
+  for (std::size_t seq = 0; seq < total_positions_to_fill_tree_3_levels; ++seq) {
+    auto key = std::string(
+        {
+          static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
+          static_cast<char>('a' + (seq / 26 / 26 % 26)),
+          static_cast<char>('a' + (seq / 26 % 26)),
+          static_cast<char>('a' + (seq % 26)),
+        });
+    auto value = std::to_string(seq % 10'000);
+
+    expect.emplace_back(std::move(key), std::move(value));
+  }
+
+  for (const auto& e : random_shuffled_collection(expect))
+    insert(e.first, e.second, false);
+  ioctx_run(8);
   ioctx.restart();
 
   CHECK_EQUAL(expect, read_all());
@@ -200,8 +237,8 @@ fixture::fixture(std::string_view name)
                 .bytes=value_bytes,
               },
             },
-            .elements_per_leaf=10,
-            .child_pages_per_intr=10,
+            .elements_per_leaf=elements_per_leaf,
+            .child_pages_per_intr=child_pages_per_intr,
           })),
   raw_db(cycle_ptr::make_cycle<raw_db_type>(ioctx.get_executor()))
 {
@@ -382,6 +419,18 @@ auto fixture::read_all() -> std::vector<read_kv_type> {
   ioctx.restart();
   REQUIRE CHECK(read_all_callback_called);
   return elements;
+}
+
+auto fixture::ioctx_run(std::size_t threads) -> void {
+  std::vector<std::thread> thread_vec;
+  for (std::size_t i = 0; i < threads; ++i) {
+    thread_vec.emplace_back(
+        [this]() {
+          this->ioctx.run();
+        });
+  }
+
+  for (auto& t : thread_vec) t.join();
 }
 
 const earnest::db_address fixture::tree_address = earnest::db_address(earnest::file_id("", std::string(tree_filename)), 0);
