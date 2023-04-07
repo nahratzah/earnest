@@ -8,6 +8,8 @@
 #include <type_traits>
 #include <utility>
 
+#include <spdlog/spdlog.h>
+
 #include <earnest/xdr.h>
 
 namespace earnest {
@@ -75,3 +77,18 @@ struct hash<::earnest::file_id> {
 
 
 } /* namespace std */
+
+namespace fmt {
+
+
+template<>
+struct formatter<earnest::file_id>
+: formatter<std::string>
+{
+  auto format(const earnest::file_id& fid, format_context& ctx) -> decltype(ctx.out()) {
+    return format_to(ctx.out(), "{}/{}", fid.ns, fid.filename);
+  }
+};
+
+
+} /* namespace spdlog::fmt */

@@ -5,6 +5,8 @@
 #include <type_traits>
 #include <utility>
 
+#include <spdlog/spdlog.h>
+
 #include <earnest/file_id.h>
 
 namespace earnest {
@@ -40,3 +42,19 @@ inline auto db_address::to_string() const -> std::string {
 
 
 } /* namespace earnest */
+
+
+namespace fmt {
+
+
+template<>
+struct formatter<earnest::db_address>
+: formatter<std::string>
+{
+  auto format(const earnest::db_address& addr, format_context& ctx) -> decltype(ctx.out()) {
+    return format_to(ctx.out(), "{}@{}", addr.offset, addr.file);
+  }
+};
+
+
+} /* namespace spdlog::fmt */

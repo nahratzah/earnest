@@ -4,8 +4,11 @@
 #include <cstddef>
 #include <iosfwd>
 #include <span>
+#include <sstream>
 #include <string_view>
 #include <type_traits>
+
+#include <spdlog/spdlog.h>
 
 namespace earnest {
 
@@ -183,3 +186,21 @@ class byte_span_printer {
 
 
 } /* namespace earnest */
+
+
+namespace fmt {
+
+
+template<>
+struct formatter<earnest::byte_span_printer>
+: formatter<std::string>
+{
+  auto format(const earnest::byte_span_printer& p, format_context& ctx) -> decltype(ctx.out()) {
+    std::ostringstream s;
+    s << p;
+    return format_to(ctx.out(), "{}", std::move(s).str());
+  }
+};
+
+
+} /* namespace spdlog::fmt */

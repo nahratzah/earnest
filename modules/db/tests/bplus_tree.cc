@@ -10,6 +10,8 @@
 #include <earnest/isolation.h>
 #include <iostream>
 #include <random>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -175,6 +177,15 @@ NEW_TEST(insert_many_concurrently_with_random_order) {
 }
 
 int main(int argc, char** argv) {
+  {
+    spdlog::set_level(spdlog::level::trace);
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(std::clog);
+    spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.db", sink));
+    spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.bplustree", sink));
+
+    spdlog::get("earnest.bplustree")->set_level(spdlog::level::trace);
+  }
+
   if (argc < 2) {
     std::cerr << "Usage: " << (argc > 0 ? argv[0] : "bplus_tree_page_test") << "writeable_dir\n"
         << "writeable_dir: points at a directory where we can write files\n";
@@ -183,7 +194,7 @@ int main(int argc, char** argv) {
   try {
     write_dir = earnest::dir(argv[1]);
   } catch (const std::exception& e) {
-    std::cerr << "error opening dirs: " << e.what() << std::endl;
+    spdlog::error("error opening dirs: {}", e.what());
     return 1;
   }
 
@@ -193,7 +204,7 @@ int main(int argc, char** argv) {
 auto ensure_dir_exists_and_is_empty(std::filesystem::path name) -> earnest::dir {
   using namespace std::literals;
 
-  std::cerr << "ensure_dir_exists_and_is_empty(" << name << ")\n";
+  spdlog::trace("ensure_dir_exists_and_is_empty({})", name.string());
   if (name.has_parent_path())
     throw std::runtime_error("directory '"s + name.string() + "' is not a relative name"s);
 
@@ -214,7 +225,7 @@ auto ensure_dir_exists_and_is_empty(std::filesystem::path name) -> earnest::dir 
     try {
       new_dir.erase(file);
     } catch (const std::exception& e) {
-      std::cerr << "error cleaning dir'" << name << "', failed to erase '" << file.path() << "': " << e.what() << std::endl;
+      spdlog::error("error cleaning dir'{}', failed to erase '{}': {}", name.string(), file.path().string(), e.what());
       throw;
     }
   }
@@ -240,7 +251,7 @@ fixture::fixture(std::string_view name)
             .elements_per_leaf=elements_per_leaf,
             .child_pages_per_intr=child_pages_per_intr,
           })),
-  raw_db(cycle_ptr::make_cycle<raw_db_type>(ioctx.get_executor()))
+  raw_db(cycle_ptr::make_cycle<raw_db_type>(ioctx.get_executor(), "test-db"))
 {
   auto ensure_no_error = asio::deferred(
       [](std::error_code ec, [[maybe_unused]] const auto&... args) {
@@ -345,7 +356,7 @@ auto fixture::insert(std::string_view key, std::string_view value, bool sync) ->
       [tree=this->tree, state_ptr](std::error_code ec, [[maybe_unused]] auto elem_ref) {
         CHECK_EQUAL(std::error_code(), ec);
         state_ptr->callback_called = true;
-        std::clog << "  inserted " << state_ptr->printable_key() << " => " << state_ptr->printable_value() << "\n";
+        spdlog::trace("inserted {} => {}: {}", state_ptr->printable_key(), state_ptr->printable_value(), ec.message());
 
         if (ec)
           tree->async_log_dump(std::clog, []() { /* skip */ });
@@ -390,9 +401,9 @@ auto fixture::read_all() -> std::vector<read_kv_type> {
       }
 
       if (output.empty())
-        std::cerr << "read elements, but still empty :P\n";
+        spdlog::trace("read elements, but still empty :P");
       else
-        std::cerr << "read elements, now up to '" << output.back().first << "'\n";
+        spdlog::trace("read elements, now up to \"{}\"", output.back().first);
       callback(std::error_code{});
       return;
     }

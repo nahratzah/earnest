@@ -13,3 +13,6 @@
 [submodule "modules/prometheus-cpp"]
 	path = modules/prometheus-cpp
 	url = https://github.com/jupp0r/prometheus-cpp.git
+[submodule "modules/spdlog"]
+	path = modules/spdlog
+	url = https://github.com/gabime/spdlog.git

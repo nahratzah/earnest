@@ -20,7 +20,7 @@ target_sources(db
 
 find_package(Boost REQUIRED)
 target_include_directories(db INTERFACE ${Boost_INCLUDE_DIR})
-target_link_libraries(db INTERFACE util io asio asio_util wal cycle_ptr libhoard prometheus-cpp::core)
+target_link_libraries(db INTERFACE util io asio asio_util wal cycle_ptr libhoard prometheus-cpp::core spdlog::spdlog)
 
 add_executable(db_cache_test)
 target_link_libraries(db_cache_test PUBLIC db UnitTest++)

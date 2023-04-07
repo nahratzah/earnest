@@ -6,6 +6,7 @@
 
 #include <cycle_ptr.h>
 #include <prometheus/registry.h>
+#include <spdlog/spdlog.h>
 
 #include <earnest/db_cache.h>
 #include <earnest/db_error.h>
@@ -37,20 +38,21 @@ class raw_db
   template<typename TxAllocator> using fdb_transaction = transaction<file_db_type, TxAllocator>;
 
   private:
-  explicit raw_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view prom_db_name, Allocator alloc, allocator_type prom_alloc)
+  explicit raw_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view db_name, Allocator alloc, allocator_type prom_alloc)
   : fdb_(std::allocate_shared<file_db_type>(prom_alloc, ex, prom_alloc)),
-    cache_(*this, prom_registry, prom_db_name, ex, alloc)
+    cache_(*this, prom_registry, db_name, ex, alloc),
+    db_name_(db_name)
   {}
 
   public:
-  explicit raw_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view prom_db_name, Allocator alloc = Allocator())
+  explicit raw_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view db_name, Allocator alloc = Allocator())
   : raw_db(
-      std::move(ex), prom_registry, prom_db_name, alloc,
-      allocator_type(prom_registry, "earnest_db_memory", prometheus::Labels{{"db_name", std::string(prom_db_name)}}, alloc))
+      std::move(ex), prom_registry, db_name, alloc,
+      allocator_type(prom_registry, "earnest_db_memory", prometheus::Labels{{"db_name", std::string(db_name)}}, alloc))
   {}
 
-  explicit raw_db(executor_type ex, Allocator alloc = Allocator())
-  : raw_db(std::move(ex), nullptr, std::string_view(), std::move(alloc))
+  explicit raw_db(executor_type ex, std::string_view db_name, Allocator alloc = Allocator())
+  : raw_db(std::move(ex), nullptr, db_name, std::move(alloc))
   {}
 
   static auto session_number_fileid() -> file_id {
@@ -105,6 +107,11 @@ class raw_db
                     return asio::deferred.when(!ec)
                         .then(state_ptr->tx.async_commit(asio::deferred))
                         .otherwise(asio::deferred.values(ec));
+                  })
+              | asio::deferred(
+                  [logger=self->logger, db_name=self->db_name_](std::error_code ec) {
+                    if (!ec && logger) logger->info("new DB \"{}\" created", db_name);
+                    return asio::deferred.values(ec);
                   })
               | std::move(handler);
             }));
@@ -183,8 +190,11 @@ class raw_db
                         .otherwise(asio::deferred.values(ec));
                   })
               | asio::deferred(
-                  [](std::error_code ec, std::shared_ptr<state> state_ptr) {
-                    if (!ec) std::clog << "DB opened, previous session << " << state_ptr->self->session_number << ", new session " << boost::endian::big_to_native(state_ptr->new_session_number_be) << "\n";
+                  [logger=self->logger, db_name=self->db_name_](std::error_code ec, std::shared_ptr<state> state_ptr) {
+                    if (!ec && logger) {
+                      logger->info("DB \"{}\" opened, previous session {}, new session {}",
+                          db_name, state_ptr->self->session_number, boost::endian::big_to_native(state_ptr->new_session_number_be));
+                    }
                     return asio::deferred.values(ec);
                   })
               | std::move(handler);
@@ -248,6 +258,8 @@ class raw_db
   std::shared_ptr<file_db_type> fdb_;
   cache_type cache_;
   session_number session_number_ = 0;
+  const std::string db_name_;
+  const std::shared_ptr<spdlog::logger> logger = spdlog::get("earnest.db");
 };
 
 
