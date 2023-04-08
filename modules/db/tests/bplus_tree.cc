@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
     spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.db", sink));
     spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.bplustree", sink));
 
-    spdlog::get("earnest.bplustree")->set_level(spdlog::level::trace);
+    spdlog::get("earnest.bplustree")->set_level(spdlog::level::debug);
   }
 
   if (argc < 2) {

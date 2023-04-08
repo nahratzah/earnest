@@ -4547,6 +4547,7 @@ class bplus_tree
                             self_op->lock_for_upgrade(i + 1u);
                           },
                           __FILE__, __LINE__);
+                      return; // callback will restart the loop.
                     }
                   }
 
@@ -4568,6 +4569,11 @@ class bplus_tree
         return asio::async_initiate<decltype(asio::deferred), void()>(
             [](auto handler, element_rebalancer_for_intr* self) {
               using handler_type = decltype(handler);
+
+              for (const auto& l : self->reparent) {
+                assert(l.uplock.is_locked());
+                assert(!l.exlock.is_locked());
+              }
 
               struct op
               : public std::enable_shared_from_this<op>
@@ -4824,7 +4830,7 @@ class bplus_tree
                 } else {
                   // We use `async_upgrade` (as opposed to `dispatch_upgrade`),
                   // because there could be thousands of page elements,
-                  // and dispatch recursion could cause the stack to throw huge.
+                  // and dispatch recursion could cause the stack to grow huge.
                   elem_to_lock.element_lock.async_upgrade(
                       completion_wrapper<void(monitor_uplock_type)>(
                           std::move(handler),
@@ -4923,7 +4929,7 @@ class bplus_tree
                 } else {
                   // We use `async_exclusive` (as opposed to `dispatch_upgrade`),
                   // because there could be thousands of page elements,
-                  // and dispatch recursion could cause the stack to throw huge.
+                  // and dispatch recursion could cause the stack to grow huge.
                   std::move(uplock).async_exclusive(
                       completion_wrapper<void(monitor_exlock_type)>(
                           std::move(handler),
@@ -4989,7 +4995,9 @@ class bplus_tree
             [self_op=this->shared_from_this(), ps, tx=std::move(tx)](monitor_uplock_type parent_uplock) mutable -> void {
               ps->uplocks[0] = std::move(parent_uplock);
 
-              if (ps->parent->erased_) {
+              if (ps->parent->erased_ || !ps->parent->find_index(ps->level_pages[0]->address).has_value()) [[unlikely]] {
+                // During acquisition of the lock, our page seems to have shifted away from this parent.
+                // We'll have to restart.
                 ps->reset();
                 std::invoke(*self_op);
                 return;
