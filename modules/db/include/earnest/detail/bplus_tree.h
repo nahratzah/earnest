@@ -6328,6 +6328,7 @@ struct formatter<earnest::detail::bplus_tree_page<RawDbType>>
 {
   auto format(const earnest::detail::bplus_tree_page<RawDbType>& pg, format_context& ctx) -> decltype(ctx.out()) {
     std::ostringstream s;
+    s << std::boolalpha;
     pg.log_dump(s);
     return format_to(ctx.out(), "{}", std::move(s).str());
   }
