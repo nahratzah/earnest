@@ -4115,7 +4115,7 @@ class bplus_tree
             std::ostringstream s;
             intr->log_dump(s);
             logger->trace(
-                "find-loeaf-page-for-insert on key {}, selected {} from {}",
+                "find-leaf-page-for-insert on key {}, selected {} from {}",
                 byte_span_printer(key),
                 *opt_child_page_address,
                 std::move(s).str());
