@@ -904,6 +904,7 @@ class bplus_tree_page
     {
       op(cycle_ptr::cycle_gptr<const bplus_tree_page> self, move_only_function<void(std::error_code, bplus_tree_intr_ptr, target_lock_type)> handler)
       : self(std::move(self)),
+        logger(this->self->logger),
         handler(std::move(handler))
       {}
 
@@ -932,6 +933,7 @@ class bplus_tree_page
 
         // There is no parent, so we return without an error, and with a nullptr.
         if (target_addr.offset == nil_page) {
+          logger->trace("parent page lookup: no parent page for {}", self->address);
           std::invoke(handler, std::error_code{}, nullptr, target_lock_type{});
           return;
         }
@@ -1012,16 +1014,16 @@ class bplus_tree_page
                 return;
               }
 
-              self_lock.reset(); // No longer need this lock.
               std::visit(
                   overload(
                       [&](bplus_tree_intr_ptr&& target_page) {
+                        self_lock.reset(); // No longer need this lock.
                         std::invoke(self_op->handler, std::error_code(), std::move(target_page), std::move(target_lock));
                       },
                       [&](bplus_tree_leaf_ptr&& target_page) {
                         // Parent page cannot be a leaf, so this would be bad.
-                        std::clog << "bplus-tree: bad-tree, parent page is a leaf\n";
-                        target_page->maybe_log_dump("parent page");
+                        self_op->logger->error("bad-tree, parent page is a leaf\norigin page: {}\nparent page: {}", *self_op->self, *target_page);
+                        self_lock.reset(); // No longer need this lock.
                         self_op->error_invoke(make_error_code(bplus_tree_errc::bad_tree));
                       }),
                   std::move(target_page));
@@ -1042,6 +1044,7 @@ class bplus_tree_page
       }
 
       const cycle_ptr::cycle_gptr<const bplus_tree_page> self;
+      const std::shared_ptr<spdlog::logger> logger;
       const move_only_function<void(std::error_code, bplus_tree_intr_ptr, target_lock_type)> handler;
     };
 
@@ -1200,9 +1203,13 @@ class bplus_tree_page
           self->page_lock.async_shared(
               [self, raw_db_allocator](auto lock) {
                 self->async_fix_augment_impl_(
-                    [](std::error_code ec) {
-                      if (ec && ec != make_error_code(db_errc::data_expired))
-                        std::clog << "bplus-tree: background augmentation update failed: " << ec.message() << "\n";
+                    [logger=self->logger](std::error_code ec) {
+                      if (!ec)
+                        logger->trace("background augmentation completed");
+                      else if (ec == make_error_code(db_errc::data_expired))
+                        logger->trace("background augmentation aborted: data expired");
+                      else
+                        logger->warn("background augmentation update failed: {}", ec.message());
                     },
                     false,
                     raw_db_allocator,
@@ -1244,6 +1251,7 @@ class bplus_tree_page
     {
       op(cycle_ptr::cycle_gptr<bplus_tree_page> self, move_only_function<void(std::error_code)> handler, TxAlloc tx_alloc, bool must_complete)
       : self(std::move(self)),
+        logger(this->self->logger),
         tx_alloc(std::move(tx_alloc)),
         handler(std::move(handler)),
         must_complete(must_complete)
@@ -1331,9 +1339,7 @@ class bplus_tree_page
 
         const std::optional<std::size_t> offset = parent->find_index(self->address);
         if (!offset.has_value()) {
-          std::clog << "bplus-tree: bad-tree, child-page not found within parent page\n";
-          self->maybe_log_dump("child page");
-          parent->maybe_log_dump("parent page");
+          logger->error("bad-tree, child-page not found within parent page\nchild page {}\nparent page {}", *self, *parent);
           error_invoke(make_error_code(bplus_tree_errc::bad_tree));
           return;
         }
@@ -1443,6 +1449,7 @@ class bplus_tree_page
       }
 
       cycle_ptr::cycle_gptr<bplus_tree_page> self;
+      const std::shared_ptr<spdlog::logger> logger;
       TxAlloc tx_alloc;
       const move_only_function<void(std::error_code)> handler;
       std::vector<std::byte> augment;
@@ -1506,15 +1513,6 @@ class bplus_tree_page
   public:
   auto log_dump(std::ostream& out) const -> void {
     log_dump_impl_(out);
-  }
-
-  auto maybe_log_dump([[maybe_unused]] std::string_view prefix = std::string_view()) -> void {
-#ifndef NDEBUG
-    using namespace std::literals;
-
-    if (!prefix.empty()) std::clog << prefix << " "sv;
-    log_dump(std::clog);
-#endif
   }
 
   protected:
@@ -2854,7 +2852,8 @@ class bplus_tree_leaf final
     : public std::enable_shared_from_this<op>
     {
       op(cycle_ptr::cycle_gptr<bplus_tree_leaf> page, cycle_ptr::cycle_gptr<raw_db_type> raw_db) noexcept
-      : page(page),
+      : page(std::move(page)),
+        logger(this->page->logger),
         cleanups(raw_db->get_allocator())
       {}
 
@@ -2998,10 +2997,11 @@ class bplus_tree_leaf final
 
       auto error_complete(std::error_code ec) -> void {
         if (ec == make_error_code(db_errc::data_expired)) return; // Don't log data-expired.
-        std::clog << "bplus-tree: error during background cleanup of use-list: " << ec.message() << "\n";
+        logger->warn("error during background cleanup of use-list: {}", ec.message());
       }
 
-      cycle_ptr::cycle_gptr<bplus_tree_leaf> page;
+      const cycle_ptr::cycle_gptr<bplus_tree_leaf> page;
+      const std::shared_ptr<spdlog::logger> logger;
       monitor_uplock_type page_uplock;
       monitor_exlock_type page_exlock;
       cleanup_data_vector cleanups;
@@ -3014,6 +3014,7 @@ class bplus_tree_leaf final
 
   template<typename TxAlloc>
   static auto async_visit(
+      std::shared_ptr<spdlog::logger> logger,
       bplus_element_reference<raw_db_type, true> begin,
       bplus_element_reference<raw_db_type, true> end,
       TxAlloc tx_alloc,
@@ -3044,12 +3045,13 @@ class bplus_tree_leaf final
       public:
       using allocator_type = TxAlloc;
 
-      op(bplus_element_reference<raw_db_type, true> end, TxAlloc tx_alloc, move_only_function<void(std::span<const bplus_element_reference<raw_db_type, true>>, move_only_function<void(std::error_code)>)> acceptor, move_only_function<void(std::error_code)> handler)
+      op(std::shared_ptr<spdlog::logger> logger, bplus_element_reference<raw_db_type, true> end, TxAlloc tx_alloc, move_only_function<void(std::span<const bplus_element_reference<raw_db_type, true>>, move_only_function<void(std::error_code)>)> acceptor, move_only_function<void(std::error_code)> handler)
       : end(std::move(end)),
         ptr_vector(tx_alloc),
         refs(tx_alloc),
         acceptor(std::move(acceptor)),
-        handler(std::move(handler))
+        handler(std::move(handler)),
+        logger(std::move(logger))
       {}
 
       op(const op&) = delete;
@@ -3205,8 +3207,7 @@ class bplus_tree_leaf final
                     if (leaf->versions.page_split != self_op->leaf_versions.page_split || leaf->versions.page_merge != self_op->leaf_versions.page_merge) {
                       self_op->gather(std::move(self_op->last_elem), true, std::move(leaf), std::move(leaf_lock));
                     } else if (next_page == nullptr) {
-                      std::clog << "bplus-tree: iteration running out of pages without finding iteration end point...\n";
-                      leaf->maybe_log_dump("most recent page");
+                      self_op->logger->warn("iteration running out of pages without finding iteration end point...\nmost recent page {}", *leaf);
                       std::invoke(self_op->handler, std::error_code{});
                     } else {
                       leaf_lock.reset();
@@ -3227,9 +3228,10 @@ class bplus_tree_leaf final
       cycle_ptr::cycle_weak_ptr<bplus_tree_leaf> weak_leaf;
       bplus_tree_versions leaf_versions;
       bplus_element_reference<raw_db_type, true> last_elem;
+      const std::shared_ptr<spdlog::logger> logger;
     };
 
-    std::invoke(*std::allocate_shared<op>(tx_alloc, std::move(end), tx_alloc, std::move(acceptor), std::move(handler)), std::move(begin));
+    std::invoke(*std::allocate_shared<op>(tx_alloc, std::move(logger), std::move(end), tx_alloc, std::move(acceptor), std::move(handler)), std::move(begin));
   }
 
   template<typename Stream, typename CompletionToken>
@@ -3652,7 +3654,7 @@ class bplus_tree
               // Verify the allocator didn't accidentally allocate in a different file.
               [self](std::error_code ec, cycle_ptr::cycle_gptr<leaf_type> leaf) {
                 if (!ec && self->address.file != leaf->address.file) [[unlikely]] {
-                  std::clog << "bplus-tree: tree lives in " << self->address.file << ", but allocator allocates to " << leaf->address.file << "; will fail root-page construction since bplus-tree cannot span multiple files.\n";
+                  self->logger->error("tree lives in {}, but allocator allocates to {}; will fail root-page construction since bplus-tree cannot span multiple files.", self->address.file, leaf->address.file);
                   ec = make_error_code(bplus_tree_errc::allocator_file_mismatch);
                 }
 
@@ -4112,20 +4114,14 @@ class bplus_tree
           std::optional<db_address> opt_child_page_address = intr->key_find(key);
 
           if (opt_child_page_address.has_value()) {
-            std::ostringstream s;
-            intr->log_dump(s);
             logger->trace(
                 "find-leaf-page-for-insert on key {}, selected {} from {}",
                 byte_span_printer(key),
                 *opt_child_page_address,
-                std::move(s).str());
-          }
-
-          if (opt_child_page_address.has_value()) {
+                *intr);
             return std::move(opt_child_page_address).value();
           } else {
-            std::clog << "bplus-tree: bad-tree, page has no child-pages\n";
-            intr->maybe_log_dump();
+            logger->error("bad-tree, page has no child-pages\n{}", *intr);
             return make_error_code(bplus_tree_errc::bad_tree);
           }
         },
@@ -4149,7 +4145,8 @@ class bplus_tree
       : tx_alloc(std::move(tx_alloc)),
         page(std::move(page)),
         tree(std::move(tree)),
-        handler(std::move(handler))
+        handler(std::move(handler)),
+        logger(this->tree->logger)
       {}
 
       op(const op&) = delete;
@@ -4236,10 +4233,9 @@ class bplus_tree
             }
 
             if (self_op->tree->address.file != self_op->page->address.file) [[unlikely]] {
-              page_uplock.reset();
               tree_uplock.reset();
-              std::clog << "bplus-tree: bad-tree, tree and page are in different files (tree file: " << self_op->tree->address.file << ", page file: " << self_op->page->address.file << ")\n";
-              self_op->page->maybe_log_dump();
+              self_op->logger->error("bad-tree, tree and page are in different files (tree file: {}, page file: {}\npage {}", self_op->tree->address.file, self_op->page->address.file, *self_op->page);
+              page_uplock.reset();
               self_op->error_invoke(make_error_code(bplus_tree_errc::bad_tree));
               return;
             }
@@ -4323,6 +4319,7 @@ class bplus_tree
       cycle_ptr::cycle_gptr<page_type> page;
       cycle_ptr::cycle_gptr<bplus_tree> tree;
       handler_type handler;
+      const std::shared_ptr<spdlog::logger> logger;
     };
 
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, cycle_ptr::cycle_gptr<intr_type>)>(
@@ -4663,7 +4660,8 @@ class bplus_tree
         tree(std::move(tree)),
         page(std::move(page)),
         page_split(std::move(page_split)),
-        handler(std::move(handler))
+        handler(std::move(handler)),
+        logger(this->tree->logger)
       {}
 
       op(const op&) = delete;
@@ -5091,9 +5089,7 @@ class bplus_tree
         // Find index in parent page.
         const std::optional<std::size_t> index_in_parent = ps->parent->find_index(ps->level_pages[0]->address);
         if (!index_in_parent.has_value()) [[unlikely]] {
-          std::clog << "bplus-tree: bad-tree, page not found in parent\n";
-          ps->parent->maybe_log_dump("parent");
-          ps->level_pages[0]->maybe_log_dump("ps->level_pages[0]");
+          logger->error("bad-tree, page not found in parent\nparent {}\nlevel_pages[0] {}", *ps->parent, *ps->level_pages[0]);
           std::invoke(barrier, make_error_code(bplus_tree_errc::bad_tree));
           return;
         }
@@ -5347,6 +5343,7 @@ class bplus_tree
       const cycle_ptr::cycle_gptr<PageType> page;
       bplus_tree_versions::type page_split;
       move_only_function<void(std::error_code)> handler;
+      const std::shared_ptr<spdlog::logger> logger;
     };
 
     std::invoke(*std::allocate_shared<op>(tx_alloc,
@@ -5895,34 +5892,31 @@ class bplus_tree
     return asio::async_initiate<CompletionToken, void(std::error_code, elem_ref_type)>(
         [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> self, TxAlloc tx_alloc) {
           self->tree_walk_(
-              [](cycle_ptr::cycle_gptr<intr_type> intr) -> std::variant<db_address, std::error_code> {
+              [logger=self->logger](cycle_ptr::cycle_gptr<intr_type> intr) -> std::variant<db_address, std::error_code> {
                 std::optional<db_address> addr = intr->get_index(0);
                 if (addr.has_value()) {
                   return std::move(addr).value();
                 } else {
-                  std::clog << "bplus-tree: bad-tree, page has no child at index 0\n";
-                  intr->maybe_log_dump();
+                  logger->error("bad-tree, page has no child at index {}\n{}", 0, *intr);
                   return make_error_code(bplus_tree_errc::bad_tree);
                 }
               },
               tree_path<TxAlloc>(self, std::move(tx_alloc)),
               completion_wrapper<void(std::error_code, tree_path<TxAlloc>, monitor_shlock_type)>(
                   std::move(handler),
-                  [](auto handler, std::error_code ec, tree_path<TxAlloc> path, monitor_shlock_type leaf_lock) {
+                  [logger=self->logger](auto handler, std::error_code ec, tree_path<TxAlloc> path, monitor_shlock_type leaf_lock) {
                     cycle_ptr::cycle_gptr<element> elem_ptr;
 
                     if (!ec && path.leaf_page.page->elements().empty()) [[unlikely]] {
-                      std::clog << "bplus-tree: bad-tree, empty leaf-page\n";
-                      path.leaf_page.page->maybe_log_dump();
+                      logger->error("bad-tree, empty leaf-page\n{}", *path.leaf_page.page);
                       ec = make_error_code(bplus_tree_errc::bad_tree);
                     }
 
                     if (!ec) {
                       elem_ptr = path.leaf_page.page->elements().front();
                       if (elem_ptr->type() != bplus_tree_leaf_use_element::before_first) [[unlikely]] {
-                        std::clog << "bplus-tree: bad-tree, last element is supposed to be " << bplus_tree_leaf_use_element::before_first
-                            << ", but is " << elem_ptr->type() << "\n";
-                        path.leaf_page.page->maybe_log_dump();
+                        logger->error("bad-tree, last element is supposed to be {}, but is {}\n{}",
+                            bplus_tree_leaf_use_element::before_first, elem_ptr->type(), *path.leaf_page.page);
                         ec = make_error_code(bplus_tree_errc::bad_tree);
                         elem_ptr.reset();
                       }
@@ -5961,34 +5955,31 @@ class bplus_tree
     return asio::async_initiate<CompletionToken, void(std::error_code, elem_ref_type)>(
         [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> self, TxAlloc tx_alloc) {
           self->tree_walk_(
-              [](cycle_ptr::cycle_gptr<intr_type> intr) -> std::variant<db_address, std::error_code> {
+              [logger=self->logger](cycle_ptr::cycle_gptr<intr_type> intr) -> std::variant<db_address, std::error_code> {
                 std::optional<db_address> addr = intr->get_index(intr->index_size() - 1u);
                 if (addr.has_value()) {
                   return std::move(addr).value();
                 } else {
-                  std::clog << "bplus-tree: bad-tree, page has no child at index " << (intr->index_size() - 1u) << "\n";
-                  intr->maybe_log_dump();
+                  logger->error("bad-tree, page has no child at index {}\n{}", intr->index_size() - 1u, *intr);
                   return make_error_code(bplus_tree_errc::bad_tree);
                 }
               },
               tree_path<TxAlloc>(self, std::move(tx_alloc)),
               completion_wrapper<void(std::error_code, tree_path<TxAlloc>, monitor_shlock_type)>(
                   std::move(handler),
-                  [](auto handler, std::error_code ec, tree_path<TxAlloc> path, monitor_shlock_type leaf_lock) {
+                  [logger=self->logger](auto handler, std::error_code ec, tree_path<TxAlloc> path, monitor_shlock_type leaf_lock) {
                     cycle_ptr::cycle_gptr<element> elem_ptr;
 
                     if (!ec && path.leaf_page.page->elements().empty()) [[unlikely]] {
-                      std::clog << "bplus-tree: bad-tree, empty leaf-page\n";
-                      path.leaf_page.page->maybe_log_dump();
+                      logger->error("bad-tree, empty leaf-page\n{}", *path.leaf_page.page);
                       ec = make_error_code(bplus_tree_errc::bad_tree);
                     }
 
                     if (!ec) {
                       elem_ptr = path.leaf_page.page->elements().back();
                       if (elem_ptr->type() != bplus_tree_leaf_use_element::after_last) [[unlikely]] {
-                        std::clog << "bplus-tree: bad-tree, last element is supposed to be " << bplus_tree_leaf_use_element::after_last
-                            << ", but is " << elem_ptr->type() << "\n";
-                        path.leaf_page.page->maybe_log_dump();
+                        logger->error("bad-tree, last element is supposed to be {}, but is {}\n{}",
+                            bplus_tree_leaf_use_element::after_last, elem_ptr->type(), *path.leaf_page.page);
                         ec = make_error_code(bplus_tree_errc::bad_tree);
                         elem_ptr.reset();
                       }
@@ -6024,9 +6015,9 @@ class bplus_tree
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, true> begin, bplus_element_reference<raw_db_type, true> end, TxAlloc tx_alloc, auto acceptor_fn) -> void {
           if constexpr(handler_has_executor_v<decltype(handler)>)
-            leaf_type::async_visit(std::move(begin), std::move(end), std::move(tx_alloc), std::move(acceptor_fn), completion_handler_fun(std::move(handler), self->get_executor()));
+            leaf_type::async_visit(self->logger, std::move(begin), std::move(end), std::move(tx_alloc), std::move(acceptor_fn), completion_handler_fun(std::move(handler), self->get_executor()));
           else
-            leaf_type::async_visit(std::move(begin), std::move(end), std::move(tx_alloc), std::move(acceptor_fn), std::move(handler));
+            leaf_type::async_visit(self->logger, std::move(begin), std::move(end), std::move(tx_alloc), std::move(acceptor_fn), std::move(handler));
         },
         token, this->shared_from_this(this), std::move(begin), std::move(end), std::move(tx_alloc), std::forward<AcceptorFn>(acceptor));
   }
@@ -6319,3 +6310,62 @@ class bplus_tree
 
 
 } /* namespace earnest::detail */
+
+namespace fmt {
+
+
+template<typename RawDbType>
+struct formatter<earnest::detail::bplus_tree_page<RawDbType>>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::bplus_tree_page<RawDbType>& pg, format_context& ctx) -> decltype(ctx.out()) {
+    std::ostringstream s;
+    pg.log_dump(s);
+    return format_to(ctx.out(), "{}", std::move(s).str());
+  }
+};
+
+template<typename RawDbType>
+struct formatter<earnest::detail::bplus_tree_intr<RawDbType>>
+: formatter<earnest::detail::bplus_tree_page<RawDbType>>
+{};
+
+template<typename RawDbType>
+struct formatter<earnest::detail::bplus_tree_leaf<RawDbType>>
+: formatter<earnest::detail::bplus_tree_page<RawDbType>>
+{};
+
+
+template<>
+struct formatter<earnest::detail::bplus_tree_leaf_use_element>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::bplus_tree_leaf_use_element& elem, format_context& ctx) -> decltype(ctx.out()) {
+    using namespace std::literals;
+
+    switch (elem) {
+      default:
+        return format_to(ctx.out(), "earnest::detail::bplus_tree_leaf_use_element({})",
+            static_cast<std::underlying_type_t<earnest::detail::bplus_tree_leaf_use_element>>(elem));
+      case earnest::detail::bplus_tree_leaf_use_element::unused:
+        return format_to(ctx.out(), "unused"sv);
+      case earnest::detail::bplus_tree_leaf_use_element::used:
+        return format_to(ctx.out(), "used"sv);
+      case earnest::detail::bplus_tree_leaf_use_element::before_first:
+        return format_to(ctx.out(), "before_first"sv);
+      case earnest::detail::bplus_tree_leaf_use_element::after_last:
+        return format_to(ctx.out(), "after_last"sv);
+      case earnest::detail::bplus_tree_leaf_use_element::ghost_create:
+        return format_to(ctx.out(), "ghost_create"sv);
+      case earnest::detail::bplus_tree_leaf_use_element::ghost_delete:
+        return format_to(ctx.out(), "ghost_delete"sv);
+      case earnest::detail::bplus_tree_leaf_use_element::ghost_iterator_before:
+        return format_to(ctx.out(), "ghost_iterator_before"sv);
+      case earnest::detail::bplus_tree_leaf_use_element::ghost_iterator_after:
+        return format_to(ctx.out(), "ghost_iterator_after"sv);
+    }
+  }
+};
+
+
+} /* namespace fmt */
