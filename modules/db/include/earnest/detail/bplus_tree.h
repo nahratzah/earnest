@@ -1358,7 +1358,7 @@ class bplus_tree_page
           return;
         }
 
-        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, tx_alloc);
+        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
         parent->async_set_augments_diskonly_op(
             tx, offset.value(), std::span<const std::byte>(this->augment),
             [ self_op=this->shared_from_this(),
@@ -2920,7 +2920,7 @@ class bplus_tree_leaf final
           return;
         }
 
-        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, get_allocator());
+        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, get_allocator());
         auto barrier = make_completion_barrier(
             [self_op=this->shared_from_this(), tx](std::error_code ec) {
               if (ec)
@@ -3645,7 +3645,7 @@ class bplus_tree
             std::invoke(handler, make_error_code(db_errc::data_expired), nullptr, monitor_uplock_type{});
             return;
           }
-          auto tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, tx_alloc);
+          auto tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
 
           leaf_type::async_new_page(tx, self->db_alloc_, self->spec, raw_db, nil_page, nil_page, nil_page, true, asio::deferred)
           | asio::deferred(
@@ -4186,7 +4186,7 @@ class bplus_tree
         | asio::deferred(
             [tx_alloc, tree, page, raw_db](std::vector<std::byte> augment, bplus_tree_versions page_versions, monitor_shlock_type page_shlock) {
               page_shlock.reset(); // No longer needed.
-              tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, tx_alloc);
+              tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
               const auto augment_ptr = std::allocate_shared<std::vector<std::byte, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::byte>>>(
                   tx.get_allocator(),
                   augment.begin(), augment.end(), tx.get_allocator());
@@ -4687,7 +4687,7 @@ class bplus_tree
 
       private:
       auto create_sibling(cycle_ptr::cycle_gptr<raw_db_type> raw_db, cycle_ptr::cycle_gptr<intr_type> parent) -> void {
-        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::read_write, tx_alloc);
+        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
 
         if constexpr(std::is_same_v<intr_type, PageType>) {
           intr_type::async_new_page(

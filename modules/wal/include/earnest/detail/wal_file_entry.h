@@ -12,6 +12,7 @@
 
 #include <earnest/detail/fanout.h>
 #include <earnest/detail/fanout_barrier.h>
+#include <earnest/detail/move_only_function.h>
 #include <earnest/detail/wal_flusher.h>
 #include <earnest/detail/wal_records.h>
 #include <earnest/dir.h>
@@ -58,6 +59,14 @@ class wal_file_entry
   using write_records_vector = std::vector<write_variant_type, std::scoped_allocator_adaptor<rebind_alloc<write_variant_type>>>;
   using fd_type = fd<executor_type>;
 
+  private:
+  struct write_record_with_offset {
+    write_variant_type record;
+    std::uint64_t offset;
+  };
+  using write_record_with_offset_vector = std::vector<write_record_with_offset, std::scoped_allocator_adaptor<rebind_alloc<write_record_with_offset>>>;
+
+  public:
   wal_file_entry(const executor_type& ex, allocator_type alloc);
 
   wal_file_entry(const wal_file_entry&) = delete;
@@ -96,14 +105,14 @@ class wal_file_entry
 #if __cpp_concepts >= 201907L
   requires std::ranges::input_range<std::remove_reference_t<Range>>
 #endif
-  auto async_append(Range&& records, CompletionToken&& token, TransactionValidator&& transaction_validator = no_transaction_validation());
+  auto async_append(Range&& records, CompletionToken&& token, TransactionValidator&& transaction_validator = no_transaction_validation(), move_only_function<void(records_vector)> on_successful_write_callback = move_only_function<void(records_vector)>());
 
   template<typename CompletionToken, typename TransactionValidator = no_transaction_validation>
-  auto async_append(write_records_vector records, CompletionToken&& token, TransactionValidator&& transaction_validator = no_transaction_validation());
+  auto async_append(write_records_vector records, CompletionToken&& token, TransactionValidator&& transaction_validator = no_transaction_validation(), move_only_function<void(records_vector)> on_successful_write_callback = move_only_function<void(records_vector)>());
 
   private:
   template<typename OnSpaceAssigned, typename TransactionValidator>
-  auto async_append_impl_(write_records_vector records, move_only_function<void(std::error_code)>&& completion_handler, OnSpaceAssigned&& on_space_assigned, TransactionValidator&& transaction_validator) -> void;
+  auto async_append_impl_(write_records_vector records, move_only_function<void(std::error_code)>&& completion_handler, OnSpaceAssigned&& on_space_assigned, TransactionValidator&& transaction_validator, move_only_function<void(records_vector)> on_successful_write_callback) -> void;
 
   public:
   template<typename CompletionToken>
@@ -126,8 +135,8 @@ class wal_file_entry
   private:
   auto async_records_impl_(move_only_function<std::error_code(variant_type)> acceptor, move_only_function<void(std::error_code)> completion_handler) const;
 
-  template<typename CompletionToken, typename OnSpaceAssigned, typename TransactionValidator = no_transaction_validation>
-  auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state = wal_file_entry_state::ready, TransactionValidator&& transaction_validator = no_transaction_validation());
+  template<typename CompletionToken, typename OnSpaceAssigned, typename TransactionValidator>
+  auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state, TransactionValidator&& transaction_validator, move_only_function<void(records_vector)> on_successful_write_callback, write_record_with_offset_vector records);
 
   template<typename CompletionToken, typename Barrier, typename Fanout, typename DeferredTransactionValidator>
   auto append_bytes_at_(
@@ -135,7 +144,9 @@ class wal_file_entry
       std::vector<std::byte, rebind_alloc<std::byte>>&& bytes,
       CompletionToken&& token,
       Barrier&& barrier, Fanout&& f,
-      DeferredTransactionValidator&& deferred_transaction_validator);
+      DeferredTransactionValidator&& deferred_transaction_validator,
+      move_only_function<void(records_vector)> on_successful_write_callback,
+      write_record_with_offset_vector records);
 
   template<typename CompletionToken>
   auto write_skip_record_(

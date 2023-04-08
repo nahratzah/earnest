@@ -3,9 +3,10 @@
 #include <type_traits>
 #include <variant>
 
+#include <earnest/detail/overload.h>
+#include <earnest/fd.h>
 #include <earnest/file_id.h>
 #include <earnest/xdr.h>
-#include <earnest/fd.h>
 
 namespace earnest::detail {
 
@@ -243,8 +244,18 @@ inline auto operator&(::earnest::xdr<X>&& x, typename ::earnest::xdr<X>::templat
 }
 
 
+struct wal_record_modify_file_write32 {
+  static inline constexpr std::size_t data_offset = 4u;
+
+  file_id file;
+  std::uint64_t file_offset;
+  std::vector<std::byte> data;
+};
+
 template<typename Executor, typename Reactor = aio::reactor>
 struct wal_record_modify_file32 {
+  static inline constexpr std::size_t data_offset = wal_record_modify_file_write32::data_offset;
+
   file_id file;
   std::uint64_t file_offset;
   std::uint64_t wal_offset;
@@ -254,19 +265,11 @@ struct wal_record_modify_file32 {
   auto operator<=>(const wal_record_modify_file32& y) const noexcept = default;
 };
 
-struct wal_record_modify_file_write32 {
-  file_id file;
-  std::uint64_t file_offset;
-  std::vector<std::byte> data;
-};
-
 template<typename Executor, typename Reactor> struct record_write_type_<wal_record_modify_file32<Executor, Reactor>> { using type = wal_record_modify_file_write32; };
 
 template<typename... X, typename Executor, typename Reactor>
 inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_modify_file32<Executor, Reactor>& r) {
   return std::move(x)
-      & r.file
-      & xdr_uint64(r.file_offset)
       & xdr_uint32(r.wal_len)
       & xdr_manual(
           [&r](auto& stream, auto callback) {
@@ -274,15 +277,17 @@ inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_modify_file32<
             stream.skip(r.wal_len);
             if (r.wal_len % 4u != 0u) stream.skip(4u - (r.wal_len % 4u));
             std::invoke(callback, std::error_code());
-          });
+          })
+      & r.file
+      & xdr_uint64(r.file_offset);
 }
 
 template<typename... X>
 inline auto operator&(::earnest::xdr_writer<X...>&& x, typename ::earnest::xdr_writer<X...>::template typed_function_arg<wal_record_modify_file_write32> r) {
   return std::move(x)
+      & xdr_bytes(r.data)
       & r.file
-      & xdr_uint64(r.file_offset)
-      & xdr_bytes(r.data);
+      & xdr_uint64(r.file_offset);
 }
 
 
@@ -434,6 +439,53 @@ template<typename WalRecordVariant>
 auto make_wal_record_no_bookkeeping(WalRecordVariant&& v) -> wal_record_no_bookkeeping<std::remove_cvref_t<WalRecordVariant>> {
   return record_support_::without_bookkeeping_variant<std::remove_cvref_t<WalRecordVariant>>::convert(std::forward<WalRecordVariant>(v));
 }
+
+
+template<typename FdType, typename VariantType> struct wal_record_write_to_read_converter;
+
+template<typename Executor, typename Reactor, typename... T>
+struct wal_record_write_to_read_converter<fd<Executor, Reactor>, std::variant<T...>> {
+  using variant_type = std::variant<T...>;
+  using write_variant_type = record_write_type_t<variant_type>;
+  static inline constexpr std::size_t variant_discriminant_bytes = 4;
+
+  wal_record_write_to_read_converter(std::shared_ptr<const fd<Executor, Reactor>> wal_file, std::uint64_t offset) noexcept
+  : wal_file(std::move(wal_file)),
+    offset(std::move(offset))
+  {}
+
+  auto operator()(const write_variant_type& wrecord) -> variant_type {
+    return std::visit(
+        overload(
+            [](const wal_record_end_of_records& r) -> variant_type { return r; },
+            [](const wal_record_noop& r) -> variant_type { return r; },
+            [](const wal_record_skip32& r) -> variant_type { return r; },
+            [](const wal_record_skip64& r) -> variant_type { return r; },
+            [](const wal_record_seal& r) -> variant_type { return r; },
+            [](const wal_record_wal_archived& r) -> variant_type { return r; },
+            [](const wal_record_rollover_intent& r) -> variant_type { return r; },
+            [](const wal_record_rollover_ready& r) -> variant_type { return r; },
+            []<std::size_t Idx>(const wal_record_reserved<Idx>& r) -> variant_type { return r; },
+            [](const wal_record_create_file& r) -> variant_type { return r; },
+            [](const wal_record_erase_file& r) -> variant_type { return r; },
+            [](const wal_record_truncate_file& r) -> variant_type { return r; },
+            [this](const record_write_type_t<wal_record_modify_file32<Executor, Reactor>>& r) -> variant_type {
+              if (r.data.size() > 0xffff'ffffU) throw std::logic_error("too much data");
+              return wal_record_modify_file32<Executor, Reactor>{
+                .file=r.file,
+                .file_offset=r.file_offset,
+                .wal_offset=this->offset + record_write_type_t<wal_record_modify_file32<Executor, Reactor>>::data_offset + variant_discriminant_bytes,
+                .wal_len=static_cast<std::uint32_t>(r.data.size()),
+                .wal_file=this->wal_file,
+              };
+            }),
+        wrecord);
+  }
+
+  private:
+  std::shared_ptr<const fd<Executor, Reactor>> wal_file;
+  std::uint64_t offset;
+};
 
 
 } /* namespace earnest::detail */
