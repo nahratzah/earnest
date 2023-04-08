@@ -153,7 +153,7 @@ NEW_TEST(insert_many_concurrently) {
   CHECK_EQUAL(expect, read_all());
 }
 
-NEW_TEST(insert_many_concurrently_with_random_order) {
+NEW_TEST(insert_many_concurrently_with_random_order_multithreaded) {
   read_kv_vector expect;
   for (std::size_t seq = 0; seq < total_positions_to_fill_tree_3_levels; ++seq) {
     auto key = std::string(
