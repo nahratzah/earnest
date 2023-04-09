@@ -22,6 +22,8 @@ find_package(Boost REQUIRED)
 target_include_directories(db INTERFACE ${Boost_INCLUDE_DIR})
 target_link_libraries(db INTERFACE util io asio asio_util wal cycle_ptr libhoard prometheus-cpp::core spdlog::spdlog)
 
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/bplus_tree_test_tmpdir")
+
 add_executable(db_cache_test)
 target_link_libraries(db_cache_test PUBLIC db UnitTest++)
 target_sources(db_cache_test PRIVATE
