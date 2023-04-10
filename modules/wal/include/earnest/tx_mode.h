@@ -1,8 +1,9 @@
-#ifndef EARNEST_TX_MODE_H
-#define EARNEST_TX_MODE_H
+#pragma once
 
 #include <type_traits>
 #include <string_view>
+
+#include <spdlog/spdlog.h>
 
 namespace earnest {
 
@@ -184,4 +185,36 @@ constexpr auto operator~(tx_mode x) noexcept -> tx_mode {
 
 } /* namespace earnest */
 
-#endif /* EARNEST_TX_MODE_H */
+namespace fmt {
+
+
+template<>
+struct formatter<earnest::tx_mode>
+: formatter<std::string>
+{
+  auto format(earnest::tx_mode i, format_context& ctx) -> decltype(ctx.out()) {
+    using namespace std::literals;
+
+    std::string_view isv;
+    switch (i) {
+      default: [[unlikely]]
+        return format_to(ctx.out(), "tx-mode:0x{:x}", static_cast<std::underlying_type_t<earnest::tx_mode>>(i));
+      case earnest::tx_mode::decline:
+        isv = "tx-mode-decline"sv;
+        break;
+      case earnest::tx_mode::write_only:
+        isv = "write-only"sv;
+        break;
+      case earnest::tx_mode::read_only:
+        isv = "read-only"sv;
+        break;
+      case earnest::tx_mode::read_write:
+        isv = "read-write"sv;
+        break;
+    }
+    return format_to(ctx.out(), "{}", isv);
+  }
+};
+
+
+} /* namespace spdlog::fmt */

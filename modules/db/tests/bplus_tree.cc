@@ -189,6 +189,7 @@ int main(int argc, char** argv) {
     auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(std::clog);
     spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.db", sink));
     spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.bplustree", sink));
+    spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.file_grow_allocator", sink));
 
     spdlog::get("earnest.bplustree")->set_level(spdlog::level::debug);
   }

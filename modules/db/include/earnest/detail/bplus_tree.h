@@ -1364,7 +1364,7 @@ class bplus_tree_page
           return;
         }
 
-        tx_type tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, tx_alloc);
+        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
         parent->async_set_augments_diskonly_op(
             tx, offset.value(), std::span<const std::byte>(this->augment),
             [ self_op=this->shared_from_this(),
@@ -2919,7 +2919,7 @@ class bplus_tree_leaf final
           return;
         }
 
-        tx_type tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, get_allocator());
+        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, get_allocator());
         auto barrier = make_completion_barrier(
             [self_op=this->shared_from_this(), tx](std::error_code ec) {
               if (ec)
@@ -3653,7 +3653,7 @@ class bplus_tree
             std::invoke(handler, make_error_code(db_errc::data_expired), nullptr, monitor_uplock_type{});
             return;
           }
-          auto tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, tx_alloc);
+          auto tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
 
           leaf_type::async_new_page(tx, self->db_alloc_, self->spec, raw_db, nil_page, nil_page, nil_page, true, asio::deferred)
           | asio::deferred(
@@ -3725,6 +3725,7 @@ class bplus_tree
               [self](monitor_exlock_type lock, std::error_code ec, cycle_ptr::cycle_gptr<leaf_type> leaf) {
                 monitor_uplock_type uplock;
                 if (!ec) {
+                  assert(self->hdr_.root == nil_page);
                   self->hdr_.root = leaf->address.offset;
                   uplock = lock.as_upgrade_lock();
                 }
@@ -4161,10 +4162,13 @@ class bplus_tree
       auto operator()() -> void {
         page->async_parent_page(std::false_type(), asio::deferred)
         | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent, [[maybe_unused]] monitor_shlock_type parent_lock) -> void {
-            if (ec || parent != nullptr)
+            if (ec || parent != nullptr) {
+              if (!ec)
+                self_op->logger->debug("ensure_parent: page {} has existing parent {}", self_op->page->address, parent->address);
               std::invoke(self_op->handler, std::move(ec), std::move(parent));
-            else
+            } else {
               self_op->create_new_parent();
+            }
           };
       }
 
@@ -4186,7 +4190,7 @@ class bplus_tree
               self_op->augment.assign(augment.begin(), augment.end());
 
               page_shlock.reset(); // No longer needed.
-              tx_type tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, self_op->tx_alloc);
+              tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, self_op->tx_alloc);
               return intr_type::async_new_page(
                   tx, self_op->tree->db_alloc_, self_op->page->spec, raw_db, nil_page,
                   self_op->page->address.offset, self_op->augment,
@@ -4262,11 +4266,13 @@ class bplus_tree
                         return page_uplock.dispatch_exclusive(asio::append(asio::deferred, std::move(tree_exlock)));
                       })
                   | asio::deferred(
-                      [page=self_op->page, parent_page, tree=self_op->tree](monitor_exlock_type page_exlock, monitor_exlock_type tree_exlock) {
-                        assert(page->parent_offset == nil_page);
-                        assert(tree->hdr_.root == page->address.offset);
+                      [self_op, parent_page](monitor_exlock_type page_exlock, monitor_exlock_type tree_exlock) {
+                        assert(self_op->page->parent_offset == nil_page);
+                        assert(self_op->tree->hdr_.root == self_op->page->address.offset);
 
-                        page->parent_offset = tree->hdr_.root = parent_page->address.offset;
+                        self_op->page->parent_offset = self_op->tree->hdr_.root = parent_page->address.offset;
+                        self_op->logger->debug("ensure parent: installed new parent {} for page {}; tree-root is {}",
+                            parent_page->address, self_op->page->address, self_op->tree->hdr_.root);
                         page_exlock.reset();
                         tree_exlock.reset();
                         return asio::deferred.values(std::error_code{}, parent_page);
@@ -4323,6 +4329,7 @@ class bplus_tree
   template<typename PageType, typename TxAlloc>
   requires (std::is_same_v<PageType, intr_type> || std::is_same_v<PageType, leaf_type>)
   auto split_page_impl_(cycle_ptr::cycle_gptr<PageType> page, bplus_tree_versions::type page_split, TxAlloc tx_alloc, move_only_function<void(std::error_code)> handler) -> void {
+    using namespace std::literals;
     using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
     using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
@@ -4679,7 +4686,11 @@ class bplus_tree
 
       private:
       auto create_sibling(cycle_ptr::cycle_gptr<raw_db_type> raw_db, cycle_ptr::cycle_gptr<intr_type> parent) -> void {
-        tx_type tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, tx_alloc);
+        logger->trace("requested split of {} page {} (parent is {})",
+            (std::is_same_v<PageType, intr_type> ? "interior"sv : "leaf"sv),
+            page->address, parent->address);
+
+        tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
 
         if constexpr(std::is_same_v<intr_type, PageType>) {
           intr_type::async_new_page(
@@ -5038,10 +5049,13 @@ class bplus_tree
 
       auto decide_shift_and_lock_shifted_children(tx_type tx, std::shared_ptr<page_selection> ps) -> void {
         auto get_shift = [this]() -> std::uint32_t {
-          if constexpr(std::is_same_v<PageType, intr_type>)
+          if constexpr(std::is_same_v<PageType, intr_type>) {
+            assert(this->page->index_size() >= 2);
             return this->page->index_size() / 2u;
-          else
+          } else {
+            assert(this->page->elements().size() >= 2);
             return this->page->elements().size() / 2u;
+          }
         };
         const std::uint32_t shift = get_shift();
 
@@ -5245,8 +5259,10 @@ class bplus_tree
           span_copy(ps->level_pages[1]->augment_multispan(0, shift), page->augment_multispan(copy_begin, copy_end));
           span_copy(ps->level_pages[1]->key_multispan(0, shift - 1u), page->key_multispan(copy_begin, copy_end - 1u));
 
-          for (const auto& child_page : ps->reparent)
+          for (const auto& child_page : ps->reparent) {
+            assert(child_page.page->parent_offset == ps->level_pages[0]->address.offset);
             child_page.page->parent_offset = ps->level_pages[1]->address.offset;
+          }
         } else {
           static_assert(std::is_same_v<PageType, leaf_type>);
 
@@ -5318,6 +5334,9 @@ class bplus_tree
         ++ps->level_pages[1]->versions.augment;
 
         // We're done \o/
+        logger->debug("done splitting {} page {}, new sibling is {} (common parent is {})",
+            (std::is_same_v<PageType, intr_type> ? "interior"sv : "leaf"sv),
+            page->address, ps->level_pages[1]->address, ps->parent->address);
         done_invoke();
 
         // We want the augmentations to start updating, so we'll kick that off.
@@ -5572,7 +5591,7 @@ class bplus_tree
         error_invoke(make_error_code(db_errc::data_expired));
         return;
       }
-      tx_type tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, get_allocator());
+      tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, get_allocator());
 
       shift_lock_all_for_upgrade_(asio::deferred)
       | asio::deferred(
@@ -5741,7 +5760,7 @@ class bplus_tree
         error_invoke(make_error_code(db_errc::data_expired));
         return;
       }
-      tx_type tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, get_allocator());
+      tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, get_allocator());
 
       asio::async_initiate<decltype(asio::deferred), void(std::error_code)>(
           [](auto handler, std::shared_ptr<insert_op> self_op, tx_type tx, std::size_t insert_index) -> void {
@@ -5817,7 +5836,7 @@ class bplus_tree
         error_invoke(make_error_code(db_errc::data_expired));
         return;
       }
-      tx_type tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, get_allocator());
+      tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, get_allocator());
 
       elem_ref->template async_lock_owner<monitor_uplock_type>(this->get_allocator(), asio::deferred)
       | asio::deferred(

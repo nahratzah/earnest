@@ -970,6 +970,9 @@ class transaction {
   }
 
   public:
+  auto get_isolation() const noexcept -> isolation { return i_; }
+  auto get_tx_mode() const noexcept -> tx_mode { return m_; }
+
   template<typename Alloc, typename CompletionToken>
   auto async_file_contents(file_id id, Alloc alloc, CompletionToken&& token) const {
     return async_file_contents_op_(std::move(id), std::move(alloc)) | std::forward<CompletionToken>(token);

@@ -1,6 +1,9 @@
 #pragma once
 
 #include <iosfwd>
+#include <string_view>
+
+#include <spdlog/spdlog.h>
 
 namespace earnest {
 
@@ -56,3 +59,34 @@ auto operator<<(std::basic_ostream<Char, Traits>& out, isolation i) -> std::basi
 
 
 } /* namespace earnest */
+
+namespace fmt {
+
+
+template<>
+struct formatter<earnest::isolation>
+: formatter<std::string>
+{
+  auto format(earnest::isolation i, format_context& ctx) -> decltype(ctx.out()) {
+    using namespace std::literals;
+
+    std::string_view isv;
+    switch (i) {
+      default: [[unlikely]]
+        return format_to(ctx.out(), "isolation:{}", static_cast<std::underlying_type_t<earnest::isolation>>(i));
+      case earnest::isolation::read_commited:
+        isv = "read-committed"sv;
+        break;
+      case earnest::isolation::repeatable_read:
+        isv = "repeatable-read"sv;
+        break;
+      case earnest::isolation::serializable:
+        isv = "serializable"sv;
+        break;
+    }
+    return format_to(ctx.out(), "{}", isv);
+  }
+};
+
+
+} /* namespace spdlog::fmt */
