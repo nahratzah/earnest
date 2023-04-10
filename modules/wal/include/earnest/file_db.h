@@ -285,7 +285,6 @@ class file_db
         this->shared_from_this(),
         i,
         m,
-        std::nullopt,
         std::move(alloc));
   }
 
@@ -941,7 +940,7 @@ class transaction {
   transaction(transaction&&) = default;
 
   private:
-  transaction(std::shared_ptr<FileDB> fdb, isolation i, tx_mode m, std::optional<std::unordered_set<file_id>> fileset = std::nullopt, allocator_type allocator = allocator_type())
+  transaction(std::shared_ptr<FileDB> fdb, isolation i, tx_mode m, allocator_type allocator = allocator_type())
   : fdb_(fdb),
     alloc_(allocator),
     i_(i),
@@ -964,7 +963,7 @@ class transaction {
         std::invoke(read_barrier_, std::error_code(), nullptr);
         break;
       case isolation::repeatable_read:
-        compute_replacements_map_op_(fdb, std::move(fileset), !read_permitted(m), allocator) | read_barrier_;
+        compute_replacements_map_op_(fdb, !read_permitted(m), allocator) | read_barrier_;
         break;
     }
   }
@@ -1008,19 +1007,15 @@ class transaction {
   }
 
   private:
-  static auto compute_replacements_map_op_(std::shared_ptr<file_db> fdb, std::optional<std::unordered_set<file_id>> fileset, bool omit_reads, allocator_type allocator) {
+  static auto compute_replacements_map_op_(std::shared_ptr<file_db> fdb, bool omit_reads, allocator_type allocator) {
     auto repl_map = std::allocate_shared<locked_file_replacements>(allocator, allocator);
     return fdb->async_tx(
-        [fdb, repl_map, omit_reads, fileset=std::move(fileset), ex=fdb->get_executor(), allocator](const auto& record) -> std::error_code {
+        [fdb, repl_map, omit_reads, ex=fdb->get_executor(), allocator](const auto& record) -> std::error_code {
           return std::visit(
               [&](const auto& r) -> std::error_code {
-                if (!fileset.has_value() || fileset->contains(r.file)) {
-                  auto [iter, inserted] = repl_map->fr.try_emplace(r.file, allocator);
-                  if (inserted) iter->second.omit_reads = omit_reads;
-                  return iter->second.apply(r);
-                } else {
-                  return {};
-                }
+                auto [iter, inserted] = repl_map->fr.try_emplace(r.file, allocator);
+                if (inserted) iter->second.omit_reads = omit_reads;
+                return iter->second.apply(r);
               },
               record);
         },
@@ -1539,14 +1534,7 @@ class transaction {
   }
 
   static auto can_commit_op_(std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap, allocator_type allocator) {
-    std::unordered_set<file_id> id_set;
-    std::transform(
-        wmap->begin(), wmap->end(),
-        std::inserter(id_set, id_set.end()),
-        [](const auto& wmap_pair) -> const file_id& {
-          return wmap_pair.first;
-        });
-    return compute_replacements_map_op_(fdb, std::move(id_set), true, allocator)
+    return compute_replacements_map_op_(fdb, true, allocator)
     | asio::deferred(
         [fdb, wmap](std::error_code ec, std::shared_ptr<const locked_file_replacements> fr_map) mutable {
           return detail::deferred_on_executor<void(std::error_code)>(
