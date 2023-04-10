@@ -3563,7 +3563,7 @@ class bplus_tree
   }
 
   private:
-  template<typename T, std::size_t TExtent, typename U, std::size_t UExtent>
+  template<typename T, std::size_t TExtent = std::dynamic_extent, typename U = std::add_const_t<std::type_identity_t<T>>, std::size_t UExtent = std::dynamic_extent>
   requires std::assignable_from<T&, U&>
   static auto span_copy(std::span<T, TExtent> dst, std::span<U, UExtent> src) -> void {
     static_assert(TExtent == std::dynamic_extent || UExtent == std::dynamic_extent || TExtent == UExtent, "extents are of unequal length");
@@ -3573,6 +3573,12 @@ class bplus_tree
       std::copy_backward(src.begin(), src.end(), dst.end());
     else
       std::copy(src.begin(), src.end(), dst.begin());
+  }
+
+  template<typename T, std::size_t TExtent, typename Src>
+  requires std::assignable_from<T&, std::add_lvalue_reference_t<std::add_const_t<typename Src::value_type>>> && std::constructible_from<std::span<std::add_const_t<typename Src::value_type>>, const Src&>
+  static auto span_copy(std::span<T, TExtent> dst, const Src& src) -> void {
+    span_copy(dst, std::span<std::add_const_t<typename Src::value_type>>(src));
   }
 
   template<typename TxAlloc>
@@ -4135,17 +4141,17 @@ class bplus_tree
     using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
     using tx_type = typename raw_db_type::template fdb_transaction<TxAlloc>;
-    using tx_file_type = typename tx_type::file;
     using handler_type = move_only_function<void(std::error_code, cycle_ptr::cycle_gptr<intr_type>)>;
 
     struct op
     : public std::enable_shared_from_this<op>
     {
       op(cycle_ptr::cycle_gptr<bplus_tree> tree, cycle_ptr::cycle_gptr<page_type> page, TxAlloc tx_alloc, handler_type handler)
-      : tx_alloc(std::move(tx_alloc)),
+      : tx_alloc(tx_alloc),
         page(std::move(page)),
         tree(std::move(tree)),
         handler(std::move(handler)),
+        augment(tx_alloc),
         logger(this->tree->logger)
       {}
 
@@ -4153,8 +4159,6 @@ class bplus_tree
       op(op&&) = delete;
 
       auto operator()() -> void {
-        auto tree = this->tree; // Make a copy, since we'll move *this.
-        auto page = this->page; // Make a copy, since we'll move *this.
         page->async_parent_page(std::false_type(), asio::deferred)
         | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent, [[maybe_unused]] monitor_shlock_type parent_lock) -> void {
             if (ec || parent != nullptr)
@@ -4172,27 +4176,23 @@ class bplus_tree
           return;
         }
 
-        auto tree = this->tree; // Make a copy, since we'll move *this.
-        auto page = this->page; // Make a copy, since we'll move *this.
-        auto tx_alloc = this->tx_alloc; // Make a copy, since we'll move *this.
         page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
         | asio::deferred(
-            [page](monitor_shlock_type page_shlock) {
-              return page->async_compute_page_augments(asio::append(asio::deferred, page->versions, std::move(page_shlock)));
+            [self_op=this->shared_from_this()](monitor_shlock_type page_shlock) {
+              return self_op->page->async_compute_page_augments(asio::append(asio::deferred, self_op->page->versions, std::move(page_shlock)));
             })
         | asio::deferred(
-            [tx_alloc, tree, page, raw_db](std::vector<std::byte> augment, bplus_tree_versions page_versions, monitor_shlock_type page_shlock) {
+            [self_op=this->shared_from_this(), raw_db](std::vector<std::byte> augment, bplus_tree_versions page_versions, monitor_shlock_type page_shlock) {
+              self_op->augment.assign(augment.begin(), augment.end());
+
               page_shlock.reset(); // No longer needed.
-              tx_type tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, tx_alloc);
-              const auto augment_ptr = std::allocate_shared<std::vector<std::byte, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::byte>>>(
-                  tx.get_allocator(),
-                  augment.begin(), augment.end(), tx.get_allocator());
+              tx_type tx = raw_db->fdb_tx_begin(isolation::repeatable_read, tx_mode::write_only, self_op->tx_alloc);
               return intr_type::async_new_page(
-                  tx, tree->db_alloc_, page->spec, raw_db, nil_page,
-                  page->address.offset, *augment_ptr,
-                  asio::append(asio::deferred, augment_ptr, std::move(page_versions), tx));
+                  tx, self_op->tree->db_alloc_, self_op->page->spec, raw_db, nil_page,
+                  self_op->page->address.offset, self_op->augment,
+                  asio::append(asio::deferred, std::move(page_versions), tx));
             })
-        | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent_page, [[maybe_unused]] auto augment_ptr, bplus_tree_versions page_versions, tx_type tx) {
+        | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions, tx_type tx) {
             if (ec) {
               self_op->error_invoke(ec);
               return;
@@ -4203,12 +4203,10 @@ class bplus_tree
       }
 
       auto verify_augment_and_install_page(tx_type tx, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) -> void {
-        auto tree = this->tree; // Make a copy, since we'll move *this.
-        auto page = this->page; // Make a copy, since we'll move *this.
         tree->page_lock.dispatch_upgrade(asio::append(asio::deferred, std::move(parent_page), std::move(page_versions)), __FILE__, __LINE__)
         | asio::deferred(
-            [page](monitor_uplock_type tree_uplock, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) {
-              return page->page_lock.dispatch_upgrade(asio::append(asio::deferred, std::move(tree_uplock), std::move(parent_page), std::move(page_versions)), __FILE__, __LINE__);
+            [self_op=this->shared_from_this()](monitor_uplock_type tree_uplock, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) {
+              return self_op->page->page_lock.dispatch_upgrade(asio::append(asio::deferred, std::move(tree_uplock), std::move(parent_page), std::move(page_versions)), __FILE__, __LINE__);
             })
         | [tx, self_op=this->shared_from_this()](monitor_uplock_type page_uplock, monitor_uplock_type tree_uplock, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions) mutable {
             if (self_op->page->erased_ || self_op->tree->erased_) [[unlikely]] {
@@ -4265,6 +4263,9 @@ class bplus_tree
                       })
                   | asio::deferred(
                       [page=self_op->page, parent_page, tree=self_op->tree](monitor_exlock_type page_exlock, monitor_exlock_type tree_exlock) {
+                        assert(page->parent_offset == nil_page);
+                        assert(tree->hdr_.root == page->address.offset);
+
                         page->parent_offset = tree->hdr_.root = parent_page->address.offset;
                         page_exlock.reset();
                         tree_exlock.reset();
@@ -4276,34 +4277,20 @@ class bplus_tree
       }
 
       auto fix_augmentation(tx_type tx, cycle_ptr::cycle_gptr<intr_type> parent_page) -> void {
-        auto page = this->page; // Make a copy, since we'll move *this.
         page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
         | asio::deferred(
-            [page](monitor_shlock_type page_shlock) {
-              return page->async_compute_page_augments(asio::append(asio::deferred, page->versions, std::move(page_shlock)));
+            [self_op=this->shared_from_this()](monitor_shlock_type page_shlock) {
+              return self_op->page->async_compute_page_augments(asio::append(asio::deferred, self_op->page->versions, std::move(page_shlock)));
             })
         | asio::deferred(
-            [parent_page, tx](std::vector<std::byte> child_augment, bplus_tree_versions page_versions, monitor_shlock_type page_shlock) mutable {
+            [self_op=this->shared_from_this(), parent_page, tx](std::vector<std::byte> child_augment, bplus_tree_versions page_versions, monitor_shlock_type page_shlock) mutable {
+              self_op->augment.assign(child_augment.begin(), child_augment.end());
               page_shlock.reset(); // No longer needed.
 
-              std::error_code ec;
-              auto new_augment_span = parent_page->augment_span(0);
-              if (new_augment_span.size() != child_augment.size())
-                ec = make_error_code(xdr_errc::encoding_error);
-              else
-                std::copy(child_augment.begin(), child_augment.end(), new_augment_span.begin());
-              auto file_ptr = std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[parent_page->address.file]);
-
-              return asio::deferred.when(!ec)
-                  .then(
-                      asio::async_write_at(
-                          *file_ptr,
-                          parent_page->address.offset + parent_page->augment_offset(0),
-                          asio::buffer(new_augment_span),
-                          asio::append(asio::deferred, page_versions, file_ptr)))
-                  .otherwise(asio::deferred.values(ec, std::size_t(0), page_versions, file_ptr));
+              span_copy(parent_page->augment_span(0), self_op->augment);
+              return parent_page->async_set_augments_diskonly_op(tx, 0, self_op->augment, asio::append(asio::deferred, page_versions));
             })
-        | [self_op=this->shared_from_this(), tx, parent_page](std::error_code ec, [[maybe_unused]] std::size_t nbytes, bplus_tree_versions page_versions, [[maybe_unused]] auto file_ptr) mutable {
+        | [self_op=this->shared_from_this(), tx, parent_page](std::error_code ec, bplus_tree_versions page_versions) mutable {
             if (ec)
               self_op->error_invoke(ec);
             else
@@ -4316,9 +4303,10 @@ class bplus_tree
       }
 
       TxAlloc tx_alloc;
-      cycle_ptr::cycle_gptr<page_type> page;
-      cycle_ptr::cycle_gptr<bplus_tree> tree;
+      const cycle_ptr::cycle_gptr<page_type> page;
+      const cycle_ptr::cycle_gptr<bplus_tree> tree;
       handler_type handler;
+      std::vector<std::byte, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::byte>> augment;
       const std::shared_ptr<spdlog::logger> logger;
     };
 
