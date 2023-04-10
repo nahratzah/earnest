@@ -4164,7 +4164,7 @@ class bplus_tree
         | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent, [[maybe_unused]] monitor_shlock_type parent_lock) -> void {
             if (ec || parent != nullptr) {
               if (!ec)
-                self_op->logger->debug("ensure_parent: page {} has existing parent {}", self_op->page->address, parent->address);
+                self_op->logger->trace("ensure_parent: page {} has existing parent {}", self_op->page->address, parent->address);
               std::invoke(self_op->handler, std::move(ec), std::move(parent));
             } else {
               self_op->create_new_parent();
