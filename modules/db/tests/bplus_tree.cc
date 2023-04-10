@@ -56,6 +56,7 @@ class fixture {
   auto insert(std::string_view key, std::string_view value, bool sync) -> void;
   auto read_all() -> std::vector<read_kv_type>;
   auto ioctx_run(std::size_t threads) -> void;
+  auto print_tree() -> void;
 
   template<typename Collection>
   static auto random_shuffled_collection(Collection c) -> Collection {
@@ -127,7 +128,9 @@ NEW_TEST(insert_many_sequentially) {
 
   for (const auto& e : expect)
     insert(e.first, e.second, true);
-  REQUIRE CHECK_EQUAL(expect, read_all());
+  CHECK_EQUAL(expect, read_all());
+
+  print_tree();
 }
 
 NEW_TEST(insert_many_concurrently) {
@@ -151,6 +154,8 @@ NEW_TEST(insert_many_concurrently) {
   ioctx.restart();
 
   CHECK_EQUAL(expect, read_all());
+
+  print_tree();
 }
 
 NEW_TEST(insert_many_concurrently_with_random_order_multithreaded) {
@@ -174,6 +179,8 @@ NEW_TEST(insert_many_concurrently_with_random_order_multithreaded) {
   ioctx.restart();
 
   CHECK_EQUAL(expect, read_all());
+
+  print_tree();
 }
 
 int main(int argc, char** argv) {
@@ -423,7 +430,7 @@ auto fixture::read_all() -> std::vector<read_kv_type> {
       op(elements),
       [&read_all_callback_called](std::error_code ec) {
         read_all_callback_called = true;
-        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+        CHECK_EQUAL(std::error_code(), ec);
       });
 
   ioctx.run();
@@ -442,6 +449,18 @@ auto fixture::ioctx_run(std::size_t threads) -> void {
   }
 
   for (auto& t : thread_vec) t.join();
+}
+
+auto fixture::print_tree() -> void {
+  bool callback_called = false;
+  tree->async_log_dump(std::clog,
+      [&callback_called]() {
+        callback_called = true;
+      });
+
+  ioctx.run();
+  ioctx.restart();
+  REQUIRE CHECK(callback_called);
 }
 
 const earnest::db_address fixture::tree_address = earnest::db_address(earnest::file_id("", std::string(tree_filename)), 0);
