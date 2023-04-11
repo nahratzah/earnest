@@ -561,23 +561,19 @@ class file_db
             }));
   }
 
-  template<typename Acceptor, typename CompletionToken>
-  requires std::invocable<Acceptor, typename wal_type::record_type>
-  auto async_tx(Acceptor&& acceptor, CompletionToken&& token) const {
-    return asio::async_initiate<CompletionToken, void(std::error_code, typename wal_type::tx_lock)>(
-        [](auto handler, std::shared_ptr<const file_db> fdb, auto acceptor) {
+  template<typename CompletionToken>
+  auto async_tx(CompletionToken&& token) const {
+    return asio::async_initiate<CompletionToken, void(typename wal_type::tx_lock, std::shared_ptr<const typename wal_type::file_replacements>)>(
+        [](auto handler, std::shared_ptr<const file_db> fdb) -> void {
           fdb->strand_.dispatch(
-              [fdb, acceptor=std::move(acceptor), handler=std::move(handler)]() mutable -> void {
-                if (fdb->wal == nullptr) [[unlikely]] {
-                  std::invoke(handler, make_error_code(wal_errc::bad_state), typename wal_type::tx_lock{});
-                  return;
-                }
-
-                fdb->wal->async_tx(std::move(acceptor), std::move(handler));
-              },
+              detail::completion_wrapper<void()>(
+                  std::move(handler),
+                  [wal=fdb->wal](auto handler) -> void {
+                    wal->async_tx(std::move(handler));
+                  }),
               fdb->get_allocator());
         },
-        token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
+        token, this->shared_from_this());
   }
 
   auto install_apply_() -> void {
@@ -900,19 +896,15 @@ class transaction {
       std::equal_to<file_id>,
       typename std::allocator_traits<allocator_type>::template rebind_alloc<std::pair<const file_id, std::shared_ptr<writes_map_element>>>>;
 
-  using file_replacements = std::unordered_map<
-      file_id,
-      detail::file_recover_state<typename file_db::wal_type::fd_type, allocator_type>,
-      std::hash<file_id>,
-      std::equal_to<file_id>,
-      rebind_alloc<std::pair<const file_id, detail::file_recover_state<typename file_db::wal_type::fd_type, allocator_type>>>>;
+  using file_replacements = typename file_db::wal_type::file_replacements;
 
   struct locked_file_replacements {
-    explicit locked_file_replacements(allocator_type allocator)
-    : fr(std::move(allocator))
+    explicit locked_file_replacements(std::shared_ptr<const file_replacements> fr, typename file_db::wal_type::tx_lock lock)
+    : fr(std::move(fr)),
+      lock(std::move(lock))
     {}
 
-    file_replacements fr;
+    std::shared_ptr<const file_replacements> fr;
     typename file_db::wal_type::tx_lock lock;
   };
 
@@ -928,7 +920,7 @@ class transaction {
   using raw_reader_type = detail::replacement_map_reader<
       const typename file_db::fd_type,
       typename file_replacements::mapped_type::fd_type,
-      allocator_type>;
+      typename file_db::allocator_type>;
 
   using reader_type = detail::replacement_map_reader<raw_reader_type, writes_buffer_type, allocator_type>;
   using monitor_type = detail::monitor<executor_type, allocator_type>;
@@ -960,10 +952,10 @@ class transaction {
         }
         break;
       case isolation::read_commited:
-        std::invoke(read_barrier_, std::error_code(), nullptr);
+        std::invoke(read_barrier_, nullptr);
         break;
       case isolation::repeatable_read:
-        compute_replacements_map_op_(fdb, !read_permitted(m), allocator) | read_barrier_;
+        compute_replacements_map_op_(fdb, allocator) | read_barrier_;
         break;
     }
   }
@@ -1007,23 +999,11 @@ class transaction {
   }
 
   private:
-  static auto compute_replacements_map_op_(std::shared_ptr<file_db> fdb, bool omit_reads, allocator_type allocator) {
-    auto repl_map = std::allocate_shared<locked_file_replacements>(allocator, allocator);
-    return fdb->async_tx(
-        [fdb, repl_map, omit_reads, ex=fdb->get_executor(), allocator](const auto& record) -> std::error_code {
-          return std::visit(
-              [&](const auto& r) -> std::error_code {
-                auto [iter, inserted] = repl_map->fr.try_emplace(r.file, allocator);
-                if (inserted) iter->second.omit_reads = omit_reads;
-                return iter->second.apply(r);
-              },
-              record);
-        },
-        asio::deferred)
+  static auto compute_replacements_map_op_(std::shared_ptr<file_db> fdb, allocator_type allocator) {
+    return fdb->async_tx(asio::deferred)
     | asio::deferred(
-        [repl_map](std::error_code ec, typename file_db::wal_type::tx_lock lock) mutable {
-          repl_map->lock = std::move(lock);
-          return asio::deferred.values(ec, std::move(repl_map));
+        [allocator](typename file_db::wal_type::tx_lock lock, std::shared_ptr<const file_replacements> fr) {
+          return asio::deferred.values(std::allocate_shared<locked_file_replacements>(allocator, fr, std::move(lock)));
         });
   }
 
@@ -1032,50 +1012,31 @@ class transaction {
 
     return read_barrier_.async_on_ready(asio::deferred)
     | asio::deferred(
-        [fdb=this->fdb_, id, allocator=this->alloc_](std::error_code input_ec, std::shared_ptr<const locked_file_replacements> repl_maps) {
+        [fdb=this->fdb_, allocator=this->alloc_](std::shared_ptr<const locked_file_replacements> repl_maps) {
+          return asio::deferred.when(repl_maps != nullptr)
+              .then(asio::deferred.values(repl_maps))
+              .otherwise(compute_replacements_map_op_(fdb, allocator));
+        })
+    | asio::deferred(
+        [fdb=this->fdb_, id, allocator=this->alloc_](std::shared_ptr<const locked_file_replacements> repl_maps) {
           return asio::async_initiate<decltype(asio::deferred), void(std::error_code, result_map_ptr)>(
-              [id, repl_maps, fdb, allocator](auto handler, std::error_code input_ec) {
+              [id, repl_maps, fdb, allocator](auto handler) {
                 auto wrapped_handler = detail::completion_handler_fun(std::move(handler), fdb->get_executor());
-                if (input_ec) {
-                  std::invoke(wrapped_handler, input_ec, nullptr);
-                  return;
-                }
 
-                if (repl_maps == nullptr) {
-                  auto repl_map = std::allocate_shared<locked_file_recover_state>(allocator, allocator);
-                  fdb->async_tx(
-                      [repl_map, id=std::move(id)](const auto& record) -> std::error_code {
-                        return std::visit(
-                            [&](const auto& r) -> std::error_code {
-                              if (r.file == id)
-                                return repl_map->frs.apply(r);
-                              return {};
-                            },
-                            record);
-                      },
-                      completion_wrapper<void(std::error_code, typename file_db::wal_type::tx_lock)>(
-                          std::move(wrapped_handler),
-                          [repl_map](auto handler, std::error_code ec, typename file_db::wal_type::tx_lock lock) {
-                            if (!ec && !repl_map->frs.exists.value_or(true))
-                              ec = make_error_code(std::errc::no_such_file_or_directory);
-                            repl_map->lock = std::move(lock);
-                            std::invoke(handler, ec, result_map_ptr(repl_map, &repl_map->frs));
-                          }));
+                assert(repl_maps != nullptr);
+                std::error_code ec;
+                result_map_ptr result;
+                auto iter = repl_maps->fr->find(id);
+                if (iter == repl_maps->fr->end()) {
+                  result = std::allocate_shared<typename file_replacements::mapped_type>(allocator, fdb->get_allocator());
                 } else {
-                  std::error_code ec;
-                  result_map_ptr result;
-                  auto iter = repl_maps->fr.find(id);
-                  if (iter == repl_maps->fr.end()) {
-                    result = std::allocate_shared<typename file_replacements::mapped_type>(allocator, allocator);
-                  } else {
-                    result = result_map_ptr(repl_maps, &iter->second);
-                    if (!iter->second.exists.value_or(true))
-                      ec = make_error_code(std::errc::no_such_file_or_directory);
-                  }
-                  std::invoke(wrapped_handler, std::move(ec), std::move(result));
+                  result = result_map_ptr(repl_maps, &iter->second); // We alias repl_maps, because we want to keep the lock valid.
+                  if (!iter->second.exists.value_or(true))
+                    ec = make_error_code(std::errc::no_such_file_or_directory);
                 }
+                std::invoke(wrapped_handler, std::move(ec), std::move(result));
               },
-              asio::deferred, std::move(input_ec));
+              asio::deferred);
         });
   }
 
@@ -1108,7 +1069,7 @@ class transaction {
     | asio::deferred(
         [](std::error_code ec, std::shared_ptr<const underlying_fd> ufd, std::shared_ptr<const typename file_replacements::mapped_type> state) {
           typename raw_reader_type::size_type filesize = 0u;
-          std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>> replacements;
+          std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, typename file_db::allocator_type>> replacements;
 
           if (!ec) {
             assert(ufd != nullptr);
@@ -1116,7 +1077,7 @@ class transaction {
 
             const bool exists = state->exists.value_or(ufd->is_open());
             filesize = state->file_size.value_or(ufd->is_open() ? ufd->size() : 0u);
-            replacements = std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, allocator_type>>(state, &state->replacements);
+            replacements = std::shared_ptr<const detail::replacement_map<typename file_replacements::mapped_type::fd_type, typename file_db::allocator_type>>(state, &state->replacements);
 
             if (!exists) ec = make_error_code(file_db_errc::file_erased);
           }
@@ -1534,40 +1495,39 @@ class transaction {
   }
 
   static auto can_commit_op_(std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap, allocator_type allocator) {
-    return compute_replacements_map_op_(fdb, true, allocator)
+    return compute_replacements_map_op_(fdb, allocator)
     | asio::deferred(
-        [fdb, wmap](std::error_code ec, std::shared_ptr<const locked_file_replacements> fr_map) mutable {
+        [fdb, wmap](std::shared_ptr<const locked_file_replacements> fr_map) mutable {
           return detail::deferred_on_executor<void(std::error_code)>(
-              [](std::error_code ec, std::shared_ptr<const locked_file_replacements> fr_map, std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap) {
-                if (!ec) {
-                  const bool writes_are_valid = std::all_of(
-                      wmap->begin(), wmap->end(),
-                      [&](const auto& wmap_entry) {
-                        const auto files_iter = fdb->files.find(wmap_entry.first);
-                        const bool files_iter_is_end = (files_iter == fdb->files.end());
-                        const bool files_iter_exists = (files_iter_is_end ? false : files_iter->second.fd->is_open());
-                        const auto files_iter_f_size = (files_iter_is_end || !files_iter_exists ? 0u : files_iter->second.fd->size());
+              [](std::shared_ptr<const locked_file_replacements> fr_map, std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap) {
+                std::error_code ec;
+                const bool writes_are_valid = std::all_of(
+                    wmap->begin(), wmap->end(),
+                    [&](const auto& wmap_entry) {
+                      const auto files_iter = fdb->files.find(wmap_entry.first);
+                      const bool files_iter_is_end = (files_iter == fdb->files.end());
+                      const bool files_iter_exists = (files_iter_is_end ? false : files_iter->second.fd->is_open());
+                      const auto files_iter_f_size = (files_iter_is_end || !files_iter_exists ? 0u : files_iter->second.fd->size());
 
-                        const auto fr_iter = fr_map->fr.find(wmap_entry.first);
-                        const auto fr_iter_is_end = (fr_iter == fr_map->fr.end());
-                        const bool exists = (fr_iter_is_end ? files_iter_exists : fr_iter->second.exists.value_or(files_iter_exists));
-                        const auto f_size = (fr_iter_is_end ? files_iter_f_size : fr_iter->second.file_size.value_or(files_iter_f_size));
+                      const auto fr_iter = fr_map->fr->find(wmap_entry.first);
+                      const auto fr_iter_is_end = (fr_iter == fr_map->fr->end());
+                      const bool exists = (fr_iter_is_end ? files_iter_exists : fr_iter->second.exists.value_or(files_iter_exists));
+                      const auto f_size = (fr_iter_is_end ? files_iter_f_size : fr_iter->second.file_size.value_or(files_iter_f_size));
 
-                        if (wmap_entry.second->created && exists) return false; // Double file-creation.
-                        if (wmap_entry.second->erased && !exists) return false; // Double file-erasure.
+                      if (wmap_entry.second->created && exists) return false; // Double file-creation.
+                      if (wmap_entry.second->erased && !exists) return false; // Double file-erasure.
 
-                        if (wmap_entry.second->file_size.has_value()) return true; // All writes must meet the resize constraint.
-                        if (wmap_entry.second->replacements.empty()) return true; // No writes are outside the file-size.
-                        if (std::prev(wmap_entry.second->replacements.end())->end_offset() > f_size) return false; // Write past EOF.
+                      if (wmap_entry.second->file_size.has_value()) return true; // All writes must meet the resize constraint.
+                      if (wmap_entry.second->replacements.empty()) return true; // No writes are outside the file-size.
+                      if (std::prev(wmap_entry.second->replacements.end())->end_offset() > f_size) return false; // Write past EOF.
 
-                        return true;
-                      });
-                  if (!writes_are_valid) ec = make_error_code(file_db_errc::cannot_commit);
-                }
+                      return true;
+                    });
+                if (!writes_are_valid) ec = make_error_code(file_db_errc::cannot_commit);
 
                 return asio::deferred.values(ec);
               },
-              fdb->strand_, ec, std::move(fr_map), std::move(fdb), std::move(wmap));
+              fdb->strand_, std::move(fr_map), std::move(fdb), std::move(wmap));
         });
   }
 
@@ -1602,7 +1562,7 @@ class transaction {
   isolation i_;
   tx_mode m_;
   std::shared_ptr<writes_map> writes_map_;
-  mutable detail::fanout<executor_type, void(std::error_code, std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
+  mutable detail::fanout<executor_type, void(std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
   mutable monitor_type writes_mon_;
   detail::fanout_barrier<executor_type, allocator_type> wait_for_writes_;
   std::shared_ptr<detail::on_commit_events<allocator_type>> on_commit_events_;

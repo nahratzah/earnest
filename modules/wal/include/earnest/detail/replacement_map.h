@@ -226,12 +226,16 @@ class replacement_map
   replacement_map(const replacement_map& other)
   : allocator_type(other.get_allocator())
   {
+#if 0 // Somehow this trips a SIGBUS, but only sometimes.
     map_.clone_from(
         other.map_,
         [this](const_reference v) {
           return make_value_(v);
         },
         disposer_(*this));
+#else
+    for (const auto& e : other) insert(e);
+#endif
   }
 
   replacement_map(replacement_map&& other)
