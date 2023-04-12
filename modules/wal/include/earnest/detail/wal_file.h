@@ -999,6 +999,8 @@ class wal_file
     std::lock_guard lck{cache_file_replacements_mtx_};
 
     std::shared_ptr<file_replacements> cfr = std::allocate_shared<file_replacements>(get_allocator(), get_allocator());
+
+    // Process historical entries.
     for (const std::shared_ptr<entry>& entry_ptr : entries) {
       for (const auto& r : *entry_ptr->get_cached_records()) {
         std::error_code ec = std::visit(
@@ -1009,6 +1011,17 @@ class wal_file
             r);
         if (ec) return ec;
       }
+    }
+
+    // Process active entry.
+    for (const auto& r : *active->get_cached_records()) {
+      std::error_code ec = std::visit(
+          [&cfr, this](const auto& r) -> std::error_code {
+            auto [iter, inserted] = cfr->try_emplace(r.file, this->get_allocator());
+            return iter->second.apply(r);
+          },
+          r);
+      if (ec) return ec;
     }
 
     cached_file_replacements_ = std::move(cfr);
