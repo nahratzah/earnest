@@ -12,7 +12,7 @@ target_sources(asio_util
     include/earnest/detail/fanout.h
     include/earnest/detail/positional_stream_adapter.h)
 target_compile_features(asio_util INTERFACE cxx_std_17)
-target_link_libraries(asio_util INTERFACE asio util)
+target_link_libraries(asio_util INTERFACE asio util cycle_ptr)
 
 add_executable(completion_handler_fun_test)
 target_link_libraries(completion_handler_fun_test PUBLIC asio_util UnitTest++)

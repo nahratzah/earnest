@@ -5282,13 +5282,6 @@ class bplus_tree
                     std::span<const std::byte>(rebalance_item.kv_bytes.data(), rebalance_item.kv_bytes.size()));
               });
 
-          // Update elements.
-          std::for_each(ps->rebalance.begin(), ps->rebalance.end(),
-              [ps](const auto& rebalance_item) {
-                if (rebalance_item.which_page != 0)
-                  rebalance_item.elem->owner = ps->level_pages[rebalance_item.which_page];
-                rebalance_item.elem->index = rebalance_item.new_index;
-              });
           // Link shifted elements into the new page.
           ps->level_pages[1]->elements_.insert(
               ps->level_pages[1]->elements_.end(),
@@ -5297,6 +5290,13 @@ class bplus_tree
           ps->level_pages[0]->elements_.erase(
               ps->level_pages[0]->elements_.end() - shift,
               ps->level_pages[0]->elements_.end());
+          // Update elements.
+          std::for_each(ps->rebalance.begin(), ps->rebalance.end(),
+              [ps](const auto& rebalance_item) {
+                if (rebalance_item.which_page != 0)
+                  rebalance_item.elem->owner = ps->level_pages[rebalance_item.which_page];
+                rebalance_item.elem->index = rebalance_item.new_index;
+              });
 
           // Update predecessor/successor references.
           ps->level_pages[0]->hdr_.successor_page = ps->level_pages[1]->address.offset;

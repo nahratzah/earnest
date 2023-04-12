@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <asio/deferred.hpp>
 #include <asio/io_context.hpp>
+#include <asio/thread_pool.hpp>
+#include <cycle_ptr.h>
+#include <earnest/detail/asio_cycle_ptr.h>
 #include <earnest/detail/file_grow_allocator.h>
 #include <earnest/dir.h>
 #include <earnest/isolation.h>
@@ -184,6 +187,9 @@ NEW_TEST(insert_many_concurrently_with_random_order_multithreaded) {
 }
 
 int main(int argc, char** argv) {
+  asio::thread_pool gc_pool(1);
+  earnest::detail::asio_cycle_ptr gc(gc_pool.get_executor());
+
   {
     spdlog::set_level(spdlog::level::trace);
     auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(std::clog);
