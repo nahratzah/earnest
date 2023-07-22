@@ -291,8 +291,8 @@ inline auto operator&(::earnest::xdr_writer<X...>&& x, typename ::earnest::xdr_w
 }
 
 
-template<typename Executor, typename Reactor = aio::reactor>
-using wal_record_variant = std::variant<
+template<typename Executor, typename Reactor>
+using wal_record_variant_ = std::variant<
     wal_record_end_of_records, // 0
     wal_record_noop, // 1
     wal_record_skip32, // 2
@@ -330,6 +330,50 @@ using wal_record_variant = std::variant<
     wal_record_truncate_file, // 34
     wal_record_modify_file32<Executor, Reactor> // 35
     >;
+
+// This type simply wraps the underlying std::variant.
+// But having it as a struct makes reading types easier.
+template<typename Executor, typename Reactor = aio::reactor>
+struct wal_record_variant
+: public wal_record_variant_<Executor, Reactor>
+{
+  using wal_record_variant_<Executor, Reactor>::wal_record_variant_;
+
+  wal_record_variant(const wal_record_variant_<Executor, Reactor>& r)
+      noexcept(std::is_nothrow_copy_constructible_v<wal_record_variant_<Executor, Reactor>>)
+  : wal_record_variant_<Executor, Reactor>(r)
+  {}
+
+  wal_record_variant(wal_record_variant_<Executor, Reactor>&& r)
+      noexcept(std::is_nothrow_move_constructible_v<wal_record_variant_<Executor, Reactor>>)
+  : wal_record_variant_<Executor, Reactor>(std::move(r))
+  {}
+};
+
+// This type simply wraps the underlying std::variant.
+// But having it as a struct makes reading types easier.
+template<typename Executor, typename Reactor>
+struct wal_record_write_variant
+: public record_write_type_t<wal_record_variant_<Executor, Reactor>>
+{
+  using record_write_type_t<wal_record_variant_<Executor, Reactor>>::record_write_type_t;
+
+  wal_record_write_variant(const record_write_type_t<wal_record_variant_<Executor, Reactor>>& r)
+      noexcept(std::is_nothrow_copy_constructible_v<record_write_type_t<wal_record_variant_<Executor, Reactor>>>)
+  : record_write_type_t<wal_record_variant_<Executor, Reactor>>(r)
+  {}
+
+  wal_record_write_variant(record_write_type_t<wal_record_variant_<Executor, Reactor>>&& r)
+      noexcept(std::is_nothrow_move_constructible_v<record_write_type_t<wal_record_variant_<Executor, Reactor>>>)
+  : record_write_type_t<wal_record_variant_<Executor, Reactor>>(std::move(r))
+  {}
+};
+
+template<typename Executor, typename Reactor>
+struct record_write_type_<wal_record_variant<Executor, Reactor>>
+{
+  using type = wal_record_write_variant<Executor, Reactor>;
+};
 
 // Indices 0..31 (inclusive) are reserved for bookkeeping of the WAL.
 inline constexpr auto wal_record_is_bookkeeping(std::size_t idx) noexcept -> bool {
@@ -487,5 +531,49 @@ struct wal_record_write_to_read_converter<fd<Executor, Reactor>, std::variant<T.
   std::uint64_t offset;
 };
 
+template<typename Executor, typename Reactor>
+struct wal_record_write_to_read_converter<fd<Executor, Reactor>, wal_record_variant<Executor, Reactor>> {
+  using variant_type = wal_record_variant<Executor, Reactor>;
+  using write_variant_type = wal_record_write_variant<Executor, Reactor>;
+
+  wal_record_write_to_read_converter(std::shared_ptr<const fd<Executor, Reactor>> wal_file, std::uint64_t offset) noexcept
+  : converter_(std::move(wal_file), std::move(offset))
+  {}
+
+  auto operator()(const write_variant_type& wrecord) -> variant_type {
+    return variant_type(converter_(wrecord));
+  }
+
+  private:
+  wal_record_write_to_read_converter<fd<Executor, Reactor>, wal_record_variant_<Executor, Reactor>> converter_;
+};
+
 
 } /* namespace earnest::detail */
+
+namespace std {
+
+
+template<typename Executor, typename Reactor>
+struct variant_size<::earnest::detail::wal_record_variant<Executor, Reactor>>
+: variant_size<::earnest::detail::wal_record_variant_<Executor, Reactor>>
+{};
+
+template<typename Executor, typename Reactor>
+struct variant_size<::earnest::detail::wal_record_write_variant<Executor, Reactor>>
+: variant_size<::earnest::detail::record_write_type_t<::earnest::detail::wal_record_variant_<Executor, Reactor>>>
+{};
+
+
+template<std::size_t I, typename Executor, typename Reactor>
+struct variant_alternative<I, ::earnest::detail::wal_record_variant<Executor, Reactor>>
+: variant_alternative<I, ::earnest::detail::wal_record_variant_<Executor, Reactor>>
+{};
+
+template<std::size_t I, typename Executor, typename Reactor>
+struct variant_alternative<I, ::earnest::detail::wal_record_write_variant<Executor, Reactor>>
+: variant_alternative<I, ::earnest::detail::record_write_type_t<::earnest::detail::wal_record_variant_<Executor, Reactor>>>
+{};
+
+
+}
