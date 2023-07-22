@@ -1100,7 +1100,7 @@ class transaction {
         [ writes_mon=this->writes_mon_
         ](std::error_code ec, raw_reader_type raw_reader) mutable {
           return asio::deferred.when(!ec || ec == make_error_code(file_db_errc::file_erased))
-              .then(writes_mon.async_shared(asio::append(asio::deferred, ec, std::move(raw_reader))))
+              .then(writes_mon.async_shared(asio::append(asio::deferred, ec, std::move(raw_reader)), __FILE__, __LINE__))
               .otherwise(asio::deferred.values(typename monitor_type::shared_lock(), ec, raw_reader_type()));
         })
     | asio::deferred(
@@ -1153,7 +1153,7 @@ class transaction {
         [ writes_mon=this->writes_mon_
         ](std::error_code ec, raw_reader_type raw_reader) mutable {
           return asio::deferred.when(!ec || ec == make_error_code(file_db_errc::file_erased))
-              .then(writes_mon.async_exclusive(asio::append(asio::deferred, ec, std::move(raw_reader))))
+              .then(writes_mon.async_exclusive(asio::append(asio::deferred, ec, std::move(raw_reader)), __FILE__, __LINE__))
               .otherwise(asio::deferred.values(typename monitor_type::exclusive_lock(), ec, raw_reader_type()));
         })
     | asio::deferred(
@@ -1446,7 +1446,7 @@ class transaction {
     | asio::deferred(
         [writes_mon=this->writes_mon_](std::error_code ec) mutable {
           return asio::deferred.when(!ec)
-              .then(writes_mon.async_shared(asio::append(asio::deferred, ec)))
+              .then(writes_mon.async_shared(asio::append(asio::deferred, ec), __FILE__, __LINE__))
               .otherwise(asio::deferred.values(typename monitor_type::shared_lock{}, ec));
         })
     | asio::deferred(

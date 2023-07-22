@@ -196,12 +196,18 @@ int main(int argc, char** argv) {
     spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.db", sink));
     spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.bplustree", sink));
     spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.file_grow_allocator", sink));
+    spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.monitor", sink));
+
+    auto dfl_logger = std::make_shared<spdlog::logger>("log", sink);
+    spdlog::register_logger(dfl_logger);
+    spdlog::set_default_logger(dfl_logger);
 
     spdlog::get("earnest.bplustree")->set_level(spdlog::level::debug);
+    spdlog::get("earnest.monitor")->set_level(spdlog::level::debug);
   }
 
   if (argc < 2) {
-    std::cerr << "Usage: " << (argc > 0 ? argv[0] : "bplus_tree_page_test") << "writeable_dir\n"
+    std::cerr << "Usage: " << (argc > 0 ? argv[0] : "bplus_tree_test") << "writeable_dir\n"
         << "writeable_dir: points at a directory where we can write files\n";
     return 1;
   }
@@ -396,7 +402,7 @@ auto fixture::read_all() -> std::vector<read_kv_type> {
         std::span<const earnest::detail::bplus_element_reference<raw_db_type, true>> elements,
         earnest::detail::move_only_function<void(std::error_code)> callback) -> void {
       while (!elements.empty()) {
-        auto opt_shlock = elements.front()->element_lock.try_shared();
+        auto opt_shlock = elements.front()->element_lock.try_shared(__FILE__, __LINE__);
         if (opt_shlock) {
           output.emplace_back(byte_array_as_string(elements.front()->key_span()), byte_array_as_string(elements.front()->value_span()));
           elements = elements.subspan(1);
@@ -409,7 +415,8 @@ auto fixture::read_all() -> std::vector<read_kv_type> {
                 op.output.emplace_back(byte_array_as_string(elements.front()->key_span()), byte_array_as_string(elements.front()->value_span()));
                 lock.reset();
                 std::invoke(op, elements.subspan(1), std::move(callback));
-              });
+              },
+              __FILE__, __LINE__);
           return; // Callback will resume the loop.
         }
       }

@@ -76,7 +76,7 @@ class file_grow_allocator {
   private:
   template<typename FdbTxAlloc>
   static auto allocation_op_(typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, monitor<executor_type, allocator_type> lock, std::size_t bytes, std::shared_ptr<spdlog::logger> logger) {
-    return lock.dispatch_exclusive(asio::deferred)
+    return lock.dispatch_exclusive(asio::deferred, __FILE__, __LINE__)
     | asio::deferred(
         [logger, fdb_tx, id, bytes](typename monitor<executor_type, allocator_type>::exclusive_lock lock) mutable {
           logger->debug("{}: new allocation for {} bytes", id, bytes);
