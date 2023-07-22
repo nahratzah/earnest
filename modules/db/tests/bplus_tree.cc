@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <asio/deferred.hpp>
 #include <asio/io_context.hpp>
-#include <asio/post.hpp>
 #include <asio/thread_pool.hpp>
 #include <cycle_ptr.h>
 #include <earnest/detail/asio_cycle_ptr.h>
@@ -370,21 +369,17 @@ auto fixture::insert(std::string_view key, std::string_view value, bool sync) ->
   };
   auto state_ptr = std::make_shared<state>(key, value);
 
-  asio::post(
-      ioctx,
-      [tree=this->tree, state_ptr]() {
-        tree->insert(
-            std::as_bytes(std::span<const char>(state_ptr->key.data(), state_ptr->key.size())),
-            std::as_bytes(std::span<const char>(state_ptr->value.data(), state_ptr->value.size())),
-            std::allocator<std::byte>(),
-            [tree, state_ptr](std::error_code ec, [[maybe_unused]] auto elem_ref) {
-              CHECK_EQUAL(std::error_code(), ec);
-              state_ptr->callback_called = true;
-              spdlog::trace("inserted {} => {}: {}", state_ptr->printable_key(), state_ptr->printable_value(), ec.message());
+  tree->insert(
+      std::as_bytes(std::span<const char>(state_ptr->key.data(), state_ptr->key.size())),
+      std::as_bytes(std::span<const char>(state_ptr->value.data(), state_ptr->value.size())),
+      std::allocator<std::byte>(),
+      [tree=this->tree, state_ptr](std::error_code ec, [[maybe_unused]] auto elem_ref) {
+        CHECK_EQUAL(std::error_code(), ec);
+        state_ptr->callback_called = true;
+        spdlog::trace("inserted {} => {}: {}", state_ptr->printable_key(), state_ptr->printable_value(), ec.message());
 
-              if (ec)
-                tree->async_log_dump(std::clog, []() { /* skip */ });
-            });
+        if (ec)
+          tree->async_log_dump(std::clog, []() { /* skip */ });
       });
 
   if (sync) {
