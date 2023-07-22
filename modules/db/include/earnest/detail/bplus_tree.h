@@ -3972,7 +3972,7 @@ class bplus_tree
           assert(!path.interior_pages.back().page->erased_);
         }
 
-        this->logger->info("owning monitor {}, going to lock {}", parent_lock.monitor_name(), page->address); // XXX change to trace
+        this->logger->trace("owning monitor {}, going to lock {}", parent_lock.monitor_name(), page->address);
         page->page_lock.dispatch_shared(
             [ self_op=this->shared_from_this(),
               page,
@@ -3995,7 +3995,7 @@ class bplus_tree
           assert(!path.interior_pages.back().page->erased_);
         }
 
-        this->logger->info("owning monitor {}, going to lock {}", parent_lock.monitor_name(), page->address); // XXX change to trace
+        this->logger->trace("owning monitor {}, going to lock {}", parent_lock.monitor_name(), page->address);
         page->page_lock.dispatch_shared(
             [ self_op=this->shared_from_this(),
               page,
