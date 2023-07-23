@@ -5940,7 +5940,7 @@ class bplus_tree
                 .then(leaf->async_fix_augment(self_op->get_allocator(), std::move(leaf_lock), asio::deferred))
                 .otherwise(asio::deferred.values(ec));
           })
-      | [self_op=this->shared_from_this(), new_element](std::error_code ec) {
+      | [self_op=this->shared_from_this(), new_element](std::error_code ec) -> void {
           if (ec)
             self_op->error_invoke(ec);
           else
@@ -5985,7 +5985,7 @@ class bplus_tree
             if (!ec) leaf->use_list_span()[elem_ref->index] = bplus_tree_leaf_use_element::used;
             return asio::deferred.values(ec);
           })
-      | [self_op=this->shared_from_this(), elem_ref](std::error_code ec) {
+      | [self_op=this->shared_from_this(), elem_ref](std::error_code ec) -> void {
           if (ec)
             self_op->error_invoke(ec);
           else
