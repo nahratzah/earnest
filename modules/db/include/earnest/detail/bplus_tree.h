@@ -6098,19 +6098,14 @@ class bplus_tree
 
       auto new_element = bplus_element_reference<raw_db_type, false>::allocate(path.leaf_page.page->get_allocator(), path.leaf_page.page->get_executor(), insert_index, false, path.leaf_page.page, path.leaf_page.page->get_allocator());
 
-      auto raw_db = tree->raw_db.lock();
-      if (raw_db == nullptr) [[unlikely]] {
-        error_invoke(make_error_code(db_errc::data_expired));
-        return;
-      }
-
       assert(shift_elems.empty());
+      const bool has_augments = !path.leaf_page.page->spec->element.augments.empty();
 
       // Because the inserted element is a ghost, we don't need to write it to disk yet.
       this->path.leaf_page.page->use_list_span()[insert_index] = bplus_tree_leaf_use_element::ghost_create;
       span_copy(this->path.leaf_page.page->element_span(insert_index), this->element_span());
       this->path.leaf_page.page->elements_.emplace(insert_before_pos, new_element.get());
-      this->path.leaf_page.page->augment_propagation_required = true;
+      if (has_augments) this->path.leaf_page.page->augment_propagation_required = true;
       this->logger->trace("inserted new element");
       leaf_lock.reset(); // No longer need this lock.
 
@@ -6120,18 +6115,23 @@ class bplus_tree
       // It's good to be nice to the cache.
       path.clear();
 
-      // Complete an augment run before allowing the element to be promoted.
-      new_element->template async_lock_owner<monitor_shlock_type>(get_allocator(), asio::deferred)
-      | asio::deferred(
-          [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock) {
-            return leaf->async_fix_augment(self_op->get_allocator(), std::move(leaf_lock), asio::deferred);
-          })
-      | [self_op=this->shared_from_this(), new_element](std::error_code ec) {
-          if (ec)
-            self_op->error_invoke(ec);
-          else
-            self_op->promote_element(new_element);
-        };
+      if (has_augments) {
+        // Complete an augment run before allowing the element to be promoted.
+        new_element->template async_lock_owner<monitor_shlock_type>(get_allocator(), asio::deferred)
+        | asio::deferred(
+            [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock) {
+              return leaf->async_fix_augment(self_op->get_allocator(), std::move(leaf_lock), asio::deferred);
+            })
+        | [self_op=this->shared_from_this(), new_element](std::error_code ec) {
+            if (ec)
+              self_op->error_invoke(ec);
+            else
+              self_op->promote_element(new_element);
+          };
+      } else {
+        // There are no augments, so we skip the augment run.
+        promote_element(new_element);
+      }
     }
 
     auto promote_element(bplus_element_reference<raw_db_type, false> elem_ref) -> void {
