@@ -27,20 +27,9 @@ struct record_write_type_<std::tuple<T...>> {
 };
 
 
-template<std::size_t Idx>
-struct wal_record_reserved {
-  auto operator<=>(const wal_record_reserved& y) const noexcept = default;
-};
-template<std::size_t Idx> struct record_write_type_<wal_record_reserved<Idx>> { using type = wal_record_reserved<Idx>; };
-
-template<typename X, std::size_t Idx>
-inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_reserved<Idx>& noop) -> xdr<X>&& {
-  throw std::logic_error("bug: shouldn't be serializing/deserializing reserved elements");
-  return std::move(x);
-}
-
-
 struct wal_record_end_of_records {
+  static constexpr std::uint32_t opcode = 0;
+
   auto operator<=>(const wal_record_end_of_records& y) const noexcept = default;
 };
 template<> struct record_write_type_<wal_record_end_of_records> { using type = wal_record_end_of_records; };
@@ -52,6 +41,8 @@ inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_end_of_recor
 
 
 struct wal_record_noop {
+  static constexpr std::uint32_t opcode = 1;
+
   auto operator<=>(const wal_record_noop& y) const noexcept = default;
 };
 template<> struct record_write_type_<wal_record_noop> { using type = wal_record_noop; };
@@ -63,6 +54,8 @@ inline auto operator&(xdr<X>&& x, [[maybe_unused]] const wal_record_noop& noop) 
 
 
 struct wal_record_skip32 {
+  static constexpr std::uint32_t opcode = 2;
+
   std::uint32_t bytes;
 
   auto operator<=>(const wal_record_skip32& y) const noexcept = default;
@@ -70,6 +63,8 @@ struct wal_record_skip32 {
 template<> struct record_write_type_<wal_record_skip32> { using type = wal_record_skip32; };
 
 struct wal_record_skip64 {
+  static constexpr std::uint32_t opcode = 3;
+
   std::uint64_t bytes;
 
   auto operator<=>(const wal_record_skip64& y) const noexcept = default;
@@ -152,6 +147,8 @@ inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_skip64& 
 
 
 struct wal_record_seal {
+  static constexpr std::uint32_t opcode = 4;
+
   auto operator<=>(const wal_record_seal& y) const noexcept = default;
 };
 template<> struct record_write_type_<wal_record_seal> { using type = wal_record_seal; };
@@ -164,6 +161,8 @@ inline auto operator&(::earnest::xdr<X>&& x, [[maybe_unused]] const wal_record_s
 
 // Indicates a specific WAL file has been archived.
 struct wal_record_wal_archived {
+  static constexpr std::uint32_t opcode = 5;
+
   std::uint64_t sequence;
 
   auto operator<=>(const wal_record_wal_archived& y) const noexcept = default;
@@ -178,6 +177,8 @@ inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<w
 
 // Declare intent of writing the next wal-file.
 struct wal_record_rollover_intent {
+  static constexpr std::uint32_t opcode = 6;
+
   std::string filename;
 
   auto operator<=>(const wal_record_rollover_intent& y) const noexcept = default;
@@ -192,6 +193,8 @@ inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<w
 
 // Declare that the next wal-file was successfully created.
 struct wal_record_rollover_ready {
+  static constexpr std::uint32_t opcode = 7;
+
   std::string filename;
 
   auto operator<=>(const wal_record_rollover_ready& y) const noexcept = default;
@@ -205,6 +208,8 @@ inline auto operator&(xdr<X>&& x, typename xdr<X>::template typed_function_arg<w
 
 
 struct wal_record_create_file {
+  static constexpr std::uint32_t opcode = 32;
+
   file_id file;
 
   auto operator<=>(const wal_record_create_file& y) const noexcept = default;
@@ -218,6 +223,8 @@ inline auto operator&(::earnest::xdr<X>&& x, typename xdr<X>::template typed_fun
 
 
 struct wal_record_erase_file {
+  static constexpr std::uint32_t opcode = 33;
+
   file_id file;
 
   auto operator<=>(const wal_record_erase_file& y) const noexcept = default;
@@ -231,6 +238,8 @@ inline auto operator&(::earnest::xdr<X>&& x, typename xdr<X>::template typed_fun
 
 
 struct wal_record_truncate_file {
+  static constexpr std::uint32_t opcode = 34;
+
   file_id file;
   std::uint64_t new_size;
 
@@ -245,6 +254,8 @@ inline auto operator&(::earnest::xdr<X>&& x, typename ::earnest::xdr<X>::templat
 
 
 struct wal_record_modify_file_write32 {
+  static constexpr std::uint32_t opcode = 35;
+
   static inline constexpr std::size_t data_offset = 4u;
 
   file_id file;
@@ -254,6 +265,7 @@ struct wal_record_modify_file_write32 {
 
 template<typename Executor, typename Reactor = aio::reactor>
 struct wal_record_modify_file32 {
+  static constexpr std::uint32_t opcode = wal_record_modify_file_write32::opcode;
   static inline constexpr std::size_t data_offset = wal_record_modify_file_write32::data_offset;
 
   file_id file;
@@ -301,30 +313,6 @@ using wal_record_variant_ = std::variant<
     wal_record_wal_archived, // 5
     wal_record_rollover_intent, // 6
     wal_record_rollover_ready, // 7
-    wal_record_reserved<8>,
-    wal_record_reserved<9>,
-    wal_record_reserved<10>,
-    wal_record_reserved<11>,
-    wal_record_reserved<12>,
-    wal_record_reserved<13>,
-    wal_record_reserved<14>,
-    wal_record_reserved<15>,
-    wal_record_reserved<16>,
-    wal_record_reserved<17>,
-    wal_record_reserved<18>,
-    wal_record_reserved<19>,
-    wal_record_reserved<20>,
-    wal_record_reserved<21>,
-    wal_record_reserved<22>,
-    wal_record_reserved<23>,
-    wal_record_reserved<24>,
-    wal_record_reserved<25>,
-    wal_record_reserved<26>,
-    wal_record_reserved<27>,
-    wal_record_reserved<28>,
-    wal_record_reserved<29>,
-    wal_record_reserved<30>,
-    wal_record_reserved<31>,
     wal_record_create_file, // 32
     wal_record_erase_file, // 33
     wal_record_truncate_file, // 34
@@ -348,6 +336,39 @@ struct wal_record_variant
       noexcept(std::is_nothrow_move_constructible_v<wal_record_variant_<Executor, Reactor>>)
   : wal_record_variant_<Executor, Reactor>(std::move(r))
   {}
+
+  private:
+  template<typename Stream, typename Callback>
+  auto decode_with_discriminants_([[maybe_unused]] std::uint32_t discriminant, [[maybe_unused]] Stream& stream, Callback&& callback, [[maybe_unused]] std::index_sequence<>) -> void {
+    std::invoke(callback, make_error_code(xdr_errc::decoding_error));
+  }
+
+  template<typename Stream, typename Callback, std::size_t VariantIndex0, std::size_t... VariantIndices>
+  auto decode_with_discriminants_(std::uint32_t discriminant, Stream& stream, Callback&& callback, [[maybe_unused]] std::index_sequence<VariantIndex0, VariantIndices...>) -> void {
+    using type = std::variant_alternative_t<VariantIndex0, wal_record_variant>;
+
+    if (discriminant == type::opcode) {
+      ::earnest::async_read(
+          stream,
+          ::earnest::xdr_reader<>() & this->template emplace<VariantIndex0>(),
+          std::forward<Callback>(callback));
+    } else {
+      decode_with_discriminants_(discriminant, stream, std::forward<Callback>(callback), std::index_sequence<VariantIndices...>{});
+    }
+  }
+
+  auto decoder_() {
+    return earnest::xdr_manual(
+        [this](std::uint32_t discriminant, auto& stream, auto callback) -> void {
+          this->decode_with_discriminants_(discriminant, stream, std::move(callback), std::make_index_sequence<std::variant_size_v<wal_record_variant>>());
+        }).template with_lead<std::uint32_t>(xdr_uint32);
+  }
+
+  public:
+  template<typename... X>
+  friend inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_variant& v) {
+    return std::move(x) & v.decoder_();
+  }
 };
 
 // This type simply wraps the underlying std::variant.
@@ -367,6 +388,27 @@ struct wal_record_write_variant
       noexcept(std::is_nothrow_move_constructible_v<record_write_type_t<wal_record_variant_<Executor, Reactor>>>)
   : record_write_type_t<wal_record_variant_<Executor, Reactor>>(std::move(r))
   {}
+
+  private:
+  auto encoder_() const {
+    return earnest::xdr_manual(
+        [this](auto& stream, auto callback) -> void {
+          std::visit(
+              [&stream, &callback](const auto& v) -> void {
+                ::earnest::async_write(
+                    stream,
+                    ::earnest::xdr_writer<>() & xdr_uint32(v.opcode) & v,
+                    std::move(callback));
+              },
+              *this);
+        });
+  }
+
+  public:
+  template<typename... X>
+  friend inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_write_variant& v) {
+    return std::move(x) & v.encoder_();
+  }
 };
 
 template<typename Executor, typename Reactor>
@@ -382,7 +424,7 @@ inline constexpr auto wal_record_is_bookkeeping(std::size_t idx) noexcept -> boo
 
 template<typename Executor, typename Reactor>
 inline auto wal_record_is_bookkeeping(const wal_record_variant<Executor, Reactor>& r) noexcept -> bool {
-  return wal_record_is_bookkeeping(r.index());
+  return wal_record_is_bookkeeping(std::visit([](const auto& r) { return r.opcode; }, r));
 }
 
 
@@ -459,14 +501,14 @@ struct without_bookkeeping_variant;
 
 template<typename Variant, size_t... Idx>
 struct without_bookkeeping_variant<Variant, std::index_sequence<Idx...>>
-: filter<filtered_type<!wal_record_is_bookkeeping(Idx), std::variant_alternative_t<Idx, Variant>>...>
+: filter<filtered_type<!wal_record_is_bookkeeping(std::variant_alternative_t<Idx, Variant>::opcode), std::variant_alternative_t<Idx, Variant>>...>
 {
   public:
   template<typename R>
   static auto convert(R&& r) -> typename without_bookkeeping_variant::type {
     return std::visit(
         overrides(
-            converter<filtered_type<!wal_record_is_bookkeeping(Idx), std::variant_alternative_t<Idx, Variant>>, typename without_bookkeeping_variant::type>()...
+            converter<filtered_type<!wal_record_is_bookkeeping(std::variant_alternative_t<Idx, Variant>::opcode), std::variant_alternative_t<Idx, Variant>>, typename without_bookkeeping_variant::type>()...
         ),
         std::forward<R>(r));
   }
@@ -509,7 +551,6 @@ struct wal_record_write_to_read_converter<fd<Executor, Reactor>, std::variant<T.
             [](const wal_record_wal_archived& r) -> variant_type { return r; },
             [](const wal_record_rollover_intent& r) -> variant_type { return r; },
             [](const wal_record_rollover_ready& r) -> variant_type { return r; },
-            []<std::size_t Idx>(const wal_record_reserved<Idx>& r) -> variant_type { return r; },
             [](const wal_record_create_file& r) -> variant_type { return r; },
             [](const wal_record_erase_file& r) -> variant_type { return r; },
             [](const wal_record_truncate_file& r) -> variant_type { return r; },

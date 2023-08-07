@@ -106,7 +106,7 @@ auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback
   variant_type& variant_ref = *ptr;
   async_read(
       stream,
-      ::earnest::xdr_reader<>() & xdr_variant(variant_ref),
+      ::earnest::xdr_reader<>() & variant_ref,
       completion_wrapper<void(std::error_code)>(
           std::move(callback),
           [wf=this->shared_from_this(), &stream, ptr=std::move(ptr)](auto h, std::error_code ec) mutable {
@@ -154,7 +154,7 @@ auto wal_file_entry<Executor, Allocator>::read_records_until_(Stream& stream, Ac
           [this, acceptor](variant_type v) mutable {
             this->decorate_(v);
             return std::invoke(acceptor, std::move(v));
-          }).as(xdr_variant),
+          }),
       completion_wrapper<void(std::error_code)>(
           std::move(callback),
           [wf=this->shared_from_this(), &stream, end_offset, acceptor](auto& h, std::error_code ec) mutable {
@@ -226,7 +226,7 @@ inline auto wal_file_entry<Executor, Allocator>::write_records_to_buffer_iter_(s
 
   async_write(
       stream,
-      ::earnest::xdr_writer<>() & xdr_variant(*b),
+      ::earnest::xdr_writer<>() & *b,
       [state_ptr=std::move(state_ptr), b=std::next(b), e](std::error_code ec) mutable {
         write_records_to_buffer_iter_(std::move(state_ptr), b, e, ec);
       });
@@ -361,7 +361,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_create(const dir& d, cons
 
                   async_write(
                       stream,
-                      wf->header_writer_() & xdr_constant(write_variant_type()).as(xdr_variant),
+                      wf->header_writer_() & xdr_constant(write_variant_type()),
                       completion_wrapper<void(std::error_code)>(
                           std::move(completion_handler),
                           [stream_ptr=std::move(s), wf](auto& h, std::error_code ec) mutable {
