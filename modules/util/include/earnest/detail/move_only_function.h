@@ -47,6 +47,9 @@ class move_only_function<R(Args...)> {
 
   public:
   constexpr move_only_function() noexcept = default;
+  explicit constexpr move_only_function([[maybe_unused]] std::nullptr_t n) noexcept
+  : move_only_function()
+  {}
 
   template<typename Fn>
 #if __cpp_concepts >= 201907L
@@ -64,6 +67,10 @@ class move_only_function<R(Args...)> {
 
   explicit operator bool() const noexcept { return fn_ != nullptr; }
   auto operator!() const noexcept -> bool { return fn_ == nullptr; }
+
+  auto operator=([[maybe_unused]] std::nullptr_t n) noexcept -> void {
+    fn_ = nullptr;
+  }
 
   private:
   std::unique_ptr<intf> fn_;
