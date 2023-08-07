@@ -117,25 +117,28 @@ class synchronous_reactor
     return {};
   }
 
-  auto flush(int fd, [[maybe_unused]] bool data_only) -> std::error_code {
+  static auto flush(int fd, [[maybe_unused]] bool data_only) -> std::error_code {
     if (data_only ? ::fdatasync(fd) : ::fsync(fd))
       return std::error_code(errno, std::generic_category());
     return {};
   }
 
   template<typename CompletionHandler, typename Executor>
-  auto async_flush(int fd, bool data_only, CompletionHandler&& handler, Executor&& executor) {
-    auto ec = flush(fd, data_only);
-    auto ex = asio::get_associated_executor(handler, std::forward<Executor>(executor));
+  void async_flush(int fd, bool data_only, CompletionHandler&& handler, Executor&& executor) {
     auto alloc = asio::get_associated_allocator(handler);
-
-    ex.post(
+    executor.post(
         [ handler=std::forward<CompletionHandler>(handler),
-          ec
-        ]() mutable {
-          std::invoke(handler, ec);
+          executor, fd, data_only, alloc
+        ]() mutable -> void {
+          auto ec = flush(fd, data_only);
+          auto ex = asio::get_associated_executor(handler, std::forward<Executor>(executor));
+          ex.post(
+              [handler=std::move(handler), ec]() mutable -> void {
+                std::invoke(handler, ec);
+              },
+              alloc);
         },
-        std::move(alloc));
+        alloc);
   }
 
   private:
