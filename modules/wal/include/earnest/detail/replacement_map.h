@@ -15,7 +15,6 @@
 #include <asio/async_result.hpp>
 #include <asio/buffer.hpp>
 #include <asio/read_at.hpp>
-#include <boost/intrusive/set.hpp>
 
 #include <earnest/detail/wal_records.h>
 #include <earnest/fd.h>
@@ -23,13 +22,8 @@
 namespace earnest::detail {
 
 
-using replacement_map_value_hook_ = boost::intrusive::set_base_hook<boost::intrusive::optimize_size<true>>;
-
-
 template<typename FD>
-class replacement_map_value
-: public replacement_map_value_hook_
-{
+class replacement_map_value {
   public:
   using offset_type = std::uint64_t;
   using size_type = std::uint64_t;
