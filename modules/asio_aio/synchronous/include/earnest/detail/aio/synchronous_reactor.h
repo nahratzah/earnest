@@ -132,7 +132,7 @@ class synchronous_reactor
         ]() mutable -> void {
           auto ec = flush(fd, data_only);
           auto ex = asio::get_associated_executor(handler, std::forward<Executor>(executor));
-          ex.post(
+          ex.dispatch(
               [handler=std::move(handler), ec]() mutable -> void {
                 std::invoke(handler, ec);
               },

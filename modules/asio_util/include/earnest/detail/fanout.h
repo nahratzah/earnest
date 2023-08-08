@@ -95,7 +95,7 @@ class fanout<Executor, void(Args...), Alloc> {
               self->queued_.emplace_back(
                   [h=std::move(completion_handler), ex=asio::make_work_guard(ex)](std::shared_ptr<const std::tuple<Args...>> args) mutable {
                     auto alloc = asio::get_associated_allocator(h);
-                    ex.get_executor().dispatch(
+                    ex.get_executor().post(
                         [h=std::move(h), args=std::move(args)]() mutable {
                           std::apply(h, *args);
                         },
