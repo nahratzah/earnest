@@ -191,7 +191,6 @@ int main(int argc, char** argv) {
   earnest::detail::asio_cycle_ptr gc(gc_pool.get_executor());
 
   {
-    spdlog::set_level(spdlog::level::trace);
     auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(std::clog);
     spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.db", sink));
     spdlog::register_logger(std::make_shared<spdlog::logger>("earnest.bplustree", sink));
@@ -201,9 +200,6 @@ int main(int argc, char** argv) {
     auto dfl_logger = std::make_shared<spdlog::logger>("log", sink);
     spdlog::register_logger(dfl_logger);
     spdlog::set_default_logger(dfl_logger);
-
-    spdlog::get("earnest.bplustree")->set_level(spdlog::level::debug);
-    spdlog::get("earnest.monitor")->set_level(spdlog::level::debug);
   }
 
   if (argc < 2) {
