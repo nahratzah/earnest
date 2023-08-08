@@ -34,6 +34,7 @@
 #include <asio/executor_work_guard.hpp>
 #include <asio/strand.hpp>
 #include <asio/defer.hpp>
+#include <boost/iterator/indirect_iterator.hpp>
 
 #include <earnest/detail/adjecent_find_last.h>
 #include <earnest/detail/completion_barrier.h>
@@ -75,7 +76,45 @@ class wal_file
   {
     public:
     using nb_variant_type = wal_record_no_bookkeeping<typename entry_type::variant_type>;
-    using cached_records = std::vector<nb_variant_type, typename std::allocator_traits<typename entry_type::allocator_type>::template rebind_alloc<nb_variant_type>>;
+
+    class cached_records {
+      private:
+      using vector_elem_type = std::shared_ptr<const nb_variant_type>;
+      using vector_type = std::vector<vector_elem_type, typename std::allocator_traits<typename entry_type::allocator_type>::template rebind_alloc<vector_elem_type>>;
+
+      public:
+      using allocator_type = typename vector_type::allocator_type;
+      using const_iterator = boost::indirect_iterator<typename vector_type::const_iterator>;
+      using iterator = const_iterator;
+      using absorb_vector = std::vector<nb_variant_type, typename std::allocator_traits<typename entry_type::allocator_type>::template rebind_alloc<nb_variant_type>>;
+
+      explicit cached_records(allocator_type alloc)
+      : data_(alloc)
+      {}
+
+      auto begin() const noexcept -> const_iterator {
+        return const_iterator(data_.begin());
+      }
+
+      auto end() const noexcept -> const_iterator {
+        return const_iterator(data_.end());
+      }
+
+      auto get_allocator() const -> allocator_type {
+        return data_.get_allocator();
+      }
+
+      auto absorb(const std::shared_ptr<const absorb_vector>& elems) -> void {
+        std::transform(elems->begin(), elems->end(),
+            std::back_inserter(data_),
+            [&elems](const nb_variant_type& r) -> vector_elem_type {
+              return vector_elem_type(elems, &r);
+            });
+      }
+
+      private:
+      vector_type data_;
+    };
 
     explicit entry(std::shared_ptr<entry_type> file, cached_records cache)
     : file(std::move(file)),
@@ -91,22 +130,24 @@ class wal_file
                 std::move(handler),
                 std::move(transaction_validation),
                 [self, wf](typename entry_type::records_vector records) -> void {
-                  std::shared_ptr<cached_records> new_cache;
-                  typename cached_records::size_type orig_size;
+                  auto allocator = self->file->get_allocator();
+                  std::shared_ptr<typename cached_records::absorb_vector> new_elements = std::allocate_shared<typename cached_records::absorb_vector>(allocator, allocator);
+                  new_elements->reserve(records.size());
+                  for (auto& v : records) {
+                    if (!wal_record_is_bookkeeping(v))
+                      new_elements->push_back(make_wal_record_no_bookkeeping(std::move(v)));
+                  }
+                  new_elements->shrink_to_fit();
 
                   {
-                    std::lock_guard lck{ self->mtx_ };
-                    new_cache = std::allocate_shared<cached_records>(self->file->get_allocator(), *self->cache_);
-                    orig_size = new_cache->size();
-                    for (auto& v : records) {
-                      if (!wal_record_is_bookkeeping(v))
-                        new_cache->push_back(make_wal_record_no_bookkeeping(std::move(v)));
-                    }
+                    std::lock_guard lck{self->mtx_};
+                    auto new_cache = std::allocate_shared<cached_records>(allocator, *self->cache_);
+                    new_cache->absorb(new_elements);
                     self->cache_ = new_cache;
                   }
 
                   assert(wf != nullptr);
-                  wf->update_cached_file_replacements_(new_cache->cbegin() + orig_size, new_cache->cend());
+                  wf->update_cached_file_replacements_(new_elements->begin(), new_elements->end());
                 });
           },
           token, this->shared_from_this(), std::move(wf), typename entry_type::write_records_vector(std::ranges::begin(records), std::ranges::end(records), file->get_allocator()), std::move(transaction_validation));
@@ -116,16 +157,10 @@ class wal_file
     auto async_records(Acceptor&& acceptor, CompletionToken&& token) const {
       return asio::async_initiate<CompletionToken, void(std::error_code)>(
           [](auto handler, std::shared_ptr<const entry> self, auto acceptor) {
-            std::shared_ptr<const cached_records> records;
-            {
-              std::lock_guard lck{ self->mtx_ };
-              records = self->cache_;
-            }
-
             asio::post(
                 completion_wrapper<void()>(
                     completion_handler_fun(std::move(handler), self->file->get_executor()),
-                    [records=std::move(records), acceptor=std::move(acceptor)](auto handler) mutable {
+                    [records=self->get_cached_records(), acceptor=std::move(acceptor)](auto handler) mutable {
                       std::error_code ec;
                       for (auto iter = records->begin(), end = records->end(); !ec && iter != end; ++iter)
                         ec = std::invoke(acceptor, *iter);
@@ -383,7 +418,7 @@ class wal_file
                                   bad_wal_files->insert(filename);
                                   std::invoke(handler, std::error_code()); // bad ec was handled by marking the file in bad_wal_files.
                                 } else {
-                                  auto new_entry_records = std::allocate_shared<typename entry::cached_records>(wf->get_allocator(), wf->get_allocator());
+                                  auto new_entry_records = std::allocate_shared<typename entry::cached_records::absorb_vector>(wf->get_allocator(), wf->get_allocator());
                                   new_entry->async_records(
                                       [new_entry_records](typename entry_type::variant_type v) -> std::error_code {
                                         if (!wal_record_is_bookkeeping(v)) new_entry_records->push_back(make_wal_record_no_bookkeeping(v));
@@ -392,10 +427,13 @@ class wal_file
                                       completion_wrapper<void(std::error_code)>(
                                           std::move(handler),
                                           [wf, new_entry, new_entry_records, filename](auto handler, std::error_code ec) {
+                                            auto new_cache = typename entry::cached_records(wf->get_allocator());
+                                            new_cache.absorb(new_entry_records);
+
                                             if (ec)
                                               std::clog << "WAL: error while reading WAL file '"sv << filename << "': "sv << ec << "\n";
                                             else
-                                              wf->entries.emplace_back(std::allocate_shared<entry>(wf->get_allocator(), new_entry, std::move(*new_entry_records)));
+                                              wf->entries.emplace_back(std::allocate_shared<entry>(wf->get_allocator(), new_entry, std::move(new_cache)));
                                             std::invoke(handler, ec);
                                           }));
                                 }
@@ -1031,10 +1069,15 @@ class wal_file
   template<typename Iter, typename Sentinel>
   auto update_cached_file_replacements_(Iter b, Sentinel e) -> void {
     if (b == e) return;
-    std::lock_guard lck{cache_file_replacements_mtx_};
+    std::shared_ptr<const file_replacements> old_cfr;
+    {
+      std::lock_guard lck{cache_file_replacements_mtx_};
+      assert(cached_file_replacements_ != nullptr);
+      old_cfr = cached_file_replacements_;
+    }
+    std::shared_ptr<file_replacements> cfr = std::allocate_shared<file_replacements>(get_allocator(), *old_cfr);
+    old_cfr.reset();
 
-    assert(cached_file_replacements_ != nullptr);
-    std::shared_ptr<file_replacements> cfr = std::allocate_shared<file_replacements>(get_allocator(), *cached_file_replacements_);
     for (/* skip */; b != e; ++b) {
       std::error_code ec = std::visit(
           [&cfr, this](const auto& r) -> std::error_code {
@@ -1044,6 +1087,8 @@ class wal_file
           *b);
       if (ec) throw std::system_error(ec, "error updating cached-file-replacements");
     }
+
+    std::lock_guard lck{cache_file_replacements_mtx_};
     cached_file_replacements_ = std::move(cfr);
   }
 
