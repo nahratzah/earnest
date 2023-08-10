@@ -1412,7 +1412,7 @@ class bplus_tree_page
           return;
         }
 
-        tx.async_commit(asio::deferred)
+        tx.async_commit(asio::deferred, true)
         | asio::deferred(
             [parent_lock=std::move(parent_lock)](std::error_code ec) {
               return asio::deferred.when(!ec)
@@ -3216,7 +3216,8 @@ class bplus_tree_leaf final
                 self_op->error_complete(ec);
               else
                 self_op->exlock_page();
-            });
+            },
+            true);
       }
 
       auto exlock_page() -> void {
@@ -3988,7 +3989,7 @@ class bplus_tree
           | asio::deferred(
               [tx](std::error_code ec, cycle_ptr::cycle_gptr<leaf_type> leaf, monitor_uplock_type lock) mutable {
                 return asio::deferred.when(!ec)
-                    .then(tx.async_commit(asio::append(asio::deferred, leaf, lock)))
+                    .then(tx.async_commit(asio::append(asio::deferred, leaf, lock), true))
                     .otherwise(asio::deferred.values(ec, leaf, lock));
               })
           | asio::deferred(
@@ -4597,7 +4598,8 @@ class bplus_tree
                         return asio::deferred.values(std::error_code{}, parent_page);
                       })
                   | std::move(self_op->handler);
-                });
+                },
+                true);
           };
       }
 
@@ -5610,7 +5612,8 @@ class bplus_tree
                     self_op->update_memory_representation(std::move(ps), shift);
                   };
               }
-            });
+            },
+            true);
       }
 
       auto update_memory_representation(std::shared_ptr<page_selection> ps, std::uint32_t shift) -> void {
@@ -5783,12 +5786,13 @@ class bplus_tree
     };
     using shift_elem_vector = std::vector<shift_elem, typename std::allocator_traits<TxAlloc>::template rebind_alloc<shift_elem>>;
 
-    insert_op(cycle_ptr::cycle_gptr<bplus_tree> tree, std::span<const std::byte> key, std::span<const std::byte> value, TxAlloc tx_alloc)
+    insert_op(cycle_ptr::cycle_gptr<bplus_tree> tree, std::span<const std::byte> key, std::span<const std::byte> value, TxAlloc tx_alloc, bool delay_flush)
     : tree(tree),
       key_and_value(make_key_and_value(*tree->spec, key, value, tx_alloc)),
       tx_alloc(tx_alloc),
       path(tree, tx_alloc),
-      logger(tree->logger)
+      logger(tree->logger),
+      delay_flush(delay_flush)
     {}
 
     insert_op(const insert_op&) = delete;
@@ -6164,9 +6168,9 @@ class bplus_tree
                 asio::deferred, ec, elem_ref, elem_lock, leaf, leaf_lock, raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc));
           })
       | asio::deferred(
-          [](std::error_code ec, bplus_element_reference<raw_db_type, false> elem_ref, monitor_uplock_type elem_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, tx_type tx) {
+          [delay_flush=this->delay_flush](std::error_code ec, bplus_element_reference<raw_db_type, false> elem_ref, monitor_uplock_type elem_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, tx_type tx) {
             return asio::deferred.when(!ec)
-                .then(tx.async_commit(asio::append(asio::deferred, elem_ref, elem_lock, leaf, leaf_lock)))
+                .then(tx.async_commit(asio::append(asio::deferred, elem_ref, elem_lock, leaf, leaf_lock), delay_flush))
                 .otherwise(asio::deferred.values(ec, elem_ref, elem_lock, leaf, leaf_lock));
           })
       | asio::deferred(
@@ -6195,11 +6199,12 @@ class bplus_tree
     tree_path<TxAlloc> path;
     move_only_function<void(std::error_code, bplus_element_reference<raw_db_type, false>)> handler;
     const std::shared_ptr<spdlog::logger> logger;
+    const bool delay_flush;
   };
 
   public:
   template<typename TxAlloc, typename CompletionToken>
-  auto insert(std::span<const std::byte> key, std::span<const std::byte> value, TxAlloc tx_alloc, CompletionToken&& token) {
+  auto insert(std::span<const std::byte> key, std::span<const std::byte> value, TxAlloc tx_alloc, CompletionToken&& token, bool delay_flush = false) {
     return asio::async_initiate<CompletionToken, void(std::error_code, bplus_element_reference<raw_db_type, false>)>(
         [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> self, std::shared_ptr<insert_op<TxAlloc>> op) {
           if constexpr(handler_has_executor_v<decltype(handler)>)
@@ -6207,7 +6212,7 @@ class bplus_tree
           else
             std::invoke(*op, std::move(handler));
         },
-        token, this->shared_from_this(this), std::allocate_shared<insert_op<TxAlloc>>(tx_alloc, this->shared_from_this(this), std::move(key), std::move(value), tx_alloc));
+        token, this->shared_from_this(this), std::allocate_shared<insert_op<TxAlloc>>(tx_alloc, this->shared_from_this(this), std::move(key), std::move(value), tx_alloc, delay_flush));
   }
 
   template<typename TxAlloc, typename CompletionToken>

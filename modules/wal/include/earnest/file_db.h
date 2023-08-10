@@ -975,15 +975,15 @@ class transaction {
   }
 
   template<typename CompletionToken>
-  auto async_commit(CompletionToken&& token) {
+  auto async_commit(CompletionToken&& token, bool delay_sync = false) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [](auto handler, transaction self) {
+        [](auto handler, transaction self, bool delay_sync) {
           if constexpr(detail::handler_has_executor_v<decltype(handler)>)
-            self.commit_op_(detail::completion_handler_fun(std::move(handler), self.get_executor()));
+            self.commit_op_(detail::completion_handler_fun(std::move(handler), self.get_executor()), delay_sync);
           else
-            self.commit_op_(std::move(handler));
+            self.commit_op_(std::move(handler), delay_sync);
         },
-        token, *this);
+        token, *this, delay_sync);
   }
 
   template<typename Fn>
@@ -1440,7 +1440,7 @@ class transaction {
     | detail::forward_deferred(get_executor());
   }
 
-  auto commit_op_(detail::move_only_function<void(std::error_code)> handler) {
+  auto commit_op_(detail::move_only_function<void(std::error_code)> handler, bool delay_sync = false) {
     std::invoke(this->wait_for_writes_, std::error_code()); // Complete the writes (further write attempts will now throw an exception).
     return this->wait_for_writes_.async_on_ready(asio::deferred)
     | asio::deferred(
@@ -1452,7 +1452,8 @@ class transaction {
     | asio::deferred(
         [ wmap=this->writes_map_,
           fdb=this->fdb_,
-          allocator=this->alloc_
+          allocator=this->alloc_,
+          delay_sync
         ](typename monitor_type::shared_lock lock, std::error_code ec) {
           auto writes = std::vector<typename file_db::wal_type::write_variant_type, rebind_alloc<typename file_db::wal_type::write_variant_type>>(allocator);
           if (!ec) {
@@ -1468,7 +1469,8 @@ class transaction {
                   fdb->wal->async_append(
                       std::move(writes),
                       asio::append(asio::deferred, lock),
-                      can_commit_op_(fdb, wmap, allocator)))
+                      can_commit_op_(fdb, wmap, allocator),
+                      delay_sync))
               .otherwise(asio::deferred.values(ec, lock));
         })
     | asio::deferred(

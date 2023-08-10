@@ -84,9 +84,9 @@ class wal_file
     {}
 
     template<typename Range, typename CompletionToken, typename TransactionValidation = no_transaction_validation>
-    auto async_append(std::shared_ptr<wal_file> wf, Range&& records, CompletionToken&& token, TransactionValidation transaction_validation = TransactionValidation()) {
+    auto async_append(std::shared_ptr<wal_file> wf, Range&& records, CompletionToken&& token, TransactionValidation transaction_validation = TransactionValidation(), bool delay_sync = false) {
       return asio::async_initiate<CompletionToken, void(std::error_code)>(
-          [](auto handler, std::shared_ptr<entry> self, std::shared_ptr<wal_file> wf, typename entry_type::write_records_vector records, auto transaction_validation) {
+          [](auto handler, std::shared_ptr<entry> self, std::shared_ptr<wal_file> wf, typename entry_type::write_records_vector records, auto transaction_validation, bool delay_sync) {
             self->file->async_append(
                 std::move(records),
                 std::move(handler),
@@ -110,9 +110,10 @@ class wal_file
                   wf->update_cached_file_replacements_(
                       boost::make_transform_iterator<remove_bookkeeping_from_variant>(filtered_records_iter_b),
                       boost::make_transform_iterator<remove_bookkeeping_from_variant>(filtered_records_iter_e));
-                });
+                },
+                delay_sync);
           },
-          token, this->shared_from_this(), std::move(wf), typename entry_type::write_records_vector(std::ranges::begin(records), std::ranges::end(records), file->get_allocator()), std::move(transaction_validation));
+          token, this->shared_from_this(), std::move(wf), typename entry_type::write_records_vector(std::ranges::begin(records), std::ranges::end(records), file->get_allocator()), std::move(transaction_validation), delay_sync);
     }
 
     template<typename Acceptor, typename CompletionToken>
@@ -236,13 +237,13 @@ class wal_file
 
   template<typename Range, typename CompletionToken>
   requires std::ranges::input_range<std::remove_reference_t<Range>>
-  auto async_append(Range&& records, CompletionToken&& token) {
+  auto async_append(Range&& records, CompletionToken&& token, bool delay_sync = false) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [](auto handler, std::shared_ptr<wal_file> wf, auto records) {
+        [](auto handler, std::shared_ptr<wal_file> wf, auto records, bool delay_sync) {
           asio::dispatch(
               completion_wrapper<void()>(
                   completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
-                  [wf, records=std::move(records)](auto handler) mutable {
+                  [wf, records=std::move(records), delay_sync](auto handler) mutable {
                     assert(wf->strand_.running_in_this_thread());
 
                     if (wf->active == nullptr) [[unlikely]] {
@@ -256,21 +257,21 @@ class wal_file
                     // 2. the seal operation will maintain its own lock until the seal is confirmed written out
                     // 3. the seal won't complete writing out until all writes preceding it are completed
                     //    (which includes this write)
-                    wf->active->async_append(wf, std::move(records), std::move(handler).inner_handler());
+                    wf->active->async_append(wf, std::move(records), std::move(handler).inner_handler(), no_transaction_validation{}, delay_sync);
                   }));
         },
-        token, this->shared_from_this(), write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()));
+        token, this->shared_from_this(), write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()), delay_sync);
   }
 
   template<typename Range, typename CompletionToken, typename TransactionValidation>
   requires std::ranges::input_range<std::remove_reference_t<Range>>
-  auto async_append(Range&& records, CompletionToken&& token, TransactionValidation&& transaction_validation) {
+  auto async_append(Range&& records, CompletionToken&& token, TransactionValidation&& transaction_validation, bool delay_sync = false) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [](auto handler, std::shared_ptr<wal_file> wf, auto records, auto transaction_validation) {
+        [](auto handler, std::shared_ptr<wal_file> wf, auto records, auto transaction_validation, bool delay_sync) {
           asio::dispatch(
               completion_wrapper<void()>(
                   completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
-                  [ wf,
+                  [ wf, delay_sync,
                     records=std::move(records),
                     transaction_validation=std::move(transaction_validation)
                   ](auto handler) mutable {
@@ -287,10 +288,10 @@ class wal_file
                     // 2. the seal operation will maintain its own lock until the seal is confirmed written out
                     // 3. the seal won't complete writing out until all writes preceding it are completed
                     //    (which includes this write)
-                    wf->active->async_append(wf, std::move(records), std::move(handler).inner_handler(), std::move(transaction_validation));
+                    wf->active->async_append(wf, std::move(records), std::move(handler).inner_handler(), std::move(transaction_validation), delay_sync);
                   }));
         },
-        token, this->shared_from_this(), write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()), std::forward<TransactionValidation>(transaction_validation));
+        token, this->shared_from_this(), write_records_vector(std::ranges::begin(records), std::ranges::end(records), get_allocator()), std::forward<TransactionValidation>(transaction_validation), delay_sync);
   }
 
   template<typename CompletionToken>
