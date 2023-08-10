@@ -2198,11 +2198,10 @@ class bplus_tree_leaf final
   {
     using executor_type = typename bplus_tree_leaf::executor_type;
 
-    element(executor_type ex, std::size_t index, bool synced, cycle_ptr::cycle_gptr<bplus_tree_leaf> owner, typename raw_db_type::allocator_type alloc)
+    element(executor_type ex, std::size_t index, cycle_ptr::cycle_gptr<bplus_tree_leaf> owner, typename raw_db_type::allocator_type alloc)
     : index(std::move(index)),
       element_lock(std::move(ex), lock_name_(this), std::move(alloc)),
-      owner(std::move(owner)),
-      synced(synced)
+      owner(std::move(owner))
     {}
 
     auto get_executor() const -> executor_type {
@@ -2294,259 +2293,7 @@ class bplus_tree_leaf final
           token, this->shared_from_this(this), std::move(tx_alloc));
     }
 
-    template<typename TxAlloc, typename CompletionToken>
-    [[deprecated]]
-    auto async_ensure_synced(TxAlloc tx_alloc, CompletionToken&& token) const {
-      return asio::async_initiate<CompletionToken, void(std::error_code, cycle_ptr::cycle_gptr<bplus_tree_leaf>, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock /*leaf_lock*/, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock /*elem_lock*/)>(
-          [](auto handler, cycle_ptr::cycle_gptr<const element> self, TxAlloc tx_alloc) -> void {
-            self->async_ensure_synced_(std::move(tx_alloc), std::move(handler));
-          },
-          token, this->shared_from_this(this), std::move(tx_alloc));
-    }
-
     private:
-    template<typename TxAlloc>
-    auto async_ensure_synced_(TxAlloc tx_alloc, move_only_function<void(std::error_code, cycle_ptr::cycle_gptr<bplus_tree_leaf>, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock /*leaf_lock*/, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock /*elem_lock*/)> handler) const -> void {
-      using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
-      using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
-      using tx_type = typename raw_db_type::template fdb_transaction<TxAlloc>;
-
-      struct pending_struct {
-        pending_struct(cycle_ptr::cycle_gptr<element> elem, monitor_uplock_type uplock) noexcept
-        : elem(std::move(elem)),
-          uplock(std::move(uplock))
-        {}
-
-        cycle_ptr::cycle_gptr<element> elem;
-        monitor_uplock_type uplock;
-      };
-
-      using pending_t = std::vector<pending_struct, typename std::allocator_traits<TxAlloc>::template rebind_alloc<pending_struct>>;
-
-      struct op
-      : public std::enable_shared_from_this<op>
-      {
-        explicit op(cycle_ptr::cycle_gptr<const element> self, move_only_function<void(std::error_code, cycle_ptr::cycle_gptr<bplus_tree_leaf>, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock /*leaf_lock*/, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock /*elem_lock*/)> handler, TxAlloc tx_alloc)
-        : self(std::move(self)),
-          tx_alloc(tx_alloc),
-          handler(std::move(handler)),
-          pending(tx_alloc)
-        {}
-
-        op(const op&) = delete;
-        op(op&&) = delete;
-
-        auto operator()() -> void {
-          self->template async_lock_owner<monitor_uplock_type>(
-              tx_alloc,
-              [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf> leaf, monitor_uplock_type leaf_lock) {
-                assert(self_op->handler);
-
-                // Attempt an optimistic shortcut.
-                auto opt_elem_uplock = self_op->self->element_lock.try_upgrade(__FILE__, __LINE__);
-                if (opt_elem_uplock.has_value() && self_op->self->synced) {
-                  std::invoke(self_op->handler, std::error_code{}, std::move(leaf), std::move(leaf_lock), std::move(opt_elem_uplock).value());
-                  return;
-                }
-
-                if (leaf->erased_) [[unlikely]] {
-                  self_op->error_invoke(make_error_code(db_errc::data_expired));
-                  return;
-                }
-
-                self_op->leaf = std::move(leaf);
-                self_op->page_uplock = std::move(leaf_lock);
-                self_op->with_page_locked();
-              });
-        }
-
-        private:
-        struct do_commit_cb {
-          do_commit_cb(const std::shared_ptr<op> self_op, tx_type tx)
-          : self_op(std::move(self_op)),
-            tx(std::move(tx))
-          {}
-
-          auto operator()(std::error_code ec) -> void {
-            self_op->do_commit(ec, tx);
-          }
-
-          private:
-          const std::shared_ptr<op> self_op;
-          tx_type tx;
-        };
-
-        using barrier_type = completion_barrier<do_commit_cb, executor_type>;
-
-        auto with_page_locked() -> void {
-          assert(leaf != nullptr);
-          assert(page_uplock.holds_monitor(leaf->page_lock));
-
-          cycle_ptr::cycle_gptr<raw_db_type> raw_db = leaf->raw_db.lock();
-          if (raw_db == nullptr) {
-            error_invoke(make_error_code(db_errc::data_expired));
-            return;
-          }
-
-          tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
-          barrier_type barrier = make_completion_barrier(
-              do_commit_cb(this->shared_from_this(), tx),
-              leaf->get_executor());
-          disk_op_each(std::move(tx), leaf->elements().cbegin(), std::move(barrier));
-        }
-
-        auto disk_op_each(tx_type tx, typename element_vector::const_iterator iter, barrier_type barrier) -> void {
-          assert(leaf != nullptr);
-          assert(page_uplock.holds_monitor(leaf->page_lock));
-          assert(!leaf->erased_);
-
-          for (/* skip */; iter != leaf->elements().cend(); ++iter) {
-            assert(*iter != nullptr);
-            std::optional<monitor_uplock_type> opt_elem_uplock = (*iter)->element_lock.try_upgrade(__FILE__, __LINE__);
-            if (opt_elem_uplock.has_value()) {
-              const bool handler_was_executed = do_disk_write(tx, *iter, std::move(opt_elem_uplock).value(), barrier);
-              // The handler was executed early.
-              // We want to stop this function right now,
-              // because we cannot share the upgrade-locks with another task.
-              if (handler_was_executed) return;
-            } else {
-              (*iter)->element_lock.async_upgrade(
-                  [self_op=this->shared_from_this(), iter, tx, barrier](monitor_uplock_type elem_uplock) {
-                    self_op->do_disk_write(tx, *iter, std::move(elem_uplock), barrier);
-                    self_op->disk_op_each(tx, std::next(iter), barrier);
-                  },
-                  __FILE__, __LINE__);
-              return; // callback will restart this function.
-            }
-          }
-
-          // Only reached after the for-loop completes.
-          barrier(std::error_code());
-        }
-
-        // Returns true if the handler was executed early.
-        auto do_disk_write(tx_type tx, cycle_ptr::cycle_gptr<element> elem, monitor_uplock_type elem_lock, barrier_type barrier) -> bool {
-          assert(elem != nullptr);
-          assert(elem_lock.holds_monitor(elem->element_lock));
-
-          if (!elem->synced) {
-            // 2 write operations, and the completion of the current function.
-            barrier += 3;
-
-            leaf->async_set_use_list_diskonly_op(tx, elem->index, elem->type(), barrier);
-            leaf->async_set_elements_diskonly_op(tx, elem->index, leaf->element_span(elem->index), barrier);
-
-            std::lock_guard lck{pending_mtx};
-            pending.emplace_back(std::move(elem), std::move(elem_lock));
-            std::invoke(barrier, std::error_code{});
-          } else if (elem == self) {
-            assert(handler);
-            std::invoke(handler, std::error_code{}, this->leaf, this->page_uplock, std::move(elem_lock));
-            handler = nullptr;
-            return true;
-          }
-
-          return false;
-        }
-
-        auto do_commit(std::error_code ec, tx_type tx) -> void {
-          if (ec) [[unlikely]] {
-            error_invoke(ec);
-            return;
-          }
-          // No need to commit empty transaction.
-          if (pending.empty()) [[unlikely]] {
-            assert(!handler); // handler should be cleared: the `do_disk_write()` method will have completed the callback already.
-            return;
-          }
-
-          tx.async_commit(
-              [self_op=this->shared_from_this()](std::error_code ec) {
-                self_op->after_commit(ec);
-              });
-        }
-
-        auto after_commit(std::error_code ec) -> void {
-          if (ec) [[unlikely]] {
-            error_invoke(ec);
-            return;
-          }
-
-          const pending_struct* self_p = nullptr;
-          for (const auto& p : pending) {
-            if (p.elem == self) {
-              assert(self_p == nullptr);
-              self_p = &p;
-            } else {
-              p.uplock.dispatch_exclusive(
-                  [p]([[maybe_unused]] monitor_exlock_type elem_exlock) -> void {
-                    assert(p.elem != nullptr);
-                    assert(elem_exlock.holds_monitor(p.elem->element_lock));
-
-                    p.elem->synced = true;
-                  },
-                  __FILE__, __LINE__);
-            }
-          }
-
-          assert(self_p != nullptr);
-          if (self_p != nullptr) {
-            self_p->uplock.async_exclusive(
-                [ p=*self_p,
-                  handler=std::move(handler),
-                  leaf=leaf,
-                  page_uplock=page_uplock
-                ](monitor_exlock_type elem_exlock) mutable -> void {
-                  assert(p.elem != nullptr);
-                  assert(elem_exlock.holds_monitor(p.elem->element_lock));
-
-                  p.elem->synced = true;
-                  elem_exlock.reset();
-
-                  assert(leaf != nullptr && page_uplock.holds_monitor(leaf->page_lock));
-                  assert(p.uplock.holds_monitor(p.elem->element_lock));
-                  std::invoke(handler, std::error_code{}, std::move(leaf), std::move(page_uplock), std::move(p.uplock));
-                },
-                __FILE__, __LINE__);
-          }
-
-          assert(!handler);
-          maybe_restart();
-        }
-
-        auto error_invoke(std::error_code ec) -> void {
-          assert(ec);
-          if (leaf != nullptr && page_uplock.is_locked())
-            leaf->logger->error("unable to sync elements on leaf {}: {}", *leaf, ec.message());
-          if (handler) {
-            std::invoke(handler, ec, cycle_ptr::cycle_gptr<bplus_tree_leaf>{}, monitor_uplock_type{}, monitor_uplock_type{});
-            handler = nullptr;
-          }
-        }
-
-        auto maybe_restart() -> void {
-          // Shouldn't ever happen: we held the owning page.
-          if (handler) {
-            leaf.reset();
-            page_uplock.reset();
-            pending.clear();
-            std::invoke(*this);
-          }
-        }
-
-        const cycle_ptr::cycle_gptr<const element> self;
-        TxAlloc tx_alloc;
-        move_only_function<void(std::error_code, cycle_ptr::cycle_gptr<bplus_tree_leaf>, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock /*leaf_lock*/, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock /*elem_lock*/)> handler;
-        cycle_ptr::cycle_gptr<bplus_tree_leaf> leaf;
-        monitor_uplock_type page_uplock;
-
-        std::mutex pending_mtx;
-        pending_t pending;
-      };
-
-      std::invoke(*std::allocate_shared<op>(tx_alloc, this->shared_from_this(this), std::move(handler), tx_alloc));
-    }
-
     template<typename LeafLockType = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock, typename TxAlloc>
     requires std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock> || std::same_as<LeafLockType, typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock>
     auto async_lock_owner_(TxAlloc tx_alloc, move_only_function<void(cycle_ptr::cycle_gptr<bplus_tree_leaf>, LeafLockType)> handler) const -> void {
@@ -2625,7 +2372,6 @@ class bplus_tree_leaf final
     // Use-count requires a lock to be held, when increasing from 0.
     // Use-count does not require a lock to be held, otherwise.
     mutable std::atomic<std::size_t> use_count{std::size_t(0)};
-    [[deprecated]] bool synced;
   };
 
   private:
@@ -2681,8 +2427,8 @@ class bplus_tree_leaf final
                     new_page->use_list_span().back() = bplus_tree_leaf_use_element::after_last;
 
                     assert(new_page->elements_.empty());
-                    new_page->elements_.emplace_back(cycle_ptr::allocate_cycle<element>(new_page->get_allocator(), new_page->get_executor(), 0u, true, new_page, new_page->get_allocator()));
-                    new_page->elements_.emplace_back(cycle_ptr::allocate_cycle<element>(new_page->get_allocator(), new_page->get_executor(), new_page->use_list_span().size() - 1u, true, new_page, new_page->get_allocator()));
+                    new_page->elements_.emplace_back(cycle_ptr::allocate_cycle<element>(new_page->get_allocator(), new_page->get_executor(), 0u, new_page, new_page->get_allocator()));
+                    new_page->elements_.emplace_back(cycle_ptr::allocate_cycle<element>(new_page->get_allocator(), new_page->get_executor(), new_page->use_list_span().size() - 1u, new_page, new_page->get_allocator()));
 
                     if (spec->element.key.min_value)
                       spec->element.key.min_value(new_page->elements_.front()->key_span());
@@ -3532,7 +3278,6 @@ class bplus_tree_leaf final
                             this->get_allocator(),
                             this->get_executor(),
                             i,
-                            true,
                             this->shared_from_this(this),
                             raw_db->get_allocator()));
                     break;
@@ -5682,7 +5427,6 @@ class bplus_tree
                 if (rebalance_item.which_page != 0)
                   rebalance_item.elem->owner = ps->level_pages[rebalance_item.which_page];
                 rebalance_item.elem->index = rebalance_item.new_index;
-                rebalance_item.elem->synced = true;
               });
 
           // Update predecessor/successor references.
@@ -6057,7 +5801,6 @@ class bplus_tree
                       --sh_elem.elem->index;
                     else
                       ++sh_elem.elem->index;
-                    sh_elem.elem->synced = false;
                   });
             }
 
@@ -6145,7 +5888,7 @@ class bplus_tree
       const auto insert_index = (min_index + max_index + 1u) / 2u;
       assert(min_index <= insert_index && insert_index <= max_index);
 
-      auto new_element = bplus_element_reference<raw_db_type, false>::allocate(path.leaf_page.page->get_allocator(), path.leaf_page.page->get_executor(), insert_index, false, path.leaf_page.page, path.leaf_page.page->get_allocator());
+      auto new_element = bplus_element_reference<raw_db_type, false>::allocate(path.leaf_page.page->get_allocator(), path.leaf_page.page->get_executor(), insert_index, path.leaf_page.page, path.leaf_page.page->get_allocator());
 
       auto raw_db = tree->raw_db.lock();
       if (raw_db == nullptr) [[unlikely]] {
