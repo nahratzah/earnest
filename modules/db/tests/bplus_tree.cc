@@ -186,6 +186,47 @@ NEW_TEST(insert_many_concurrently_with_random_order_multithreaded) {
   print_tree();
 }
 
+NEW_TEST(erase) {
+  read_kv_vector expect;
+  expect.emplace_back("aaaa", "AAAA");
+  expect.emplace_back("cccc", "CCCC");
+
+  insert("aaaa", "AAAA", true);
+  insert("cccc", "CCCC", true);
+
+  earnest::detail::bplus_element_reference<raw_db_type, true> elem_ref;
+  std::string_view key = "bbbb";
+  std::string_view value = "BBBB";
+  tree->insert(
+      std::as_bytes(std::span<const char>(key.data(), key.size())),
+      std::as_bytes(std::span<const char>(value.data(), value.size())),
+      std::allocator<std::byte>(),
+      [&elem_ref](std::error_code ec, earnest::detail::bplus_element_reference<raw_db_type, true> inserted_elem_ref) -> void {
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+        elem_ref = inserted_elem_ref;
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  REQUIRE CHECK_EQUAL(read_kv_vector({ {"aaaa", "AAAA"}, {"bbbb", "BBBB"}, {"cccc", "CCCC"} }), read_all());
+
+  // Now the test starts.
+
+  bool callback_called = false;
+  tree->erase(
+      elem_ref,
+      std::allocator<std::byte>(),
+      [&callback_called](std::error_code ec) {
+        callback_called = true;
+        CHECK_EQUAL(std::error_code(), ec);
+      });
+  ioctx.run();
+  ioctx.restart();
+  CHECK(callback_called);
+
+  CHECK_EQUAL(expect, read_all());
+}
+
 int main(int argc, char** argv) {
   asio::thread_pool gc_pool(1);
   earnest::detail::asio_cycle_ptr gc(gc_pool.get_executor());
