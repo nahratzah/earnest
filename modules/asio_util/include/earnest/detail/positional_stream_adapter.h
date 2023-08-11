@@ -103,9 +103,9 @@ class positional_stream_adapter {
           next_layer_.async_write_some_at(
               pos_,
               buffers,
-              completion_wrapper<void(std::error_code, size_t)>(
+              completion_wrapper<void(std::error_code, std::size_t)>(
                   std::move(completion_handler),
-                  [this](auto& fwd, std::error_code ec, size_t sz) {
+                  [this](auto& fwd, std::error_code ec, std::size_t sz) {
                     pos_ += sz;
                     std::invoke(fwd, ec, sz);
                   }));
@@ -134,9 +134,9 @@ class positional_stream_adapter {
           next_layer_.async_read_some_at(
               pos_,
               buffers,
-              completion_wrapper<void(std::error_code, size_t)>(
+              completion_wrapper<void(std::error_code, std::size_t)>(
                   std::move(completion_handler),
-                  [this](auto& fwd, std::error_code ec, size_t sz) {
+                  [this](auto& fwd, std::error_code ec, std::size_t sz) {
                     pos_ += sz;
                     std::invoke(fwd, ec, sz);
                   }));
