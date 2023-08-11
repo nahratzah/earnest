@@ -6061,13 +6061,13 @@ class bplus_tree
 
     private:
     auto acquire_locks() -> void {
-      elem->async_lock_owner(get_allocator(), asio::deferred)
+      elem->template async_lock_owner<monitor_uplock_type>(get_allocator(), asio::deferred)
       | asio::deferred(
-          [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock) {
+          [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
             auto mutable_elem = std::const_pointer_cast<typename bplus_tree_leaf<raw_db_type>::element>(self_op->elem.get());
             return mutable_elem->element_lock.dispatch_upgrade(asio::prepend(asio::deferred, leaf, leaf_lock, mutable_elem), __FILE__, __LINE__);
           })
-      | [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, monitor_uplock_type elem_lock) {
+      | [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, monitor_uplock_type elem_lock) {
           std::error_code ec;
           if (leaf->erased_) [[unlikely]] {
             ec = make_error_code(db_errc::data_expired);
@@ -6097,7 +6097,9 @@ class bplus_tree
         };
     }
 
-    auto ghost_delete(cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, monitor_uplock_type elem_lock) -> void {
+    auto ghost_delete(cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, monitor_uplock_type elem_lock) -> void {
+      const bool has_augments = !tree->spec->element.augments.empty();
+
       auto raw_db = leaf->raw_db.lock();
       if (!raw_db) {
         error_invoke(db_errc::data_expired);
@@ -6107,20 +6109,48 @@ class bplus_tree
 
       leaf->async_set_use_list_diskonly_op(tx, mutable_elem->index, bplus_tree_leaf_use_element::ghost_delete, asio::append(asio::deferred, leaf, leaf_lock, mutable_elem, elem_lock))
       | asio::deferred(
-          [tx, delay_flush=this->delay_flush](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, monitor_uplock_type elem_lock) mutable {
+          [tx, has_augments](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, monitor_uplock_type elem_lock) mutable {
+            return asio::deferred.when(!ec && has_augments)
+                .then(leaf->async_set_augment_propagation_required_diskonly_op(tx, asio::append(asio::deferred, leaf, leaf_lock, mutable_elem, elem_lock)))
+                .otherwise(asio::deferred.values(ec, leaf, leaf_lock, mutable_elem, elem_lock));
+          })
+      | asio::deferred(
+          [tx, has_augments, delay_flush=this->delay_flush](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, monitor_uplock_type elem_lock) mutable {
+            // Ensure augments are fixed after commiting.
+            if (has_augments) {
+              tx.on_commit(
+                  [leaf, leaf_lock]() mutable -> void {
+                    std::move(leaf_lock).dispatch_exclusive(
+                        [leaf](monitor_exlock_type leaf_lock) -> void {
+                          leaf->augment_propagation_required = true;
+                          leaf_lock.reset();
+                          leaf->async_fix_augment_background();
+                        },
+                        __FILE__, __LINE__);
+                  });
+            }
+
+            // Update in-memory representation.
+            tx.on_commit(
+                [ elem=bplus_element_reference<raw_db_type, false>(mutable_elem, elem_lock),
+                  elem_lock, leaf, leaf_lock
+                ]() mutable -> void {
+                  std::move(elem_lock).dispatch_exclusive(
+                      [elem, leaf, leaf_lock]([[maybe_unused]] monitor_exlock_type elem_lock) mutable -> void {
+                        leaf->use_list_span()[elem->index] = bplus_tree_leaf_use_element::ghost_delete;
+
+                        leaf_lock.reset(); // Silence compiler warning.
+                        leaf.reset(); // Silence compiler warning.
+                      },
+                      __FILE__, __LINE__);
+                });
+
             return asio::deferred.when(!ec)
                 .then(tx.async_commit(asio::append(asio::deferred, leaf, leaf_lock, mutable_elem, elem_lock), delay_flush))
                 .otherwise(asio::deferred.values(ec, leaf, leaf_lock, mutable_elem, elem_lock));
           })
       | asio::deferred(
-          [tx](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_shlock_type leaf_lock, cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, monitor_uplock_type elem_lock) mutable {
-            return asio::deferred.when(!ec)
-                .then(std::move(elem_lock).dispatch_exclusive(asio::prepend(asio::deferred, ec, leaf, leaf_lock, mutable_elem), __FILE__, __LINE__))
-                .otherwise(asio::deferred.values(ec, leaf, leaf_lock, mutable_elem, monitor_exlock_type{}));
-          })
-      | asio::deferred(
-          [](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, [[maybe_unused]] monitor_shlock_type leaf_lock, cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, [[maybe_unused]] monitor_exlock_type elem_lock) {
-            if (!ec) leaf->use_list_span()[mutable_elem->index] = bplus_tree_leaf_use_element::ghost_delete;
+          [](std::error_code ec, [[maybe_unused]] cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, [[maybe_unused]] monitor_uplock_type leaf_lock, [[maybe_unused]] cycle_ptr::cycle_gptr<typename bplus_tree_leaf<raw_db_type>::element> mutable_elem, [[maybe_unused]] monitor_uplock_type elem_lock) {
             return asio::deferred.values(ec);
           })
       | [self_op=this->shared_from_this()](std::error_code ec) -> void {
