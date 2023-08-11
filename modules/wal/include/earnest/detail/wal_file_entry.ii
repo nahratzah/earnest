@@ -574,20 +574,23 @@ template<typename Acceptor, typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_records(Acceptor&& acceptor, CompletionToken&& token) const {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, std::shared_ptr<const wal_file_entry> wf, std::remove_cvref_t<Acceptor> acceptor) {
+        auto handler_alloc = asio::get_associated_allocator(completion_handler, wf->get_allocator());
         wf->async_records_impl_(
             move_only_function<std::error_code(variant_type)>(std::move(acceptor)),
             move_only_function<void(std::error_code)>(
-                completion_handler_fun(std::move(completion_handler), wf->get_executor())));
+                completion_handler_fun(std::move(completion_handler), wf->get_executor())),
+            std::move(handler_alloc));
       },
       token, this->shared_from_this(), std::forward<Acceptor>(acceptor));
 }
 
 template<typename Executor, typename Allocator>
-inline auto wal_file_entry<Executor, Allocator>::async_records_impl_(move_only_function<std::error_code(variant_type)> acceptor, move_only_function<void(std::error_code)> completion_handler) const {
+template<typename HandlerAllocator>
+inline auto wal_file_entry<Executor, Allocator>::async_records_impl_(move_only_function<std::error_code(variant_type)> acceptor, move_only_function<void(std::error_code)> completion_handler, HandlerAllocator handler_alloc) const {
   asio::dispatch(
       completion_wrapper<void()>(
           asio::bind_executor(strand_,
-              asio::bind_allocator(get_allocator(),
+              asio::bind_allocator(handler_alloc,
                   std::move(completion_handler))),
           [wf=this->shared_from_this(), acceptor=std::move(acceptor)](auto completion_handler) mutable {
             assert(wf->strand_.running_in_this_thread());
@@ -598,7 +601,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_records_impl_(move_only_f
               return;
             }
 
-            std::unique_ptr<async_records_reader> s = std::make_unique<async_records_reader>(wf);
+            auto s = std::make_unique<async_records_reader<typename std::allocator_traits<HandlerAllocator>::template rebind_alloc<std::byte>>>(wf, asio::get_associated_allocator(completion_handler));
             auto& stream = *s;
 
             auto shared_acceptor = std::allocate_shared<move_only_function<std::error_code(variant_type)>>(wf->get_allocator(), std::move(acceptor));

@@ -12,6 +12,7 @@
 #include <asio/buffer.hpp>
 #include <asio/strand.hpp>
 
+#include <earnest/detail/buffered_readstream_adapter.h>
 #include <earnest/detail/fanout.h>
 #include <earnest/detail/fanout_barrier.h>
 #include <earnest/detail/move_only_function.h>
@@ -150,24 +151,31 @@ class wal_file_entry
   auto async_records(CompletionToken&& token) const;
 
   private:
+  template<typename StreamAllocator>
   class async_records_reader
-  : private positional_stream_adapter<const fd_type&>
+  : private buffered_readstream_adapter<positional_stream_adapter<const fd_type&>, StreamAllocator>
   {
     private:
     static constexpr auto begin_offset = std::remove_cvref_t<decltype(std::declval<wal_file_entry>().header_reader_())>::bytes.value();
+    using parent_type = buffered_readstream_adapter<positional_stream_adapter<const fd_type&>, StreamAllocator>;
 
     public:
-    using offset_type = typename positional_stream_adapter<const fd_type&>::offset_type;
-    using executor_type = typename positional_stream_adapter<const fd_type&>::executor_type;
+    using offset_type = typename parent_type::offset_type;
+    using executor_type = typename parent_type::executor_type;
 
     explicit async_records_reader(std::shared_ptr<const wal_file_entry> wf)
-    : positional_stream_adapter<const fd_type&>(wf->file, begin_offset),
+    : parent_type(typename parent_type::next_layer_type(wf->file, begin_offset)),
       wf_(std::move(wf))
     {}
 
-    using positional_stream_adapter<const fd_type&>::position;
-    using positional_stream_adapter<const fd_type&>::get_executor;
-    using positional_stream_adapter<const fd_type&>::skip;
+    explicit async_records_reader(std::shared_ptr<const wal_file_entry> wf, StreamAllocator alloc)
+    : parent_type(typename parent_type::next_layer_type(wf->file, begin_offset), alloc),
+      wf_(std::move(wf))
+    {}
+
+    using parent_type::position;
+    using parent_type::get_executor;
+    using parent_type::skip;
 
     template<typename MutableBufferSequence, typename CompletionToken>
     auto async_read_some(const MutableBufferSequence& buffers, CompletionToken&& token) {
@@ -189,7 +197,7 @@ class wal_file_entry
                               }));
 
                       if (next == wf_->unwritten_links_.cend()) {
-                        this->positional_stream_adapter<const fd_type&>::async_read_some(std::move(buffers), std::move(handler).inner_handler());
+                        this->parent_type::async_read_some(std::move(buffers), std::move(handler).inner_handler());
                         return;
                       }
 
@@ -211,7 +219,7 @@ class wal_file_entry
                       }
                       buffers.erase(buf_end_iter, buffers.end());
                       assert(buffer_size(buffers) <= next_avail);
-                      this->positional_stream_adapter<const fd_type&>::async_read_some(std::move(buffers), std::move(handler).inner_handler());
+                      this->parent_type::async_read_some(std::move(buffers), std::move(handler).inner_handler());
                     }));
           },
           token, std::vector<asio::mutable_buffer>(asio::buffer_sequence_begin(buffers), asio::buffer_sequence_end(buffers)));
@@ -221,7 +229,8 @@ class wal_file_entry
     std::shared_ptr<const wal_file_entry> wf_;
   };
 
-  auto async_records_impl_(move_only_function<std::error_code(variant_type)> acceptor, move_only_function<void(std::error_code)> completion_handler) const;
+  template<typename HandlerAllocator>
+  auto async_records_impl_(move_only_function<std::error_code(variant_type)> acceptor, move_only_function<void(std::error_code)> completion_handler, HandlerAllocator handler_alloc) const;
 
   template<typename CompletionToken, typename OnSpaceAssigned, typename TransactionValidator>
   auto append_bytes_(std::vector<std::byte, rebind_alloc<std::byte>>&& bytes, CompletionToken&& token, OnSpaceAssigned&& space_assigned_event, std::error_code ec, wal_file_entry_state expected_state, TransactionValidator&& transaction_validator, move_only_function<void(records_vector)> on_successful_write_callback, write_record_with_offset_vector records, bool delay_flush = false);
