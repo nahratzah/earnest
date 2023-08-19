@@ -18,7 +18,9 @@
 #include <asio/async_result.hpp>
 #include <asio/bind_executor.hpp>
 #include <asio/completion_condition.hpp>
+#include <asio/consign.hpp>
 #include <asio/deferred.hpp>
+#include <asio/prepend.hpp>
 #include <asio/strand.hpp>
 #include <asio/write.hpp>
 #include <asio/write_at.hpp>
@@ -925,44 +927,63 @@ class transaction {
   using reader_type = detail::replacement_map_reader<raw_reader_type, writes_buffer_type, allocator_type>;
   using monitor_type = detail::monitor<executor_type, allocator_type>;
 
+  struct impl_type {
+    impl_type() = delete;
+    impl_type(const impl_type&) = delete;
+    impl_type(impl_type&&) = delete;
+
+    impl_type(std::shared_ptr<FileDB> fdb, isolation i, tx_mode m, allocator_type allocator)
+    : fdb_(fdb),
+      alloc_(allocator),
+      i_(i),
+      m_(m),
+      writes_map_(std::allocate_shared<writes_map>(allocator, allocator)),
+      read_barrier_(fdb->get_executor(), allocator),
+      writes_mon_(fdb->get_executor(), "file_db::transaction", allocator),
+      wait_for_writes_(fdb->get_executor(), allocator),
+      on_commit_events_(std::allocate_shared<detail::on_commit_events<allocator_type>>(allocator, allocator))
+    {
+      switch (i_) {
+        default:
+          {
+            std::ostringstream s;
+            s << "isolation " << i_ << " is not supported\n";
+            throw std::invalid_argument(std::move(s).str());
+          }
+          break;
+        case isolation::read_commited:
+          std::invoke(read_barrier_, nullptr);
+          break;
+        case isolation::repeatable_read:
+          compute_replacements_map_op_(fdb, allocator) | read_barrier_;
+          break;
+      }
+    }
+
+    std::shared_ptr<FileDB> fdb_;
+    allocator_type alloc_;
+    isolation i_;
+    tx_mode m_;
+    std::shared_ptr<writes_map> writes_map_;
+    mutable detail::fanout<executor_type, void(std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
+    mutable monitor_type writes_mon_;
+    detail::fanout_barrier<executor_type, allocator_type> wait_for_writes_;
+    std::shared_ptr<detail::on_commit_events<allocator_type>> on_commit_events_;
+  };
+
   public:
   class file;
 
-  transaction(const transaction&) = default;
-  transaction(transaction&&) = default;
+  constexpr transaction() noexcept = default;
 
   private:
   transaction(std::shared_ptr<FileDB> fdb, isolation i, tx_mode m, allocator_type allocator = allocator_type())
-  : fdb_(fdb),
-    alloc_(allocator),
-    i_(i),
-    m_(m),
-    writes_map_(std::allocate_shared<writes_map>(allocator, allocator)),
-    read_barrier_(fdb->get_executor(), allocator),
-    writes_mon_(fdb->get_executor(), "file_db::transaction", allocator),
-    wait_for_writes_(fdb->get_executor(), allocator),
-    on_commit_events_(std::allocate_shared<detail::on_commit_events<allocator_type>>(allocator, allocator))
-  {
-    switch (i_) {
-      default:
-        {
-          std::ostringstream s;
-          s << "isolation " << i_ << " is not supported\n";
-          throw std::invalid_argument(std::move(s).str());
-        }
-        break;
-      case isolation::read_commited:
-        std::invoke(read_barrier_, nullptr);
-        break;
-      case isolation::repeatable_read:
-        compute_replacements_map_op_(fdb, allocator) | read_barrier_;
-        break;
-    }
-  }
+  : pimpl_(std::allocate_shared<impl_type>(allocator, std::move(fdb), i, m, allocator))
+  {}
 
   public:
-  auto get_isolation() const noexcept -> isolation { return i_; }
-  auto get_tx_mode() const noexcept -> tx_mode { return m_; }
+  auto get_isolation() const noexcept -> isolation { return pimpl_->i_; }
+  auto get_tx_mode() const noexcept -> tx_mode { return pimpl_->m_; }
 
   template<typename Alloc, typename CompletionToken>
   auto async_file_contents(file_id id, Alloc alloc, CompletionToken&& token) const {
@@ -988,11 +1009,11 @@ class transaction {
 
   template<typename Fn>
   auto on_commit(Fn&& fn) {
-    return on_commit_events_->add(std::forward<Fn>(fn));
+    return pimpl_->on_commit_events_->add(std::forward<Fn>(fn));
   }
 
-  auto get_allocator() const -> allocator_type { return alloc_; }
-  auto get_executor() const -> executor_type { return fdb_->get_executor(); }
+  auto get_allocator() const -> allocator_type { return pimpl_->alloc_; }
+  auto get_executor() const -> executor_type { return pimpl_->fdb_->get_executor(); }
 
   auto operator[](file_id id) -> file {
     return file(*this, std::move(id));
@@ -1010,25 +1031,25 @@ class transaction {
   auto compute_replacements_map_1_op_(file_id id) const {
     using result_map_ptr = std::shared_ptr<const typename file_replacements::mapped_type>;
 
-    return read_barrier_.async_on_ready(asio::deferred)
+    return pimpl_->read_barrier_.async_on_ready(asio::deferred)
     | asio::deferred(
-        [fdb=this->fdb_, allocator=this->alloc_](std::shared_ptr<const locked_file_replacements> repl_maps) {
+        [impl=pimpl_](std::shared_ptr<const locked_file_replacements> repl_maps) {
           return asio::deferred.when(repl_maps != nullptr)
               .then(asio::deferred.values(repl_maps))
-              .otherwise(compute_replacements_map_op_(fdb, allocator));
+              .otherwise(compute_replacements_map_op_(impl->fdb_, impl->alloc_));
         })
     | asio::deferred(
-        [fdb=this->fdb_, id, allocator=this->alloc_](std::shared_ptr<const locked_file_replacements> repl_maps) {
+        [impl=pimpl_, id](std::shared_ptr<const locked_file_replacements> repl_maps) mutable {
           return asio::async_initiate<decltype(asio::deferred), void(std::error_code, result_map_ptr)>(
-              [id, repl_maps, fdb, allocator](auto handler) {
-                auto wrapped_handler = detail::completion_handler_fun(std::move(handler), fdb->get_executor());
+              [](auto handler, std::shared_ptr<impl_type> impl, file_id id, std::shared_ptr<const locked_file_replacements> repl_maps) {
+                auto wrapped_handler = detail::completion_handler_fun(std::move(handler), impl->fdb_->get_executor());
 
                 assert(repl_maps != nullptr);
                 std::error_code ec;
                 result_map_ptr result;
                 auto iter = repl_maps->fr->find(id);
                 if (iter == repl_maps->fr->end()) {
-                  result = std::allocate_shared<typename file_replacements::mapped_type>(allocator, fdb->get_allocator());
+                  result = std::allocate_shared<typename file_replacements::mapped_type>(impl->alloc_, impl->fdb_->get_allocator());
                 } else {
                   result = result_map_ptr(repl_maps, &iter->second); // We alias repl_maps, because we want to keep the lock valid.
                   if (!iter->second.exists.value_or(true))
@@ -1036,7 +1057,7 @@ class transaction {
                 }
                 std::invoke(wrapped_handler, std::move(ec), std::move(result));
               },
-              asio::deferred);
+              asio::deferred, std::move(impl), std::move(id), std::move(repl_maps));
         });
   }
 
@@ -1045,10 +1066,10 @@ class transaction {
 
     return compute_replacements_map_1_op_(id)
     | asio::deferred(
-        [fdb=this->fdb_, id, allocator=this->alloc_](std::error_code ec, std::shared_ptr<const typename file_replacements::mapped_type> state) mutable {
+        [impl=pimpl_, id](std::error_code ec, std::shared_ptr<const typename file_replacements::mapped_type> state) mutable {
           return detail::deferred_on_executor<void(std::error_code, std::shared_ptr<const underlying_fd>, std::shared_ptr<const typename file_replacements::mapped_type>)>(
-              [id](std::error_code ec, std::shared_ptr<const file_db> fdb, std::shared_ptr<const typename file_replacements::mapped_type> state, auto allocator) {
-                assert(fdb->strand_.running_in_this_thread());
+              [](std::error_code ec, std::shared_ptr<impl_type> impl, std::shared_ptr<const typename file_replacements::mapped_type> state, const file_id id) {
+                assert(impl->fdb_->strand_.running_in_this_thread());
                 assert(!!ec || state != nullptr);
 
                 if (!ec && state != nullptr && !state->exists.value_or(true)) [[unlikely]]
@@ -1056,15 +1077,15 @@ class transaction {
 
                 std::shared_ptr<const underlying_fd> ufd;
                 if (!ec) [[likely]] {
-                  auto files_iter = fdb->files.find(id);
-                  if (files_iter != fdb->files.end())
+                  auto files_iter = impl->fdb_->files.find(id);
+                  if (files_iter != impl->fdb_->files.end())
                     ufd = files_iter->second.fd;
                   else
-                    ufd = std::allocate_shared<underlying_fd>(allocator, fdb->get_executor());
+                    ufd = std::allocate_shared<underlying_fd>(impl->alloc_, impl->fdb_->get_executor());
                 }
                 return asio::deferred.values(ec, std::move(ufd), std::move(state));
               },
-              fdb->strand_, ec, std::move(fdb), std::move(state), std::move(allocator));
+              impl->fdb_->strand_, ec, impl, std::move(state), std::move(id));
         })
     | asio::deferred(
         [](std::error_code ec, std::shared_ptr<const underlying_fd> ufd, std::shared_ptr<const typename file_replacements::mapped_type> state) {
@@ -1089,30 +1110,26 @@ class transaction {
   }
 
   auto get_reader_op_(file_id id) const {
-    return asio::deferred.values(read_permitted(this->m_) ? std::error_code{} : make_error_code(file_db_errc::read_not_permitted))
+    return asio::deferred.values(read_permitted(pimpl_->m_) ? std::error_code{} : make_error_code(file_db_errc::read_not_permitted))
     | asio::deferred(
-        [get_raw_reader=get_raw_reader_op_(id)](std::error_code ec) mutable {
+        [self=*this, id](std::error_code ec) mutable {
           return asio::deferred.when(!ec)
-              .then(std::move(get_raw_reader))
+              .then(self.get_raw_reader_op_(id))
               .otherwise(asio::deferred.values(ec, raw_reader_type{}));
         })
     | asio::deferred(
-        [ writes_mon=this->writes_mon_
-        ](std::error_code ec, raw_reader_type raw_reader) mutable {
+        [impl=pimpl_](std::error_code ec, raw_reader_type raw_reader) mutable {
           return asio::deferred.when(!ec || ec == make_error_code(file_db_errc::file_erased))
-              .then(writes_mon.async_shared(asio::append(asio::deferred, ec, std::move(raw_reader)), __FILE__, __LINE__))
+              .then(impl->writes_mon_.async_shared(asio::append(asio::deferred, ec, std::move(raw_reader)), __FILE__, __LINE__))
               .otherwise(asio::deferred.values(typename monitor_type::shared_lock(), ec, raw_reader_type()));
         })
     | asio::deferred(
-        [ wmap=this->writes_map_,
-          allocator=this->alloc_,
-          id
-        ](typename monitor_type::shared_lock lock, std::error_code ec, raw_reader_type raw_reader) {
+        [impl=pimpl_, id](typename monitor_type::shared_lock lock, std::error_code ec, raw_reader_type raw_reader) {
           std::shared_ptr<writes_map_element> tx_writes;
           typename reader_type::size_type filesize = 0;
           if (!ec || ec == make_error_code(file_db_errc::file_erased)) {
-            const auto writes_iter = wmap->find(id);
-            if (writes_iter != wmap->end()) {
+            const auto writes_iter = impl->writes_map_->find(id);
+            if (writes_iter != impl->writes_map_->end()) {
               tx_writes = writes_iter->second;
               if (tx_writes->erased)
                 ec = make_error_code(file_db_errc::file_erased);
@@ -1130,7 +1147,7 @@ class transaction {
                       std::move(lock),
                       ec,
                       reader_type(
-                          std::allocate_shared<raw_reader_type>(allocator, std::move(raw_reader)),
+                          std::allocate_shared<raw_reader_type>(impl->alloc_, std::move(raw_reader)),
                           std::shared_ptr<detail::replacement_map<writes_buffer_type, allocator_type>>(tx_writes, &tx_writes->replacements),
                           filesize)))
               .otherwise(
@@ -1142,34 +1159,30 @@ class transaction {
   }
 
   auto get_writer_op_(file_id id) {
-    return asio::deferred.values(write_permitted(this->m_) ? std::error_code{} : make_error_code(file_db_errc::read_not_permitted))
+    return asio::deferred.values(write_permitted(pimpl_->m_) ? std::error_code{} : make_error_code(file_db_errc::read_not_permitted))
     | asio::deferred(
-        [get_raw_reader=get_raw_reader_op_(id)](std::error_code ec) mutable {
+        [self=*this, id](std::error_code ec) mutable {
           return asio::deferred.when(!ec)
-              .then(std::move(get_raw_reader))
+              .then(self.get_raw_reader_op_(id))
               .otherwise(asio::deferred.values(ec, raw_reader_type{}));
         })
     | asio::deferred(
-        [ writes_mon=this->writes_mon_
-        ](std::error_code ec, raw_reader_type raw_reader) mutable {
+        [impl=pimpl_](std::error_code ec, raw_reader_type raw_reader) mutable {
           return asio::deferred.when(!ec || ec == make_error_code(file_db_errc::file_erased))
-              .then(writes_mon.async_exclusive(asio::append(asio::deferred, ec, std::move(raw_reader)), __FILE__, __LINE__))
+              .then(impl->writes_mon_.async_exclusive(asio::append(asio::deferred, ec, std::move(raw_reader)), __FILE__, __LINE__))
               .otherwise(asio::deferred.values(typename monitor_type::exclusive_lock(), ec, raw_reader_type()));
         })
     | asio::deferred(
-        [ wmap=this->writes_map_,
-          allocator=this->alloc_,
-          id
-        ](typename monitor_type::exclusive_lock lock, std::error_code ec, raw_reader_type raw_reader) {
+        [impl=pimpl_, id](typename monitor_type::exclusive_lock lock, std::error_code ec, raw_reader_type raw_reader) {
           std::shared_ptr<writes_map_element> tx_writes;
           typename reader_type::size_type filesize = 0;
           if (!ec || ec == make_error_code(file_db_errc::file_erased)) {
-            auto writes_iter = wmap->find(id);
-            if (writes_iter == wmap->end()) {
+            auto writes_iter = impl->writes_map_->find(id);
+            if (writes_iter == impl->writes_map_->end()) {
               bool inserted;
-              std::tie(writes_iter, inserted) = wmap->emplace(
+              std::tie(writes_iter, inserted) = impl->writes_map_->emplace(
                   std::move(id),
-                  std::allocate_shared<writes_map_element>(allocator, allocator));
+                  std::allocate_shared<writes_map_element>(impl->alloc_, impl->alloc_));
               assert(inserted);
             }
 
@@ -1202,7 +1215,7 @@ class transaction {
     using bytes_vec = std::vector<std::byte, typename std::allocator_traits<Alloc>::template rebind_alloc<std::byte>>;
 
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, bytes_vec)>(
-        [](auto handler, transaction self, file_id id, Alloc alloc) {
+        [](auto handler, transaction self, file_id id, Alloc alloc) mutable -> void {
           if constexpr(detail::handler_has_executor_v<decltype(handler)>)
             self.async_file_contents_op_impl_(std::move(id), std::move(alloc), detail::completion_handler_fun(std::move(handler), self.get_executor()));
           else
@@ -1262,7 +1275,7 @@ class transaction {
         get_allocator());
 
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
-        [](auto handler, transaction self, file_id id, std::uint64_t offset, std::vector<asio::mutable_buffer, rebind_alloc<asio::mutable_buffer>> buffers) {
+        [](auto handler, transaction self, file_id id, std::uint64_t offset, std::vector<asio::mutable_buffer, rebind_alloc<asio::mutable_buffer>> buffers) -> void {
           if constexpr(detail::handler_has_executor_v<decltype(handler)>)
             self.async_file_read_some_op_impl_(std::move(id), std::move(offset), std::move(buffers), detail::completion_handler_fun(std::move(handler), self.get_executor()));
           else
@@ -1274,7 +1287,7 @@ class transaction {
   auto async_file_read_some_op_impl_(file_id id, std::uint64_t offset, std::vector<asio::mutable_buffer, rebind_alloc<asio::mutable_buffer>> buffers, detail::move_only_function<void(std::error_code, std::size_t)> handler) const -> void {
     return get_reader_op_(std::move(id))
     | asio::deferred(
-        [ fdb=this->fdb_,
+        [ impl=pimpl_,
           buffers=std::move(buffers),
           offset
         ](typename monitor_type::shared_lock lock, std::error_code ec, reader_type r) mutable {
@@ -1297,19 +1310,19 @@ class transaction {
                           std::invoke(handler, ec, nbytes);
                         }));
               },
-              asio::deferred, ec, offset, std::move(buffers), std::move(lock), std::move(r), fdb->get_executor());
+              asio::deferred, ec, offset, std::move(buffers), std::move(lock), std::move(r), impl->fdb_->get_executor());
         })
     | std::move(handler);
   }
 
   template<typename MB>
   auto async_file_write_some_op_(file_id id, std::uint64_t offset, MB&& buffers) {
-    auto buffer = std::allocate_shared<writes_buffer_type>(alloc_, fdb_->get_executor(), alloc_);
+    auto buffer = std::allocate_shared<writes_buffer_type>(pimpl_->alloc_, pimpl_->fdb_->get_executor(), pimpl_->alloc_);
     std::error_code ec;
     asio::write_at(*buffer, 0, std::forward<MB>(buffers), asio::transfer_all(), ec);
 
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
-        [](auto handler, transaction self, file_id id, std::uint64_t offset, std::error_code ec, std::shared_ptr<writes_buffer_type> buffer) {
+        [](auto handler, transaction self, file_id id, std::uint64_t offset, std::error_code ec, std::shared_ptr<writes_buffer_type> buffer) mutable -> void {
           if constexpr(detail::handler_has_executor_v<decltype(handler)>)
             self.async_file_write_some_op_impl_(std::move(id), std::move(offset), std::move(ec), std::move(buffer), detail::completion_handler_fun(std::move(handler), self.get_executor()));
           else
@@ -1341,7 +1354,7 @@ class transaction {
           return asio::deferred.values(ec, buffer_size);
         })
     | asio::deferred(
-        [wfw=++this->wait_for_writes_](std::error_code ec, std::size_t nbytes) mutable {
+        [wfw=++pimpl_->wait_for_writes_](std::error_code ec, std::size_t nbytes) mutable {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec, nbytes);
         })
@@ -1361,13 +1374,12 @@ class transaction {
   auto async_truncate_op_(file_id id, std::uint64_t new_size) {
     return get_writer_op_(std::move(id))
     | asio::deferred(
-        [ ex=this->fdb_->get_executor(),
-          allocator=this->alloc_,
+        [ impl=pimpl_,
           new_size
         ](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) mutable {
           if (!ec) {
             if (new_size > filesize) {
-              auto buffer = std::allocate_shared<writes_buffer_type>(allocator, ex, allocator);
+              auto buffer = std::allocate_shared<writes_buffer_type>(impl->alloc_, impl->fdb_->get_executor(), impl->alloc_);
               buffer->data().resize(new_size - filesize);
               replacements->replacements.insert(filesize, 0, new_size - filesize, std::move(buffer));
             } else if (new_size < filesize) {
@@ -1380,7 +1392,7 @@ class transaction {
           return asio::deferred.values(ec);
         })
     | asio::deferred(
-        [wfw=++this->wait_for_writes_](std::error_code ec) mutable {
+        [wfw=++pimpl_->wait_for_writes_](std::error_code ec) mutable {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec);
         })
@@ -1407,7 +1419,7 @@ class transaction {
           return asio::deferred.values(ec);
         })
     | asio::deferred(
-        [wfw=++this->wait_for_writes_](std::error_code ec) mutable {
+        [wfw=++pimpl_->wait_for_writes_](std::error_code ec) mutable {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec);
         })
@@ -1433,7 +1445,7 @@ class transaction {
           return asio::deferred.values(ec);
         })
     | asio::deferred(
-        [wfw=++this->wait_for_writes_](std::error_code ec) mutable {
+        [wfw=++pimpl_->wait_for_writes_](std::error_code ec) mutable {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec);
         })
@@ -1441,24 +1453,22 @@ class transaction {
   }
 
   auto commit_op_(detail::move_only_function<void(std::error_code)> handler, bool delay_sync = false) {
-    std::invoke(this->wait_for_writes_, std::error_code()); // Complete the writes (further write attempts will now throw an exception).
-    return this->wait_for_writes_.async_on_ready(asio::deferred)
+    std::invoke(pimpl_->wait_for_writes_, std::error_code()); // Complete the writes (further write attempts will now throw an exception).
+    return pimpl_->wait_for_writes_.async_on_ready(asio::deferred)
     | asio::deferred(
-        [writes_mon=this->writes_mon_](std::error_code ec) mutable {
+        [impl=pimpl_](std::error_code ec) mutable {
           return asio::deferred.when(!ec)
-              .then(writes_mon.async_shared(asio::append(asio::deferred, ec), __FILE__, __LINE__))
-              .otherwise(asio::deferred.values(typename monitor_type::shared_lock{}, ec));
+              .then(impl->writes_mon_.async_shared(asio::prepend(asio::deferred, ec), __FILE__, __LINE__))
+              .otherwise(asio::deferred.values(ec, typename monitor_type::shared_lock{}));
         })
     | asio::deferred(
-        [ wmap=this->writes_map_,
-          fdb=this->fdb_,
-          allocator=this->alloc_,
+        [ impl=pimpl_,
           delay_sync
-        ](typename monitor_type::shared_lock lock, std::error_code ec) {
-          auto writes = std::vector<typename file_db::wal_type::write_variant_type, rebind_alloc<typename file_db::wal_type::write_variant_type>>(allocator);
+        ](std::error_code ec, typename monitor_type::shared_lock lock) {
+          auto writes = std::vector<typename file_db::wal_type::write_variant_type, rebind_alloc<typename file_db::wal_type::write_variant_type>>(impl->alloc_);
           if (!ec) {
             std::for_each(
-                wmap->cbegin(), wmap->cend(),
+                impl->writes_map_->cbegin(), impl->writes_map_->cend(),
                 [&writes](const auto& wmap_pair) {
                   commit_elems_(wmap_pair.first, *wmap_pair.second, std::back_inserter(writes));
                 });
@@ -1466,31 +1476,24 @@ class transaction {
 
           return asio::deferred.when(!ec)
               .then(
-                  fdb->wal->async_append(
+                  impl->fdb_->wal->async_append(
                       std::move(writes),
-                      asio::append(asio::deferred, lock),
-                      can_commit_op_(fdb, wmap, allocator),
+                      asio::consign(asio::deferred, lock),
+                      can_commit_op_(impl->fdb_, impl->writes_map_, impl->alloc_),
                       delay_sync))
-              .otherwise(asio::deferred.values(ec, lock));
+              .otherwise(asio::deferred.values(ec));
         })
     | asio::deferred(
-        // We carry lock foward to here, so that all preceding operations will have held the lock.
-        // And now we drop it, since we no longer need it.
-        [](std::error_code ec, [[maybe_unused]] typename monitor_type::shared_lock lock) {
+        [impl=pimpl_](std::error_code ec) {
+          if (!ec) impl->on_commit_events_->run();
           return asio::deferred.values(ec);
         })
     | asio::deferred(
-        [ on_commit_events=this->on_commit_events_
-        ](std::error_code ec) {
-          if (!ec) on_commit_events->run();
-          return asio::deferred.values(ec);
-        })
-    | asio::deferred(
-        [fdb=this->fdb_](std::error_code ec) {
+        [impl=pimpl_](std::error_code ec) {
           if (!ec)
-            fdb->successful_commits_->Increment();
+            impl->fdb_->successful_commits_->Increment();
           else
-            fdb->failed_commits_->Increment();
+            impl->fdb_->failed_commits_->Increment();
           return asio::deferred.values(ec);
         })
     | std::move(handler);
@@ -1559,15 +1562,7 @@ class transaction {
     }
   }
 
-  std::shared_ptr<FileDB> fdb_;
-  allocator_type alloc_;
-  isolation i_;
-  tx_mode m_;
-  std::shared_ptr<writes_map> writes_map_;
-  mutable detail::fanout<executor_type, void(std::shared_ptr<const locked_file_replacements>), allocator_type> read_barrier_; // Barrier to fill in reads.
-  mutable monitor_type writes_mon_;
-  detail::fanout_barrier<executor_type, allocator_type> wait_for_writes_;
-  std::shared_ptr<detail::on_commit_events<allocator_type>> on_commit_events_;
+  std::shared_ptr<impl_type> pimpl_;
 };
 
 
