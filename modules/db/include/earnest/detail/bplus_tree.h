@@ -2747,7 +2747,8 @@ class bplus_tree_leaf final
     using stream_type = positional_stream_adapter<tx_file_type>;
 
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [](auto handler, std::shared_ptr<stream_type> fptr, bplus_tree_leaf_header hdr) {
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, auto tx, bplus_tree_leaf_header hdr) {
+          auto fptr = std::allocate_shared<stream_type>(tx.get_allocator(), tx[self->address.file], self->address.offset + xdr_page_hdr_bytes);
           async_write(
               *fptr,
               ::earnest::xdr_writer<>() & xdr_constant(std::move(hdr)),
@@ -2758,7 +2759,7 @@ class bplus_tree_leaf final
                     return std::invoke(handler, ec);
                   }));
         },
-        token, std::allocate_shared<stream_type>(tx.get_allocator(), tx[this->address.file], this->address.offset + xdr_page_hdr_bytes), std::move(hdr));
+        token, this->shared_from_this(this), std::move(tx), std::move(hdr));
   }
 
   template<typename TxAlloc, typename CompletionToken>
@@ -2775,9 +2776,10 @@ class bplus_tree_leaf final
     };
 
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, std::shared_ptr<state> state_ptr, std::size_t offset) {
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, auto tx, bplus_tree_leaf_use_element type, std::size_t offset) {
           if (offset >= self->spec->elements_per_leaf)
             throw std::invalid_argument("bad offset for element write");
+          auto state_ptr = std::allocate_shared<state>(tx.get_allocator(), tx[self->address.file], type);
 
           const auto span = std::as_bytes(std::span<bplus_tree_leaf_use_element, 1>(&state_ptr->type, 1));
           return asio::async_write_at(
@@ -2792,7 +2794,7 @@ class bplus_tree_leaf final
                     return std::invoke(handler, ec);
                   }));
         },
-        token, this->shared_from_this(this), std::allocate_shared<state>(tx.get_allocator(), tx[this->address.file], type), std::move(offset));
+        token, this->shared_from_this(this), std::move(tx), type, std::move(offset));
   }
 
   template<typename TxAlloc, typename CompletionToken>
@@ -2807,9 +2809,10 @@ class bplus_tree_leaf final
     };
 
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, std::shared_ptr<state> state_ptr, std::size_t offset, std::span<const bplus_tree_leaf_use_element> type) {
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, auto tx, std::size_t offset, std::span<const bplus_tree_leaf_use_element> type) {
           if (offset + type.size() > self->spec->elements_per_leaf)
             throw std::invalid_argument("bad offset for element write");
+          auto state_ptr = std::allocate_shared<state>(tx.get_allocator(), tx[self->address.file]);
 
           const auto span = std::as_bytes(type);
           return asio::async_write_at(
@@ -2824,7 +2827,7 @@ class bplus_tree_leaf final
                     return std::invoke(handler, ec);
                   }));
         },
-        token, this->shared_from_this(this), std::allocate_shared<state>(tx.get_allocator(), tx[this->address.file]), std::move(offset), std::move(type));
+        token, this->shared_from_this(this), std::move(tx), std::move(offset), std::move(type));
   }
 
   // Write elements to disk, but don't update in-memory representation.
@@ -2833,11 +2836,12 @@ class bplus_tree_leaf final
     using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
 
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, std::shared_ptr<tx_file_type> fptr, std::size_t offset, std::span<const std::byte> elements) {
+        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_leaf> self, auto tx, std::size_t offset, std::span<const std::byte> elements) {
           if (offset >= self->spec->elements_per_leaf)
             throw std::invalid_argument("bad offset for element write");
           if (elements.size() > (self->spec->elements_per_leaf - offset) * self->element_length())
             throw std::invalid_argument("too many bytes for element write");
+          auto fptr = std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[self->address.file]);
 
           return asio::async_write_at(
               *fptr,
@@ -2850,7 +2854,7 @@ class bplus_tree_leaf final
                     return std::invoke(handler, ec);
                   }));
         },
-        token, this->shared_from_this(this), std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[this->address.file]), std::move(offset), std::move(elements));
+        token, this->shared_from_this(this), std::move(tx), std::move(offset), std::move(elements));
   }
 
   protected:
@@ -6049,51 +6053,33 @@ class bplus_tree
     const bool delay_flush;
   };
 
+  // tx should be a read-commited writeable transaction.
   template<typename TxAlloc>
-  struct erase_op
-  : public std::enable_shared_from_this<erase_op<TxAlloc>>
-  {
-    using byte_vector = std::vector<std::byte, typename std::allocator_traits<TxAlloc>::template rebind_alloc<std::byte>>;
-    using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
-    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
-    using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
-    using element_vector = typename bplus_tree_leaf<raw_db_type>::element_vector;
+  auto erase_op_(typename raw_db_type::template fdb_transaction<TxAlloc> tx, bplus_element_reference<raw_db_type, true> elem) {
     using tx_type = typename raw_db_type::template fdb_transaction<TxAlloc>;
+    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
+    using monitor_exlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::exclusive_lock;
 
-    erase_op(cycle_ptr::cycle_gptr<bplus_tree> tree, bplus_element_reference<raw_db_type, true> elem, TxAlloc tx_alloc, bool delay_flush)
-    : tree(tree),
-      elem(std::move(elem).cast_away_constness()),
-      tx_alloc(tx_alloc),
-      logger(tree->logger),
-      delay_flush(delay_flush)
-    {}
-
-    erase_op(const erase_op&) = delete;
-    erase_op(erase_op&&) = delete;
-
-    auto get_allocator() const -> TxAlloc { return tx_alloc; }
-
-    auto operator()(move_only_function<void(std::error_code)> handler) -> void {
-      assert(!this->handler);
-      this->handler = std::move(handler);
-
-      acquire_locks();
-    }
-
-    private:
-    auto acquire_locks() -> void {
-      elem->template async_lock_owner<monitor_uplock_type>(get_allocator(), asio::deferred)
-      | asio::deferred(
-          [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
-            return self_op->elem->element_lock.dispatch_upgrade(asio::prepend(asio::deferred, leaf, leaf_lock), __FILE__, __LINE__);
-          })
-      | [self_op=this->shared_from_this()](cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, monitor_uplock_type elem_lock) {
+    return asio::deferred.values(std::move(tx), this->shared_from_this(this), std::move(elem).cast_away_constness())
+    | asio::deferred(
+        [](tx_type tx, cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, false> elem) {
+          return elem->template async_lock_owner<monitor_uplock_type>(tx.get_allocator(), asio::prepend(asio::deferred, tx, self, elem));
+        })
+    | asio::deferred(
+        [](tx_type tx, cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, false> elem, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
+          return elem->element_lock.dispatch_upgrade(asio::append(asio::prepend(asio::deferred, tx, self, elem), leaf, leaf_lock), __FILE__, __LINE__);
+        })
+    | asio::deferred(
+        [](tx_type tx, cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, false> elem, monitor_uplock_type elem_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
           std::error_code ec;
           if (leaf->erased_) [[unlikely]] {
             ec = make_error_code(db_errc::data_expired);
           } else {
-            switch (self_op->elem->type()) {
+            switch (elem->type()) {
               case bplus_tree_leaf_use_element::unused:
+                // bplus_element_reference can only be acquired when element is valid,
+                // and prevents it becoming unused.
+                self->logger->error("erase: element reference cannot refer to unused element (bug)");
                 ec = make_error_code(bplus_tree_errc::bad_tree);
                 break;
               case bplus_tree_leaf_use_element::used:
@@ -6110,79 +6096,50 @@ class bplus_tree
             }
           }
 
-          if (ec)
-            self_op->error_invoke(ec);
-          else
-            self_op->ghost_delete(std::move(leaf), std::move(leaf_lock), std::move(elem_lock));
-        };
-    }
-
-    auto ghost_delete(cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, monitor_uplock_type elem_lock) -> void {
-      const bool has_augments = !tree->spec->element.augments.empty();
-
-      auto raw_db = leaf->raw_db.lock();
-      if (!raw_db) {
-        error_invoke(db_errc::data_expired);
-        return;
-      }
-      tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
-
-      leaf->async_set_use_list_diskonly_op(tx, elem->index, bplus_tree_leaf_use_element::ghost_delete, asio::append(asio::deferred, leaf, leaf_lock, elem_lock))
-      | asio::deferred(
-          [tx, has_augments](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, monitor_uplock_type elem_lock) mutable {
-            return asio::deferred.when(!ec && has_augments)
-                .then(leaf->async_set_augment_propagation_required_diskonly_op(tx, asio::append(asio::deferred, leaf, leaf_lock, elem_lock)))
-                .otherwise(asio::deferred.values(ec, leaf, leaf_lock, elem_lock));
-          })
-      | asio::deferred(
-          [tx, has_augments, delay_flush=this->delay_flush, elem=this->elem](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, monitor_uplock_type elem_lock) mutable {
-            // Ensure augments are fixed after commiting.
-            if (has_augments) {
-              tx.on_commit(
-                  [leaf, leaf_lock]() mutable -> void {
-                    std::move(leaf_lock).dispatch_exclusive(
-                        [leaf](monitor_exlock_type leaf_lock) -> void {
-                          leaf->augment_propagation_required = true;
-                          leaf_lock.reset();
-                          leaf->async_fix_augment_background();
-                        },
-                        __FILE__, __LINE__);
-                  });
-            }
-
-            // Update in-memory representation.
+          return asio::deferred.values(ec, tx, self, elem, elem_lock, leaf, leaf_lock);
+        })
+    | asio::deferred(
+        [](std::error_code ec, tx_type tx, cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, false> elem, monitor_uplock_type elem_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
+          if (!ec) {
             tx.on_commit(
                 [elem, elem_lock, leaf, leaf_lock]() mutable -> void {
                   std::move(elem_lock).dispatch_exclusive(
-                      [elem, leaf, leaf_lock]([[maybe_unused]] monitor_exlock_type elem_lock) mutable -> void {
-                        leaf->use_list_span()[elem->index] = bplus_tree_leaf_use_element::ghost_delete;
+                      asio::consign(
+                          [leaf, elem]([[maybe_unused]] monitor_exlock_type elem_lock) -> void {
+                            leaf->use_list_span()[elem->index] = bplus_tree_leaf_use_element::ghost_delete;
+                          },
+                          leaf_lock),
+                      __FILE__, __LINE__);
+                });
+          }
 
-                        leaf_lock.reset(); // Silence compiler warning.
-                        leaf.reset(); // Silence compiler warning.
+          return asio::deferred.when(!ec)
+              .then(leaf->async_set_use_list_diskonly_op(tx, elem->index, bplus_tree_leaf_use_element::ghost_delete, asio::append(asio::consign(asio::deferred, elem, elem_lock), tx, self, leaf, leaf_lock)))
+              .otherwise(asio::deferred.values(ec, tx, self, leaf, leaf_lock));
+        })
+    | asio::deferred(
+        [](std::error_code ec, tx_type tx, cycle_ptr::cycle_gptr<bplus_tree> self, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
+          const bool has_augments = !self->spec->element.augments.empty();
+
+          if (!ec && has_augments) {
+            // Ensure augments are fixed after commiting.
+            tx.on_commit(
+                [leaf, leaf_lock]() mutable -> void {
+                  std::move(leaf_lock).dispatch_exclusive(
+                      [leaf](monitor_exlock_type leaf_lock) -> void {
+                        leaf->augment_propagation_required = true;
+                        leaf_lock.reset();
+                        leaf->async_fix_augment_background();
                       },
                       __FILE__, __LINE__);
                 });
+          }
 
-            return asio::deferred.when(!ec)
-                .then(tx.async_commit(asio::deferred), delay_flush)
-                .otherwise(asio::deferred.values(ec));
-          })
-      | [self_op=this->shared_from_this()](std::error_code ec) -> void {
-          std::invoke(self_op->handler, ec);
-        };
-    }
-
-    auto error_invoke(std::error_code ec) -> void {
-      std::invoke(handler, ec);
-    }
-
-    const cycle_ptr::cycle_gptr<bplus_tree> tree;
-    bplus_element_reference<raw_db_type, false> elem;
-    TxAlloc tx_alloc;
-    move_only_function<void(std::error_code)> handler;
-    const std::shared_ptr<spdlog::logger> logger;
-    const bool delay_flush;
-  };
+          return asio::deferred.when(!ec && has_augments)
+              .then(leaf->async_set_augment_propagation_required_diskonly_op(tx, asio::consign(asio::deferred, leaf, leaf_lock)))
+              .otherwise(asio::deferred.values(ec));
+        });
+  }
 
   public:
   template<typename TxAlloc, typename CompletionToken>
@@ -6198,15 +6155,33 @@ class bplus_tree
   }
 
   template<typename TxAlloc, typename CompletionToken>
+  auto erase(typename raw_db_type::template fdb_transaction<TxAlloc> tx, bplus_element_reference<raw_db_type, true> elem, CompletionToken&& token) {
+    return this->erase_op_(std::move(tx), std::move(elem)) | std::forward<CompletionToken>(token);
+  }
+
+  template<typename TxAlloc, typename CompletionToken>
   auto erase(bplus_element_reference<raw_db_type, true> elem, TxAlloc tx_alloc, CompletionToken&& token, bool delay_flush = false) {
-    return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [](auto handler, cycle_ptr::cycle_gptr<bplus_tree> self, std::shared_ptr<erase_op<TxAlloc>> op) {
-          if constexpr(handler_has_executor_v<decltype(handler)>)
-            std::invoke(*op, completion_handler_fun(std::move(handler), self->get_executor()));
-          else
-            std::invoke(*op, std::move(handler));
-        },
-        token, this->shared_from_this(this), std::allocate_shared<erase_op<TxAlloc>>(tx_alloc, this->shared_from_this(this), std::move(elem), tx_alloc, delay_flush));
+    using tx_type = typename raw_db_type::template fdb_transaction<TxAlloc>;
+
+    return asio::deferred.values(this->shared_from_this(this), std::move(elem), std::move(tx_alloc), std::move(delay_flush))
+    | asio::deferred(
+        [](cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, true> elem, TxAlloc tx_alloc, bool delay_flush) {
+          std::error_code ec;
+          auto raw_db = self->raw_db.lock();
+          if (!raw_db) ec = db_errc::data_expired;
+          tx_type tx = raw_db ? raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc) : tx_type{};
+
+          return asio::deferred.when(!ec)
+              .then(self->erase(tx, std::move(elem), asio::append(asio::deferred, tx, delay_flush)))
+              .otherwise(asio::deferred.values(ec, tx, delay_flush));
+        })
+    | asio::deferred(
+        [](std::error_code ec, tx_type tx, bool delay_flush) {
+          return asio::deferred.when(!ec)
+              .then(tx.async_commit(asio::deferred, delay_flush))
+              .otherwise(asio::deferred.values(ec));
+        })
+    | std::forward<CompletionToken>(token);
   }
 
   template<typename TxAlloc, typename CompletionToken>
