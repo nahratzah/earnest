@@ -6164,7 +6164,7 @@ class bplus_tree
                 });
 
             return asio::deferred.when(!ec)
-                .then(tx.async_commit(asio::deferred))
+                .then(tx.async_commit(asio::deferred), delay_flush)
                 .otherwise(asio::deferred.values(ec));
           })
       | [self_op=this->shared_from_this()](std::error_code ec) -> void {
