@@ -311,6 +311,10 @@ class file_db
         });
   }
 
+  auto auto_rollover_size(std::size_t new_size) const -> void {
+    wal->auto_rollover_size(new_size);
+  }
+
   private:
   auto undo_on_fail_op_() {
     return asio::deferred(

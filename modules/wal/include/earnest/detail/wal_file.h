@@ -251,6 +251,9 @@ class wal_file
                       return;
                     }
 
+                    // Check if the WAL-file is large enough that we should roll-over.
+                    wf->maybe_auto_rollover_();
+
                     // Note: we don't need to hold a tx_lock,
                     // because:
                     // 1. the seal operation will create one of those when required
@@ -281,6 +284,9 @@ class wal_file
                       handler.dispatch(make_error_code(wal_errc::bad_state));
                       return;
                     }
+
+                    // Check if the WAL-file is large enough that we should roll-over.
+                    wf->maybe_auto_rollover_();
 
                     // Note: we don't need to hold a tx_lock,
                     // because:
@@ -506,6 +512,14 @@ class wal_file
         [wf=this->shared_from_this()]() {
           wf->apply_impl_ = nullptr;
         });
+  }
+
+  auto auto_rollover_size(std::size_t new_size) const -> void {
+    strand_.dispatch(
+        [wf=this->shared_from_this(), new_size]() {
+          wf->auto_rollover_size_ = new_size;
+        },
+        get_allocator());
   }
 
   private:
@@ -1031,6 +1045,26 @@ class wal_file
     cached_file_replacements_ = std::move(cfr);
   }
 
+  auto maybe_auto_rollover_() -> void {
+    assert(strand_.running_in_this_thread());
+    if (auto_rollover_running_) return;
+    if (active == nullptr) return;
+
+    std::error_code ec;
+    auto active_file_size = active->file->file.size(ec);
+    if (ec || active_file_size < auto_rollover_size_) return;
+
+    async_rollover(
+        asio::bind_executor(
+            strand_,
+            [wf=this->shared_from_this()]([[maybe_unused]] std::error_code ec) { // XXX log error as warning
+              assert(wf->strand_.running_in_this_thread());
+              assert(wf->auto_rollover_running_);
+              wf->auto_rollover_running_ = false;
+            }));
+    auto_rollover_running_ = true;
+  }
+
   public:
   // `entries` holds all entries that lead up to `active`,
   // and has contiguous sequence.
@@ -1049,6 +1083,8 @@ class wal_file
   fanout_barrier<executor_type, allocator_type> rollover_barrier_;
 
   mutable bool apply_running_ = false;
+  bool auto_rollover_running_ = false;
+  std::size_t auto_rollover_size_ = 256 * 1024 * 1024;
   std::function<void()> apply_impl_;
 
   mutable std::shared_mutex cache_file_replacements_mtx_;
