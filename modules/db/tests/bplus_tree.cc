@@ -114,6 +114,24 @@ NEW_TEST(insert) {
       read_all());
 }
 
+NEW_TEST(ghost_insert) {
+  std::array<std::byte, key_bytes> key{ std::byte{'a'}, std::byte{'b'}, std::byte{'b'}, std::byte{'a'} };
+  std::array<std::byte, value_bytes> value{ std::byte{'c'}, std::byte{'d'}, std::byte{'e'}, std::byte{'f'} };
+
+  bool callback_called = false;
+  tree->ghost_insert(key, value, std::allocator<std::byte>(),
+      [&callback_called](std::error_code ec, auto elem_ref) {
+        CHECK_EQUAL(std::error_code(), ec);
+        CHECK(elem_ref != nullptr);
+        callback_called = true;
+      });
+  ioctx.run();
+  ioctx.restart();
+
+  CHECK(callback_called);
+  CHECK_EQUAL(read_kv_vector({}), read_all());
+}
+
 NEW_TEST(insert_many_sequentially) {
   read_kv_vector expect;
   for (std::size_t seq = 0; seq < total_positions_to_fill_tree_3_levels; ++seq) {
