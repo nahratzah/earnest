@@ -1,10 +1,14 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <system_error>
 #include <type_traits>
 #include <utility>
+
+#include <asio/error.hpp>
+#include <asio/steady_timer.hpp>
 
 #include <earnest/detail/fanout.h>
 #include <earnest/detail/move_only_function.h>
@@ -22,6 +26,8 @@ class wal_flusher {
   private:
   static inline constexpr std::uint32_t state_needed = 0x01;
   static inline constexpr std::uint32_t state_running = 0x02;
+  // Time we delay a flush, if delayed was set.
+  static inline constexpr auto delay_interval = std::chrono::seconds(15u);
 
   public:
   using executor_type = typename std::remove_cvref_t<AsyncFlushable>::executor_type;
@@ -35,7 +41,7 @@ class wal_flusher {
   explicit wal_flusher(AsyncFlushable flushable, allocator_type alloc)
   : flushable_(std::forward<AsyncFlushable>(flushable)),
     fanout_(this->flushable_.get_executor(), alloc),
-    delayed_(alloc)
+    timer_(this->flushable_.get_executor().context())
   {}
 
   /* Start a new flush operation.
@@ -53,17 +59,12 @@ class wal_flusher {
         [this](auto handler, bool data_only, bool delay_start) -> void {
           std::scoped_lock lck{this->mtx_};
 
-          if (delay_start) {
-            this->delayed_.emplace_back(
-                [handler=std::move(handler)](fanout_type& f) mutable -> void {
-                  f.async_on_ready(std::move(handler));
-                });
-          } else {
-            this->fanout_.async_on_ready(std::move(handler));
-          }
+          this->fanout_.async_on_ready(std::move(handler));
 
           (data_only ? this->data_only_needed_ : this->all_needed_) = true;
-          if (!delay_start) {
+          if (delay_start) {
+            start_timer_();
+          } else {
             this->delay_ = false;
             if (!this->running_) this->start_();
           }
@@ -76,6 +77,8 @@ class wal_flusher {
     using std::swap;
 
     assert(!running_);
+    timer_.cancel();
+    timer_started_ = false;
 
     auto f = fanout_type(fanout_.get_executor(), fanout_.get_allocator());
     swap(fanout_, f);
@@ -88,25 +91,32 @@ class wal_flusher {
           if (!delay_ && (data_only_needed_ || all_needed_)) start_();
         });
 
-    // Hook up all the delayed functions.
-    std::for_each(
-        delayed_.begin(), delayed_.end(),
-        [&f](auto& delayed_fn) -> void {
-          std::invoke(delayed_fn, f);
-        });
-    delayed_.clear();
-
     flushable_.async_flush(!all_needed_, std::move(f));
     data_only_needed_ = all_needed_ = false;
     running_ = true;
     delay_ = true;
   }
 
+  void start_timer_() {
+    if (timer_started_) return;
+
+    timer_.expires_after(delay_interval);
+    timer_.async_wait(
+        [this](std::error_code ec) {
+          if (ec == asio::error::operation_aborted) return;
+          assert(!ec);
+
+          std::scoped_lock lck{this->mtx_};
+          if (!this->running_) start_();
+        });
+    timer_started_ = true;
+  }
+
   AsyncFlushable flushable_;
   fanout_type fanout_;
-  bool data_only_needed_ = false, all_needed_ = false, running_ = false, delay_ = true;
+  bool data_only_needed_ = false, all_needed_ = false, running_ = false, delay_ = true, timer_started_ = false;
   std::mutex mtx_;
-  std::vector<move_only_function<void(fanout_type&)>, allocator_type_for<move_only_function<void(fanout_type&)>>> delayed_;
+  asio::steady_timer timer_;
 };
 
 
