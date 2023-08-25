@@ -503,20 +503,24 @@ struct bplus_tree_spec {
     return payload_bytes;
   }
 
-  auto bytes_per_leaf() const -> std::size_t {
+  static constexpr auto leaf_header_bytes() noexcept -> std::size_t {
     using xdr_page_hdr = std::remove_cvref_t<decltype(::earnest::xdr_reader<>() & std::declval<bplus_tree_page_header&>())>;
     using xdr_leaf_hdr = std::remove_cvref_t<decltype(::earnest::xdr_reader<>() & std::declval<bplus_tree_leaf_header&>())>;
-    constexpr std::size_t header_bytes = xdr_page_hdr::bytes.value() + xdr_leaf_hdr::bytes.value();
+    return xdr_page_hdr::bytes.value() + xdr_leaf_hdr::bytes.value();
+  }
 
-    return header_bytes + payload_bytes_per_leaf();
+  static constexpr auto intr_header_bytes() noexcept -> std::size_t {
+    using xdr_page_hdr = std::remove_cvref_t<decltype(::earnest::xdr_reader<>() & std::declval<bplus_tree_page_header&>())>;
+    using xdr_intr_hdr = std::remove_cvref_t<decltype(::earnest::xdr_reader<>() & std::declval<bplus_tree_intr_header&>())>;
+    return xdr_page_hdr::bytes.value() + xdr_intr_hdr::bytes.value();
+  }
+
+  auto bytes_per_leaf() const -> std::size_t {
+    return leaf_header_bytes() + payload_bytes_per_leaf();
   }
 
   auto bytes_per_intr() const -> std::size_t {
-    using xdr_page_hdr = std::remove_cvref_t<decltype(::earnest::xdr_reader<>() & std::declval<bplus_tree_page_header&>())>;
-    using xdr_intr_hdr = std::remove_cvref_t<decltype(::earnest::xdr_reader<>() & std::declval<bplus_tree_intr_header&>())>;
-    constexpr std::size_t header_bytes = xdr_page_hdr::bytes.value() + xdr_intr_hdr::bytes.value();
-
-    return header_bytes + payload_bytes_per_intr();
+    return intr_header_bytes() + payload_bytes_per_intr();
   }
 
   auto key_compare(std::span<const std::byte> x, std::span<const std::byte> y) const -> std::strong_ordering {
@@ -525,6 +529,22 @@ struct bplus_tree_spec {
 
   auto key_equal(std::span<const std::byte> x, std::span<const std::byte> y) const -> bool {
     return element.key_equal(x, y);
+  }
+
+  static auto for_page_size(std::size_t bytes, bplus_tree_element_spec element) -> bplus_tree_spec {
+    bplus_tree_spec r = bplus_tree_spec{ .element = std::move(element) };
+
+    auto leaf_payload_space = bytes - leaf_header_bytes();
+    r.elements_per_leaf = leaf_payload_space / (1u + element.key.padded_bytes() + element.value.padded_bytes());
+    assert(bytes_per_leaf() <= bytes);
+
+    auto intr_payload_space = bytes - leaf_header_bytes();
+    intr_payload_space += element.key.padded_bytes();
+    const auto bytes_per_pointer = sizeof(std::uint64_t) + element.padded_augment_bytes();
+    r.child_pages_per_intr = intr_payload_space / (element.key.padded_bytes() + bytes_per_pointer);
+    assert(bytes_per_intr() <= bytes);
+
+    return r;
   }
 };
 
