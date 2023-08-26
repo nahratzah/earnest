@@ -361,8 +361,8 @@ fixture::fixture(std::string_view name)
                 .bytes=value_bytes,
               },
             },
-            .elements_per_leaf=3,
-            .child_pages_per_intr=3,
+            .elements_per_leaf=4,
+            .child_pages_per_intr=4,
           })),
   raw_db(cycle_ptr::make_cycle<raw_db_type>(ioctx.get_executor(), "test-db"))
 {
