@@ -59,6 +59,10 @@ class raw_db
     return file_id("", "session_number");
   }
 
+  auto get_dir() const -> dir {
+    return fdb_->get_dir();
+  }
+
   template<typename CompletionToken>
   auto async_create(dir d, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
@@ -152,7 +156,7 @@ class raw_db
                 cycle_ptr::cycle_gptr<raw_db> self;
                 fdb_transaction<allocator_type> tx;
                 typename fdb_transaction<allocator_type>::file session_number_file;
-                std::uint64_t new_session_number_be;
+                session_number new_session_number_be;
               };
 
               std::shared_ptr<state> state_ptr = std::allocate_shared<state>(self->get_allocator(), self);
@@ -166,35 +170,40 @@ class raw_db
               | asio::deferred(
                   [](std::error_code ec, std::shared_ptr<state> state_ptr) {
                     return asio::deferred.when(!ec)
-                        .then(asio::async_read_at(state_ptr->session_number_file, 0u, asio::buffer(&state_ptr->self->session_number), asio::append(asio::deferred, state_ptr)))
-                        .otherwise(asio::deferred.values(ec, state_ptr));
+                        .then(asio::async_read_at(state_ptr->session_number_file, 0u, asio::buffer(&state_ptr->self->session_number_, sizeof(state_ptr->self->session_number_)), asio::append(asio::deferred, state_ptr)))
+                        .otherwise(asio::deferred.values(ec, std::size_t(0), state_ptr));
                   })
               | asio::deferred(
-                  [](std::error_code ec, std::shared_ptr<state> state_ptr) {
-                    if (!ec) boost::endian::big_to_native_inplace(state_ptr->self->session_number);
+                  [](std::error_code ec, [[maybe_unused]] std::size_t read_bytes, std::shared_ptr<state> state_ptr) {
+                    if (!ec) {
+                      assert(read_bytes == sizeof(state_ptr->self->session_number_));
+                      boost::endian::big_to_native_inplace(state_ptr->self->session_number_);
+                    }
                     return asio::deferred.values(ec, state_ptr);
                   })
               | asio::deferred(
                   [](std::error_code ec, std::shared_ptr<state> state_ptr) {
-                    state_ptr->new_session_number_be = state_ptr->self->session_number + 1u;
+                    state_ptr->new_session_number_be = state_ptr->self->session_number_ + 1u;
                     boost::endian::native_to_big_inplace(state_ptr->new_session_number_be);
 
                     return asio::deferred.when(!ec)
-                        .then(asio::async_write_at(state_ptr->session_number_file, 0, asio::buffer(&state_ptr->new_session_number_be), asio::append(asio::deferred, state_ptr)))
-                        .otherwise(asio::deferred.values(ec, state_ptr));
+                        .then(asio::async_write_at(state_ptr->session_number_file, 0, asio::buffer(&state_ptr->new_session_number_be, sizeof(state_ptr->new_session_number_be)), asio::append(asio::deferred, state_ptr)))
+                        .otherwise(asio::deferred.values(ec, std::size_t(0), state_ptr));
                   })
               | asio::deferred(
-                  [](std::error_code ec, std::shared_ptr<state> state_ptr) {
+                  [](std::error_code ec, [[maybe_unused]] std::size_t write_bytes, std::shared_ptr<state> state_ptr) {
+                    if (!ec) assert(write_bytes == sizeof(state_ptr->new_session_number_be));
                     return asio::deferred.when(!ec)
-                        .then(state_ptr->tx.async_commit(asio::deferred))
-                        .otherwise(asio::deferred.values(ec));
+                        .then(state_ptr->tx.async_commit(asio::append(asio::deferred, state_ptr)))
+                        .otherwise(asio::deferred.values(ec, state_ptr));
                   })
               | asio::deferred(
                   [logger=self->logger, db_name=self->db_name_](std::error_code ec, std::shared_ptr<state> state_ptr) {
                     if (!ec && logger) {
                       logger->info("DB \"{}\" opened, previous session {}, new session {}",
-                          db_name, state_ptr->self->session_number, boost::endian::big_to_native(state_ptr->new_session_number_be));
+                          db_name, state_ptr->self->session_number_, boost::endian::big_to_native(state_ptr->new_session_number_be));
                     }
+                    if (!ec) state_ptr->self->session_number_ = boost::endian::big_to_native(state_ptr->new_session_number_be);
                     return asio::deferred.values(ec);
                   })
               | std::move(handler);
@@ -223,13 +232,15 @@ class raw_db
                 return std::invoke(fn, stream_type(std::move(file), k.offset), std::forward<LambdaLambdaArgs>(args)...)
                 | asio::deferred(
                     [acceptance_fn=std::move(acceptance_fn)](std::error_code ec, cycle_ptr::cycle_gptr<T> new_obj) {
+                      assert(ec || new_obj != nullptr);
                       return std::invoke(acceptance_fn)
                       | asio::deferred(
                           [ lookup_ec=std::move(ec),
                             new_obj=std::move(new_obj)
                           ](std::error_code acceptance_ec) {
                             // Acceptance errors override any regular errors.
-                            std::error_code ec = (!acceptance_ec ? acceptance_ec : lookup_ec);
+                            std::error_code ec = (acceptance_ec ? acceptance_ec : lookup_ec);
+                            assert(ec || new_obj != nullptr);
                             return asio::deferred.values(std::move(ec), new_obj);
                           });
                     });

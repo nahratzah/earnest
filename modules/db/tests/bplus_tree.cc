@@ -54,6 +54,7 @@ class fixture {
   explicit fixture(std::string_view name);
   ~fixture();
 
+  auto close_and_reopen() -> void;
   auto insert(std::string_view key, std::string_view value, bool sync) -> void;
   auto read_all() -> std::vector<read_kv_type>;
   auto ioctx_run(std::size_t threads) -> void;
@@ -69,7 +70,7 @@ class fixture {
 
   asio::io_context ioctx;
   const std::shared_ptr<earnest::detail::bplus_tree_spec> spec;
-  const cycle_ptr::cycle_gptr<raw_db_type> raw_db;
+  cycle_ptr::cycle_gptr<raw_db_type> raw_db;
   cycle_ptr::cycle_gptr<bplus_tree> tree;
 };
 
@@ -88,7 +89,7 @@ inline auto operator<<(std::ostream& out, const std::vector<::fixture::read_kv_t
   return out << (first ? "" : " ") << "}";
 }
 
-}
+} /* namespace std */
 
 
 NEW_TEST(insert) {
@@ -110,6 +111,16 @@ NEW_TEST(insert) {
         { "abba", "cdef" },
       }),
       read_all());
+
+  // Also ensure the on-disk representation matches expectations.
+  close_and_reopen();
+  CHECK_EQUAL(
+      read_kv_vector({
+        { "abba", "cdef" },
+      }),
+      read_all());
+
+  print_tree();
 }
 
 NEW_TEST(ghost_insert) {
@@ -128,6 +139,12 @@ NEW_TEST(ghost_insert) {
 
   CHECK(callback_called);
   CHECK_EQUAL(read_kv_vector({}), read_all());
+
+  // Also ensure the on-disk representation matches expectations.
+  close_and_reopen();
+  CHECK_EQUAL(read_kv_vector({}), read_all());
+
+  print_tree();
 }
 
 NEW_TEST(insert_many_sequentially) {
@@ -147,6 +164,10 @@ NEW_TEST(insert_many_sequentially) {
 
   for (const auto& e : expect)
     insert(e.first, e.second, true);
+  CHECK_EQUAL(expect, read_all());
+
+  // Also ensure the on-disk representation matches expectations.
+  close_and_reopen();
   CHECK_EQUAL(expect, read_all());
 
   print_tree();
@@ -174,6 +195,10 @@ NEW_TEST(insert_many_concurrently) {
 
   CHECK_EQUAL(expect, read_all());
 
+  // Also ensure the on-disk representation matches expectations.
+  close_and_reopen();
+  CHECK_EQUAL(expect, read_all());
+
   print_tree();
 }
 
@@ -197,6 +222,10 @@ NEW_TEST(insert_many_concurrently_with_random_order_multithreaded) {
   ioctx_run(8);
   ioctx.restart();
 
+  CHECK_EQUAL(expect, read_all());
+
+  // Also ensure the on-disk representation matches expectations.
+  close_and_reopen();
   CHECK_EQUAL(expect, read_all());
 
   print_tree();
@@ -241,11 +270,17 @@ NEW_TEST(erase) {
   CHECK(callback_called);
 
   CHECK_EQUAL(expect, read_all());
+
+  // Also ensure the on-disk representation matches expectations.
+  close_and_reopen();
+  CHECK_EQUAL(expect, read_all());
+
+  print_tree();
 }
 
 int main(int argc, char** argv) {
-  asio::thread_pool gc_pool(1);
-  earnest::detail::asio_cycle_ptr gc(gc_pool.get_executor());
+  // asio::thread_pool gc_pool(1);
+  // earnest::detail::asio_cycle_ptr gc(gc_pool.get_executor());
 
   {
     auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(std::clog);
@@ -390,6 +425,40 @@ fixture::fixture(std::string_view name)
 }
 
 fixture::~fixture() = default;
+
+auto fixture::close_and_reopen() -> void {
+  auto ensure_no_error = asio::deferred(
+      [](std::error_code ec, [[maybe_unused]] const auto&... args) {
+        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+        return asio::deferred.values();
+      });
+
+  auto db_dir = raw_db->get_dir();
+  tree.reset();
+  raw_db.reset();
+  ioctx.run(); // Should do anything.
+  ioctx.restart();
+
+  raw_db = cycle_ptr::make_cycle<raw_db_type>(ioctx.get_executor(), "test-db");
+  raw_db->async_open(db_dir, asio::deferred)
+  | ensure_no_error
+  | asio::deferred(
+      [this]() {
+        return bplus_tree::async_load_op(spec, raw_db, tree_address, db_allocator(raw_db, tree_address.file),
+            []() {
+              return asio::deferred.values(std::error_code());
+            });
+      })
+  | asio::deferred(
+      [this](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree> tree) {
+        this->tree = std::move(tree);
+        return asio::deferred.values(ec);
+      })
+  | ensure_no_error
+  | []() -> void { /* Empty callback, just to ensure this starts running. */ };
+  ioctx.run(); // Actually runs the open call.
+  ioctx.restart();
+}
 
 auto fixture::insert(std::string_view key, std::string_view value, bool sync) -> void {
   if (key.size() > key_bytes || value.size() > value_bytes) throw std::invalid_argument("key/value too long");

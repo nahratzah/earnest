@@ -138,7 +138,7 @@ struct bplus_tree_header {
 
 struct bplus_tree_page_header {
   static constexpr std::size_t augment_propagation_required_offset = 4u;
-  static constexpr std::size_t parent_offset = 24u;
+  static constexpr std::size_t parent_offset = 16u;
 
   std::uint32_t magic;
   bool augment_propagation_required = false;
@@ -151,7 +151,7 @@ struct bplus_tree_page_header {
         & xdr_uint32(y.magic)
         & xdr_bool(y.augment_propagation_required)
         & xdr_uint32(y.level)
-        & xdr_constant(0).as(xdr_uint64) // reserved
+        & xdr_constant(0).as(xdr_uint32) // reserved
         & xdr_uint64(y.parent);
   }
 };
@@ -1935,7 +1935,7 @@ class bplus_tree_intr final
                               auto stream = std::allocate_shared<stream_type>(tx.get_allocator(), tx[new_page->address.file], new_page->address.offset);
                               return async_write(
                                   *stream,
-                                  (::earnest::xdr_writer<>() & xdr_constant(bplus_tree_page_header{.magic=magic, .parent=new_page->parent_page_offset()}))
+                                  (::earnest::xdr_writer<>() & xdr_constant(bplus_tree_page_header{.magic=magic, .level=new_page->level(), .parent=new_page->parent_page_offset()}))
                                   + bplus_tree_intr::continue_xdr_(::earnest::xdr_writer<>(), *new_page),
                                   asio::append(asio::deferred, new_page, stream))
                               | asio::deferred(
@@ -2804,9 +2804,11 @@ class bplus_tree_leaf final
           auto state_ptr = std::allocate_shared<state>(tx.get_allocator(), tx[self->address.file], type);
 
           const auto span = std::as_bytes(std::span<bplus_tree_leaf_use_element, 1>(&state_ptr->type, 1));
+          auto file_offset = self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->use_list_offset(offset);
+          self->logger->trace("leaf {}: assign use-type {} at file offset {}", self->address, type, file_offset);
           return asio::async_write_at(
               state_ptr->f,
-              self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->element_offset(offset),
+              file_offset,
               asio::buffer(span),
               completion_wrapper<void(std::error_code, std::size_t)>(
                   std::move(handler),
@@ -2837,9 +2839,11 @@ class bplus_tree_leaf final
           auto state_ptr = std::allocate_shared<state>(tx.get_allocator(), tx[self->address.file]);
 
           const auto span = std::as_bytes(type);
+          auto file_offset = self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->use_list_offset(offset);
+          self->logger->trace("leaf {}: assign use-type {} at file offset {}", self->address, byte_span_printer(span), file_offset);
           return asio::async_write_at(
               state_ptr->f,
-              self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->element_offset(offset),
+              file_offset,
               asio::buffer(span),
               completion_wrapper<void(std::error_code, std::size_t)>(
                   std::move(handler),
@@ -2865,9 +2869,11 @@ class bplus_tree_leaf final
             throw std::invalid_argument("too many bytes for element write");
           auto fptr = std::allocate_shared<tx_file_type>(tx.get_allocator(), tx[self->address.file]);
 
+          auto file_offset = self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->element_offset(offset);
+          self->logger->trace("leaf {}: assign element {} at file offset {}", self->address, byte_span_printer(elements), file_offset);
           return asio::async_write_at(
               *fptr,
-              self->address.offset + xdr_page_hdr_bytes + xdr_hdr_bytes + self->element_offset(offset),
+              file_offset,
               asio::buffer(elements),
               completion_wrapper<void(std::error_code, std::size_t)>(
                   std::move(handler),
@@ -3383,6 +3389,7 @@ class bplus_tree_leaf final
 
   auto use_list_offset() const noexcept -> std::size_t { return 0u; }
   auto use_list_length() const noexcept -> std::size_t { return this->spec->elements_per_leaf; }
+  auto use_list_offset(std::size_t idx) const noexcept -> std::size_t { return use_list_offset() + idx; }
   auto element0_offset() const noexcept -> std::size_t { return use_list_offset() + round_up(use_list_length(), 4u); }
   auto element_length() const noexcept -> std::size_t { return this->spec->element.key.padded_bytes() + this->spec->element.value.padded_bytes(); }
   auto element_offset(std::size_t idx) const noexcept -> std::size_t { return element0_offset() + idx * element_length(); }
@@ -4309,6 +4316,29 @@ class bplus_tree
                   tx, self_op->tree->db_alloc_, self_op->page->spec, raw_db, nil_page,
                   self_op->page->address.offset, self_op->augment, self_op->page->level() + 1u,
                   asio::append(asio::deferred, std::move(page_versions), tx));
+            })
+        | asio::deferred(
+            [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions, tx_type tx) {
+              using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
+              using stream_type = positional_stream_adapter<tx_file_type>;
+
+              auto fptr = std::allocate_shared<stream_type>(tx.get_allocator(), tx[self_op->tree->address.file], self_op->tree->address.offset);
+              bplus_tree_header new_hdr = self_op->tree->hdr_;
+              new_hdr.root = parent_page->address.offset;
+
+              return asio::deferred.when(!ec)
+                  .then(
+                      async_write(
+                          *fptr,
+                          ::earnest::xdr_writer<>() & xdr_constant(std::move(new_hdr)),
+                          asio::append(asio::consign(asio::deferred, fptr), parent_page, page_versions, tx)))
+                  .otherwise(asio::deferred.values(ec, parent_page, page_versions, tx));
+            })
+        | asio::deferred(
+            [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions, tx_type tx) {
+              return asio::deferred.when(!ec)
+                  .then(self_op->page->async_set_parent_diskonly_op(tx, parent_page->address.offset, asio::append(asio::deferred, parent_page, page_versions, tx)))
+                  .otherwise(asio::deferred.values(ec, parent_page, page_versions, tx));
             })
         | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent_page, bplus_tree_versions page_versions, tx_type tx) {
             if (ec) {

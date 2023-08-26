@@ -155,6 +155,7 @@ class file_db
 
   auto get_executor() const -> executor_type { return strand_.get_inner_executor(); }
   auto get_allocator() const -> allocator_type { return alloc_; }
+  auto get_dir() const -> dir { return wal->get_dir(); }
 
   private:
   auto async_create_impl_(dir d, detail::move_only_function<void(std::error_code)> handler) -> void {
@@ -1336,10 +1337,10 @@ class transaction {
   }
 
   auto async_file_write_some_op_impl_(file_id id, std::uint64_t offset, std::error_code write_ec, std::shared_ptr<writes_buffer_type>&& buffer, detail::move_only_function<void(std::error_code, std::size_t)> handler) -> void {
-    return get_writer_op_(std::move(id))
+    return get_writer_op_(id)
     | asio::deferred(
         [ buffer=std::move(buffer),
-          write_ec, offset
+          write_ec, offset, id
         ](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize) mutable {
           if (!ec) ec = write_ec;
 
@@ -1348,6 +1349,7 @@ class transaction {
             // We don't allow writes past the end of a file.
             if (offset > replacements->file_size.value_or(filesize) ||
                 buffer_size > replacements->file_size.value_or(filesize) - offset) {
+              std::clog << "file-DB: write past EOF, file=" << id << ", filesize=" << replacements->file_size.value_or(filesize) << ", writing " << buffer_size << " bytes at offset " << offset << "\n";
               ec = make_error_code(file_db_errc::write_past_eof);
             } else {
               replacements->replacements.insert(offset, 0, buffer_size, std::move(buffer));
