@@ -40,7 +40,6 @@ class fixture {
   public:
   static constexpr std::size_t key_bytes = 4;
   static constexpr std::size_t value_bytes = 4;
-  static constexpr std::size_t total_positions = 100;
   static constexpr std::string_view tree_filename = "test.tree";
   static const earnest::db_address tree_address;
   using read_kv_type = std::pair<std::string, std::string>;
@@ -59,6 +58,11 @@ class fixture {
   auto read_all() -> std::vector<read_kv_type>;
   auto ioctx_run(std::size_t threads) -> void;
   auto print_tree() -> void;
+
+  // Ensure we force 3 levels in the tree. (Actually, this will force 4, but who's counting.)
+  auto total_positions() const -> std::size_t {
+    return spec->child_pages_per_intr * spec->child_pages_per_intr * spec->elements_per_leaf;
+  }
 
   template<typename Collection>
   static auto random_shuffled_collection(Collection c) -> Collection {
@@ -149,7 +153,7 @@ NEW_TEST(ghost_insert) {
 
 NEW_TEST(insert_many_sequentially) {
   read_kv_vector expect;
-  for (std::size_t seq = 0; seq < total_positions; ++seq) {
+  for (std::size_t seq = 0; seq < total_positions(); ++seq) {
     auto key = std::string(
         {
           static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
@@ -175,7 +179,7 @@ NEW_TEST(insert_many_sequentially) {
 
 NEW_TEST(insert_many_concurrently) {
   read_kv_vector expect;
-  for (std::size_t seq = 0; seq < total_positions; ++seq) {
+  for (std::size_t seq = 0; seq < total_positions(); ++seq) {
     auto key = std::string(
         {
           static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
@@ -204,7 +208,7 @@ NEW_TEST(insert_many_concurrently) {
 
 NEW_TEST(insert_many_concurrently_with_random_order_multithreaded) {
   read_kv_vector expect;
-  for (std::size_t seq = 0; seq < total_positions; ++seq) {
+  for (std::size_t seq = 0; seq < total_positions(); ++seq) {
     auto key = std::string(
         {
           static_cast<char>('a' + (seq / 26 / 26 / 26 % 26)),
@@ -343,20 +347,22 @@ auto ensure_dir_exists_and_is_empty(std::filesystem::path name) -> earnest::dir 
 fixture::fixture(std::string_view name)
 : ioctx(),
   spec(std::make_shared<earnest::detail::bplus_tree_spec>(
-          earnest::detail::bplus_tree_spec::for_page_size(
-              512,
-              {
-                .key{
-                  .byte_equality_enabled=true,
-                  .byte_order_enabled=true,
-                  .bytes=key_bytes,
-                },
-                .value{
-                  .byte_equality_enabled=true,
-                  .byte_order_enabled=true,
-                  .bytes=value_bytes,
-                },
-              }))),
+          earnest::detail::bplus_tree_spec{
+            .element{
+              .key{
+                .byte_equality_enabled=true,
+                .byte_order_enabled=true,
+                .bytes=key_bytes,
+              },
+              .value{
+                .byte_equality_enabled=true,
+                .byte_order_enabled=true,
+                .bytes=value_bytes,
+              },
+            },
+            .elements_per_leaf=3,
+            .child_pages_per_intr=3,
+          })),
   raw_db(cycle_ptr::make_cycle<raw_db_type>(ioctx.get_executor(), "test-db"))
 {
   auto ensure_no_error = asio::deferred(
