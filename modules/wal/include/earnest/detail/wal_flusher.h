@@ -9,6 +9,8 @@
 
 #include <asio/error.hpp>
 #include <asio/steady_timer.hpp>
+#include <spdlog/sinks/null_sink.h>
+#include <spdlog/spdlog.h>
 
 #include <earnest/detail/fanout.h>
 #include <earnest/detail/move_only_function.h>
@@ -27,7 +29,7 @@ class wal_flusher {
   static inline constexpr std::uint32_t state_needed = 0x01;
   static inline constexpr std::uint32_t state_running = 0x02;
   // Time we delay a flush, if delayed was set.
-  static inline constexpr auto delay_interval = std::chrono::seconds(15u);
+  static inline constexpr auto delay_interval = std::chrono::seconds(5u);
 
   public:
   using executor_type = typename std::remove_cvref_t<AsyncFlushable>::executor_type;
@@ -59,6 +61,7 @@ class wal_flusher {
         [this](auto handler, bool data_only, bool delay_start) -> void {
           std::scoped_lock lck{this->mtx_};
 
+          this->logger->debug("async-flush requested, data_only={}, delay_start={}", data_only, delay_start);
           this->fanout_.async_on_ready(std::move(handler));
 
           (data_only ? this->data_only_needed_ : this->all_needed_) = true;
@@ -77,8 +80,11 @@ class wal_flusher {
     using std::swap;
 
     assert(!running_);
-    timer_.cancel();
-    timer_started_ = false;
+    if (timer_started_) {
+      logger->debug("timer canceled");
+      timer_.cancel();
+      timer_started_ = false;
+    }
 
     auto f = fanout_type(fanout_.get_executor(), fanout_.get_allocator());
     swap(fanout_, f);
@@ -102,14 +108,24 @@ class wal_flusher {
 
     timer_.expires_after(delay_interval);
     timer_.async_wait(
-        [this](std::error_code ec) {
+        [this, logger=this->logger](std::error_code ec) {
+          // If the timer expired, it might be that the wal-flusher has been destroyed, and that this is a dangling pointer.
+          logger->debug("timer expired, ec={}", ec.message());
           if (ec == asio::error::operation_aborted) return;
           assert(!ec);
 
           std::scoped_lock lck{this->mtx_};
+          this->timer_started_ = false;
           if (!this->running_) start_();
         });
     timer_started_ = true;
+    logger->debug("timer started");
+  }
+
+  static inline auto get_logger() -> std::shared_ptr<spdlog::logger> {
+    std::shared_ptr<spdlog::logger> logger = spdlog::get("earnest.wal.flusher");
+    if (!logger) logger = std::make_shared<spdlog::logger>("earnest.wal.flusher", std::make_shared<spdlog::sinks::null_sink_mt>());
+    return logger;
   }
 
   AsyncFlushable flushable_;
@@ -117,6 +133,7 @@ class wal_flusher {
   bool data_only_needed_ = false, all_needed_ = false, running_ = false, delay_ = true, timer_started_ = false;
   std::mutex mtx_;
   asio::steady_timer timer_;
+  const std::shared_ptr<spdlog::logger> logger = get_logger();
 };
 
 

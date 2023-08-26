@@ -809,25 +809,22 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
                               wf->strand_,
                               completion_wrapper<void(std::error_code)>(
                                   ulink->done,
-                                  [weak_wf=std::weak_ptr<wal_file_entry>(wf), write_offset](auto&& handler, std::error_code ec) -> void {
-                                    auto wf = weak_wf.lock();
-                                    if (wf) [[likely]] {
-                                      assert(wf->strand_.running_in_this_thread());
+                                  [wf, write_offset](auto&& handler, std::error_code ec) -> void {
+                                    assert(wf->strand_.running_in_this_thread());
 
-                                      if (ec) {
-                                        std::clog << "WAL: file " << wf->name << " is bad: unable to write link (and can't use live recovery)\n";
-                                      } else {
-                                        auto insert_pos = std::lower_bound(wf->unwritten_links_.cbegin(), wf->unwritten_links_.cend(), write_offset - 4u,
-                                            overload(
-                                                [](const unwritten_link& x, typename fd_type::offset_type y) {
-                                                  return x.offset < y;
-                                                },
-                                                [](typename fd_type::offset_type x, const unwritten_link& y) {
-                                                  return x < y.offset;
-                                                }));
-                                        assert(insert_pos != wf->unwritten_links_.cend());
-                                        wf->unwritten_links_.erase(insert_pos);
-                                      }
+                                    if (ec) {
+                                      std::clog << "WAL: file " << wf->name << " is bad: unable to write link (and can't use live recovery)\n";
+                                    } else {
+                                      auto insert_pos = std::lower_bound(wf->unwritten_links_.cbegin(), wf->unwritten_links_.cend(), write_offset - 4u,
+                                          overload(
+                                              [](const unwritten_link& x, typename fd_type::offset_type y) {
+                                                return x.offset < y;
+                                              },
+                                              [](typename fd_type::offset_type x, const unwritten_link& y) {
+                                                return x < y.offset;
+                                              }));
+                                      assert(insert_pos != wf->unwritten_links_.cend());
+                                      wf->unwritten_links_.erase(insert_pos);
                                     }
 
                                     std::invoke(handler, ec);
@@ -934,14 +931,11 @@ inline auto wal_file_entry<Executor, Allocator>::write_link_(
         wf->wal_flusher_.async_flush(true,
             completion_wrapper<void(std::error_code)>(
                 std::move(completion_handler),
-                [weak_wf=std::weak_ptr<wal_file_entry>(wf), delay_flush, write_offset, bytes](auto&& handler, std::error_code ec) -> void {
+                [wf, delay_flush, write_offset, bytes](auto&& handler, std::error_code ec) -> void {
                   if (ec) {
                     std::invoke(handler, ec);
                     return;
                   }
-
-                  auto wf = weak_wf.lock();
-                  if (!wf) return;
 
                   std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf->file, write_offset - 4u);
                   auto& stream = *s;
