@@ -536,13 +536,13 @@ struct bplus_tree_spec {
 
     auto leaf_payload_space = bytes - leaf_header_bytes();
     r.elements_per_leaf = leaf_payload_space / (1u + element.key.padded_bytes() + element.value.padded_bytes());
-    assert(bytes_per_leaf() <= bytes);
+    assert(r.bytes_per_leaf() <= bytes);
 
     auto intr_payload_space = bytes - leaf_header_bytes();
     intr_payload_space += element.key.padded_bytes();
     const auto bytes_per_pointer = sizeof(std::uint64_t) + element.padded_augment_bytes();
     r.child_pages_per_intr = intr_payload_space / (element.key.padded_bytes() + bytes_per_pointer);
-    assert(bytes_per_intr() <= bytes);
+    assert(r.bytes_per_intr() <= bytes);
 
     return r;
   }
