@@ -448,7 +448,6 @@ template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_seal(CompletionToken&& token) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, std::shared_ptr<wal_file_entry> wf) {
-        auto ex = asio::make_work_guard(completion_handler, wf->get_executor());
         auto wrapped_handler = completion_wrapper<void(std::error_code)>(
             completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
             [wf](auto handler, std::error_code ec) mutable {
@@ -491,19 +490,7 @@ template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_discard_all(CompletionToken&& token) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto handler, std::shared_ptr<wal_file_entry> wf) {
-        auto ex = asio::make_work_guard(handler, wf->get_executor());
-        auto wrapped_handler = asio::bind_executor(
-            wf->strand_,
-            asio::bind_allocator(
-                wf->get_allocator(),
-                [handler=std::move(handler), ex=std::move(ex)](std::error_code ec) mutable {
-                  auto alloc = asio::get_associated_allocator(handler);
-                  ex.get_executor().post(
-                      [handler=std::move(handler), ec]() mutable {
-                        std::invoke(handler, ec);
-                      },
-                      alloc);
-                }));
+        auto wrapped_handler = completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator());
 
         wf->strand_.dispatch(
             completion_wrapper<void()>(

@@ -40,6 +40,7 @@
 #include <earnest/detail/positional_stream_adapter.h>
 #include <earnest/detail/replacement_map.h>
 #include <earnest/detail/replacement_map_reader.h>
+#include <earnest/detail/type_erased_handler.h>
 #include <earnest/detail/wal_file.h>
 #include <earnest/detail/wal_records.h>
 #include <earnest/file_db_error.h>
@@ -204,11 +205,7 @@ class file_db
   auto async_create(dir d, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, std::shared_ptr<file_db> self, dir d) -> void {
-          if constexpr(detail::handler_has_executor_v<decltype(handler)>) {
-            self->async_create_impl_(std::move(d), completion_handler_fun(std::move(handler), self->get_executor()));
-          } else {
-            self->async_create_impl_(std::move(d), std::move(handler));
-          }
+          self->async_create_impl_(std::move(d), detail::type_erased_handler<void(std::error_code)>(std::move(handler), self->get_executor()));
         },
         token, this->shared_from_this(), std::move(d));
   }
@@ -254,11 +251,7 @@ class file_db
   auto async_open(dir d, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, std::shared_ptr<file_db> self, dir d) -> void {
-          if constexpr(detail::handler_has_executor_v<decltype(handler)>) {
-            self->async_open_impl_(std::move(d), completion_handler_fun(std::move(handler), self->get_executor()));
-          } else {
-            self->async_open_impl_(std::move(d), std::move(handler));
-          }
+          self->async_open_impl_(std::move(d), detail::type_erased_handler<void(std::error_code)>(std::move(handler), self->get_executor()));
         },
         token, this->shared_from_this(), std::move(d));
   }
@@ -269,7 +262,10 @@ class file_db
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, std::shared_ptr<const file_db> fdb, auto acceptor) {
           fdb->strand_.dispatch(
-              [fdb, acceptor=std::move(acceptor), handler=std::move(handler)]() mutable -> void {
+              [ fdb,
+                acceptor=std::move(acceptor),
+                handler=detail::type_erased_handler<void(std::error_code)>(std::move(handler), fdb->get_executor())
+              ]() mutable -> void {
                 if (fdb->wal == nullptr) [[unlikely]] {
                   std::invoke(handler, make_error_code(wal_errc::bad_state));
                   return;
@@ -1004,10 +1000,7 @@ class transaction {
   auto async_commit(CompletionToken&& token, bool delay_sync = false) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, transaction self, bool delay_sync) {
-          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
-            self.commit_op_(detail::completion_handler_fun(std::move(handler), self.get_executor()), delay_sync);
-          else
-            self.commit_op_(std::move(handler), delay_sync);
+          self.commit_op_(detail::type_erased_handler<void(std::error_code)>(std::move(handler), self.get_executor()), delay_sync);
         },
         token, *this, delay_sync);
   }
@@ -1221,10 +1214,7 @@ class transaction {
 
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, bytes_vec)>(
         [](auto handler, transaction self, file_id id, Alloc alloc) mutable -> void {
-          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
-            self.async_file_contents_op_impl_(std::move(id), std::move(alloc), detail::completion_handler_fun(std::move(handler), self.get_executor()));
-          else
-            self.async_file_contents_op_impl_(std::move(id), std::move(alloc), std::move(handler));
+          self.async_file_contents_op_impl_(std::move(id), std::move(alloc), detail::type_erased_handler<void(std::error_code, bytes_vec)>(std::move(handler), self.get_executor()));
         },
         asio::deferred, *this, std::move(id), std::move(alloc));
   }
@@ -1281,15 +1271,13 @@ class transaction {
 
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
         [](auto handler, transaction self, file_id id, std::uint64_t offset, std::vector<asio::mutable_buffer, rebind_alloc<asio::mutable_buffer>> buffers) -> void {
-          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
-            self.async_file_read_some_op_impl_(std::move(id), std::move(offset), std::move(buffers), detail::completion_handler_fun(std::move(handler), self.get_executor()));
-          else
-            self.async_file_read_some_op_impl_(std::move(id), std::move(offset), std::move(buffers), std::move(handler));
+          self.async_file_read_some_op_impl_(std::move(id), std::move(offset), std::move(buffers))
+          | detail::type_erased_handler<void(std::error_code, std::size_t)>(std::move(handler), self.get_executor());
         },
         asio::deferred, *this, std::move(id), std::move(offset), std::move(buffer_vec));
   }
 
-  auto async_file_read_some_op_impl_(file_id id, std::uint64_t offset, std::vector<asio::mutable_buffer, rebind_alloc<asio::mutable_buffer>> buffers, detail::move_only_function<void(std::error_code, std::size_t)> handler) const -> void {
+  auto async_file_read_some_op_impl_(file_id id, std::uint64_t offset, std::vector<asio::mutable_buffer, rebind_alloc<asio::mutable_buffer>> buffers) const {
     return get_reader_op_(std::move(id))
     | asio::deferred(
         [ impl=pimpl_,
@@ -1316,8 +1304,7 @@ class transaction {
                         }));
               },
               asio::deferred, ec, offset, std::move(buffers), std::move(lock), std::move(r), impl->fdb_->get_executor());
-        })
-    | std::move(handler);
+        });
   }
 
   template<typename MB>
@@ -1328,15 +1315,13 @@ class transaction {
 
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
         [](auto handler, transaction self, file_id id, std::uint64_t offset, std::error_code ec, std::shared_ptr<writes_buffer_type> buffer) mutable -> void {
-          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
-            self.async_file_write_some_op_impl_(std::move(id), std::move(offset), std::move(ec), std::move(buffer), detail::completion_handler_fun(std::move(handler), self.get_executor()));
-          else
-            self.async_file_write_some_op_impl_(std::move(id), std::move(offset), std::move(ec), std::move(buffer), std::move(handler));
+          self.async_file_write_some_op_impl_(std::move(id), std::move(offset), std::move(ec), std::move(buffer))
+          | detail::type_erased_handler<void(std::error_code, std::size_t)>(std::move(handler), self.get_executor());
         },
         asio::deferred, *this, std::move(id), std::move(offset), std::move(ec), std::move(buffer));
   }
 
-  auto async_file_write_some_op_impl_(file_id id, std::uint64_t offset, std::error_code write_ec, std::shared_ptr<writes_buffer_type>&& buffer, detail::move_only_function<void(std::error_code, std::size_t)> handler) -> void {
+  auto async_file_write_some_op_impl_(file_id id, std::uint64_t offset, std::error_code write_ec, std::shared_ptr<writes_buffer_type>&& buffer) {
     return get_writer_op_(id)
     | asio::deferred(
         [ buffer=std::move(buffer),
@@ -1363,8 +1348,7 @@ class transaction {
         [wfw=++pimpl_->wait_for_writes_](std::error_code ec, std::size_t nbytes) mutable {
           std::invoke(wfw, ec);
           return asio::deferred.values(ec, nbytes);
-        })
-    | std::move(handler);
+        });
   }
 
   auto async_file_size_op_(file_id id) const {
