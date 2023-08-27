@@ -5,6 +5,7 @@
 #include <iostream>
 #include <iterator>
 
+#include <asio/append.hpp>
 #include <asio/associated_allocator.hpp>
 #include <asio/associated_executor.hpp>
 #include <asio/async_result.hpp>
@@ -709,10 +710,9 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::
                                                    if constexpr(std::is_same_v<no_transaction_validation, std::remove_cvref_t<TransactionValidator>>) {
                                                      return transaction_validator;
                                                    } else {
-                                                     return lde.async_on_ready(asio::deferred)
+                                                     return lde.async_on_ready(asio::append(asio::deferred, std::forward<TransactionValidator>(transaction_validator)))
                                                      | asio::deferred(
-                                                         [ transaction_validator=std::forward<TransactionValidator>(transaction_validator)
-                                                         ](std::error_code ec) mutable {
+                                                         [](std::error_code ec, auto transaction_validator) mutable {
                                                            return asio::deferred.when(!ec)
                                                                .then(std::move(transaction_validator))
                                                                .otherwise(asio::deferred.values(ec));
