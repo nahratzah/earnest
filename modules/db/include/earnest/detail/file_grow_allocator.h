@@ -5,10 +5,12 @@
 #include <asio/async_result.hpp>
 #include <spdlog/spdlog.h>
 
-#include <earnest/raw_db.h>
 #include <earnest/db_address.h>
 #include <earnest/db_error.h>
+#include <earnest/detail/completion_handler_fun.h>
+#include <earnest/detail/type_erased_handler.h>
 #include <earnest/file_id.h>
+#include <earnest/raw_db.h>
 
 namespace earnest::detail {
 
@@ -68,7 +70,7 @@ class file_grow_allocator {
           }
 
           allocation_op_(std::move(fdb_tx), std::move(id), std::move(lock), std::move(bytes), logger)
-          | completion_handler_fun(std::move(handler), std::move(ex));
+          | type_erased_handler<void(std::error_code, db_address)>(std::move(handler), std::move(ex));
         },
         token, std::move(fdb_tx), id_, lock_, raw_db_, std::move(bytes), get_executor(), logger);
   }
@@ -76,21 +78,21 @@ class file_grow_allocator {
   private:
   template<typename FdbTxAlloc>
   static auto allocation_op_(typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, monitor<executor_type, allocator_type> lock, std::size_t bytes, std::shared_ptr<spdlog::logger> logger) {
-    return lock.dispatch_exclusive(asio::deferred, __FILE__, __LINE__)
+    return lock.dispatch_exclusive(asio::append(asio::deferred, fdb_tx, id, bytes, logger), __FILE__, __LINE__)
     | asio::deferred(
-        [logger, fdb_tx, id, bytes](typename monitor<executor_type, allocator_type>::exclusive_lock lock) mutable {
+        [](typename monitor<executor_type, allocator_type>::exclusive_lock lock, typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, std::size_t bytes, std::shared_ptr<spdlog::logger> logger) mutable {
           logger->debug("{}: new allocation for {} bytes", id, bytes);
-          return fdb_tx[id].async_file_size(asio::append(asio::deferred, std::move(lock)));
+          return fdb_tx[id].async_file_size(asio::append(asio::deferred, std::move(lock), fdb_tx, id, bytes, logger));
         })
     | asio::deferred(
-        [logger, fdb_tx, id, bytes](std::error_code ec, auto file_size_bytes, typename monitor<executor_type, allocator_type>::exclusive_lock lock) mutable {
+        [](std::error_code ec, auto file_size_bytes, typename monitor<executor_type, allocator_type>::exclusive_lock lock, typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, std::size_t bytes, std::shared_ptr<spdlog::logger> logger) mutable {
           logger->debug("{}: assigning offset {}", id, file_size_bytes);
           return asio::deferred.when(!ec)
-              .then(fdb_tx[id].async_truncate(file_size_bytes + bytes, asio::append(asio::deferred, file_size_bytes, std::move(lock))))
-              .otherwise(asio::deferred.values(ec, file_size_bytes, typename monitor<executor_type, allocator_type>::exclusive_lock{}));
+              .then(fdb_tx[id].async_truncate(file_size_bytes + bytes, asio::append(asio::deferred, file_size_bytes, std::move(lock), fdb_tx, id, logger)))
+              .otherwise(asio::deferred.values(ec, file_size_bytes, typename monitor<executor_type, allocator_type>::exclusive_lock{}, fdb_tx, id, logger));
         })
     | asio::deferred(
-        [logger, fdb_tx, id](std::error_code ec, auto offset, typename monitor<executor_type, allocator_type>::exclusive_lock lock) mutable {
+        [](std::error_code ec, auto offset, typename monitor<executor_type, allocator_type>::exclusive_lock lock, typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, std::shared_ptr<spdlog::logger> logger) mutable {
           if (!ec) {
             // We want the lock to be maintained until the transaction has commited.
             fdb_tx.on_commit(
