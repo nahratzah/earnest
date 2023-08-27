@@ -652,9 +652,9 @@ class file_db
         token, this->shared_from_this(), std::move(e));
   }
 
-  template<typename BarrierHandler, typename BarrierExecutor>
+  template<typename BarrierExecutor>
   [[nodiscard]]
-  auto apply_file_recovery_(const file_id& id, const detail::file_recover_state<typename wal_type::fd_type, allocator_type>& update, detail::completion_barrier<BarrierHandler, BarrierExecutor>& barrier) -> bool {
+  auto apply_file_recovery_(const file_id& id, const detail::file_recover_state<typename wal_type::fd_type, allocator_type>& update, detail::completion_barrier<BarrierExecutor>& barrier) -> bool {
     assert(strand_.running_in_this_thread());
 
     auto sync_barrier = detail::fanout_barrier<executor_type, allocator_type>(get_executor(), get_allocator());
