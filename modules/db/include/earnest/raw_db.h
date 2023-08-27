@@ -6,6 +6,7 @@
 
 #include <cycle_ptr.h>
 #include <prometheus/registry.h>
+#include <spdlog/sinks/null_sink.h>
 #include <spdlog/spdlog.h>
 
 #include <earnest/db_cache.h>
@@ -114,7 +115,7 @@ class raw_db
                   })
               | asio::deferred(
                   [logger=self->logger, db_name=self->db_name_](std::error_code ec) {
-                    if (!ec && logger) logger->info("new DB \"{}\" created", db_name);
+                    if (!ec) logger->info("new DB \"{}\" created", db_name);
                     return asio::deferred.values(ec);
                   })
               | std::move(handler);
@@ -199,11 +200,11 @@ class raw_db
                   })
               | asio::deferred(
                   [logger=self->logger, db_name=self->db_name_](std::error_code ec, std::shared_ptr<state> state_ptr) {
-                    if (!ec && logger) {
+                    if (!ec) {
                       logger->info("DB \"{}\" opened, previous session {}, new session {}",
                           db_name, state_ptr->self->session_number_, boost::endian::big_to_native(state_ptr->new_session_number_be));
+                      state_ptr->self->session_number_ = boost::endian::big_to_native(state_ptr->new_session_number_be);
                     }
-                    if (!ec) state_ptr->self->session_number_ = boost::endian::big_to_native(state_ptr->new_session_number_be);
                     return asio::deferred.values(ec);
                   })
               | std::move(handler);
@@ -266,11 +267,17 @@ class raw_db
   }
 
   private:
+  static auto get_logger() -> std::shared_ptr<spdlog::logger> {
+    std::shared_ptr<spdlog::logger> logger = spdlog::get("earnest.db");
+    if (!logger) logger = std::make_shared<spdlog::logger>("earnest.db", std::make_shared<spdlog::sinks::null_sink_mt>());
+    return logger;
+  }
+
   std::shared_ptr<file_db_type> fdb_;
   cache_type cache_;
   session_number session_number_ = 0;
   const std::string db_name_;
-  const std::shared_ptr<spdlog::logger> logger = spdlog::get("earnest.db");
+  const std::shared_ptr<spdlog::logger> logger = get_logger();
 };
 
 
