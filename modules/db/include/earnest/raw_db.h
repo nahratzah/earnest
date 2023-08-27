@@ -11,10 +11,10 @@
 
 #include <earnest/db_cache.h>
 #include <earnest/db_error.h>
-#include <earnest/detail/completion_handler_fun.h>
 #include <earnest/detail/completion_wrapper.h>
 #include <earnest/detail/handler_traits.h>
 #include <earnest/detail/move_only_function.h>
+#include <earnest/detail/type_erased_handler.h>
 #include <earnest/dir.h>
 #include <earnest/file_db.h>
 
@@ -68,16 +68,14 @@ class raw_db
   auto async_create(dir d, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, cycle_ptr::cycle_gptr<raw_db> self, dir d) -> void {
-          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
-            self->async_create_impl_(std::move(d), detail::completion_handler_fun(std::move(handler)));
-          else
-            self->async_create_impl_(std::move(d), std::move(handler));
+          self->async_create_impl_(std::move(d), detail::type_erased_handler<void(std::error_code)>(std::move(handler), self->get_executor()));
         },
         token, this->shared_from_this(this), std::move(d));
   }
 
   private:
-  auto async_create_impl_(dir d, detail::move_only_function<void(std::error_code)> handler) -> void {
+  template<typename Handler>
+  auto async_create_impl_(dir d, Handler&& handler) -> void {
     fdb_->async_create(
         std::move(d),
         detail::completion_wrapper<void(std::error_code)>(
@@ -118,7 +116,7 @@ class raw_db
                     if (!ec) logger->info("new DB \"{}\" created", db_name);
                     return asio::deferred.values(ec);
                   })
-              | std::move(handler);
+              | std::forward<Handler>(handler);
             }));
   }
 
@@ -127,16 +125,14 @@ class raw_db
   auto async_open(dir d, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, cycle_ptr::cycle_gptr<raw_db> self, dir d) -> void {
-          if constexpr(detail::handler_has_executor_v<decltype(handler)>)
-            self->async_open_impl_(std::move(d), detail::completion_handler_fun(std::move(handler)));
-          else
-            self->async_open_impl_(std::move(d), std::move(handler));
+          self->async_open_impl_(std::move(d), detail::type_erased_handler<void(std::error_code)>(std::move(handler), self->get_executor()));
         },
         token, this->shared_from_this(this), std::move(d));
   }
 
   private:
-  auto async_open_impl_(dir d, detail::move_only_function<void(std::error_code)> handler) -> void {
+  template<typename Handler>
+  auto async_open_impl_(dir d, Handler&& handler) -> void {
     fdb_->async_open(
         std::move(d),
         detail::completion_wrapper<void(std::error_code)>(
@@ -207,7 +203,7 @@ class raw_db
                     }
                     return asio::deferred.values(ec);
                   })
-              | std::move(handler);
+              | std::forward<Handler>(handler);
             }));
   }
 
