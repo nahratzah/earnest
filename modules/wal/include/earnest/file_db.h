@@ -3,7 +3,6 @@
 #include <cassert>
 #include <functional>
 #include <initializer_list>
-#include <iostream>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -26,11 +25,13 @@
 #include <asio/write_at.hpp>
 #include <prometheus/counter.h>
 #include <prometheus/registry.h>
+#include <spdlog/spdlog.h>
 
 #include <earnest/detail/byte_positional_stream.h>
 #include <earnest/detail/completion_handler_fun.h>
 #include <earnest/detail/completion_wrapper.h>
 #include <earnest/detail/deferred_on_executor.h>
+#include <earnest/detail/fdb_logger.h>
 #include <earnest/detail/file_recover_state.h>
 #include <earnest/detail/forward_deferred.h>
 #include <earnest/detail/handler_traits.h>
@@ -442,7 +443,7 @@ class file_db
                           throw std::system_error(make_error_code(file_db_errc::lock_failure), "file is locked");
                       }
                     } catch (const std::system_error& ex) {
-                      std::clog << "File-DB: unable to lock namespaces file (" << ex.what() << ")\n";
+                      fdb->logger->error("unable to lock namespaces file ({})", ex.what());
                       std::invoke(handler, ex.code(), std::move(state_ptr));
                       return;
                     }
@@ -513,7 +514,7 @@ class file_db
                 if (!state_ptr->exists.has_value()) state_ptr->exists = state_ptr->actual_file.is_open();
                 if (!state_ptr->file_size.has_value()) state_ptr->file_size = (state_ptr->exists.value() ? state_ptr->actual_file.size() : 0);
                 if (!state_ptr->exists.value()) {
-                  std::clog << "File-DB: namespace file does not exist\n";
+                  fdb->logger->error("namespace file does not exist");
                   ec = make_error_code(file_db_errc::unrecoverable);
                 }
               }
@@ -737,14 +738,14 @@ class file_db
         need_fdatasync = true;
       }
     } catch (const std::system_error& ex) {
-      std::clog << "File-DB " << id.ns << "/" << id.filename << ": unable to apply WAL records: " << ex.what() << "\n";
+      logger->error("{}: unable to apply WAL records: {}", id, ex.what());
       std::invoke(++barrier, ex.code());
       return need_namespaces_update;
     }
 
     for (const auto& elem : update.replacements) {
       if (!files_open) {
-        std::clog << "File-DB " << id.ns << "/" << id.filename << ": unable to apply WAL records: modified file is not opened\n";
+        logger->error("{}: unable to apply WAL records: modified file is not opened", id);
         std::invoke(++barrier, make_error_code(file_db_errc::unrecoverable));
         return need_namespaces_update;
       }
@@ -867,6 +868,8 @@ class file_db
   asio::strand<executor_type> strand_;
   std::shared_ptr<prometheus::Counter> successful_commits_;
   std::shared_ptr<prometheus::Counter> failed_commits_;
+
+  const std::shared_ptr<spdlog::logger> logger = detail::get_fdb_logger();
 };
 
 
@@ -977,6 +980,8 @@ class transaction {
     mutable monitor_type writes_mon_;
     detail::fanout_barrier<executor_type, allocator_type> wait_for_writes_;
     std::shared_ptr<detail::on_commit_events<allocator_type>> on_commit_events_;
+
+    const std::shared_ptr<spdlog::logger> logger = detail::get_fdb_transaction_logger();
   };
 
   public:
@@ -1337,9 +1342,9 @@ class transaction {
     return asio::async_initiate<decltype(asio::deferred), void(std::error_code, std::size_t)>(
         [](auto handler, transaction self, file_id id, std::uint64_t offset, std::error_code write_ec, std::shared_ptr<writes_buffer_type>&& buffer) -> void {
           self.get_writer_op_(id)
-          | asio::append(asio::deferred, std::move(buffer), write_ec, offset, id)
+          | asio::append(asio::deferred, self, std::move(buffer), write_ec, offset, id)
           | asio::deferred(
-              [](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize, auto buffer, std::error_code write_ec, std::uint64_t offset, file_id id) mutable {
+              [](typename monitor_type::exclusive_lock lock, std::error_code ec, std::shared_ptr<writes_map_element> replacements, auto filesize, transaction self, auto buffer, std::error_code write_ec, std::uint64_t offset, file_id id) mutable {
                 if (!ec) ec = write_ec;
 
                 const std::size_t buffer_size = buffer->cdata().size();
@@ -1347,7 +1352,7 @@ class transaction {
                   // We don't allow writes past the end of a file.
                   if (offset > replacements->file_size.value_or(filesize) ||
                       buffer_size > replacements->file_size.value_or(filesize) - offset) {
-                    std::clog << "file-DB: write past EOF, file=" << id << ", filesize=" << replacements->file_size.value_or(filesize) << ", writing " << buffer_size << " bytes at offset " << offset << "\n";
+                    self.pimpl_->logger->warn("write past EOF, file={}, filesize={}, writing {} bytes at offset {}", id, replacements->file_size.value_or(filesize), buffer_size, offset);
                     ec = make_error_code(file_db_errc::write_past_eof);
                   } else {
                     replacements->replacements.insert(offset, 0, buffer_size, std::move(buffer));

@@ -2,7 +2,6 @@
 
 #include <cassert>
 #include <functional>
-#include <iostream>
 #include <iterator>
 
 #include <asio/append.hpp>
@@ -115,7 +114,7 @@ auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback
             const bool done = std::holds_alternative<wal_record_end_of_records>(*ptr);
             if (!ec && !done) {
               if (wf->state_ == wal_file_entry_state::sealed) {
-                std::clog << "WAL: file " << wf->name << " is bad: record after seal\n";
+                wf->logger->error("file {} is bad: record after seal", wf->name.native());
                 ec = make_error_code(wal_errc::unrecoverable);
               } else if (std::holds_alternative<wal_record_seal>(*ptr)) {
                 wf->state_ = wal_file_entry_state::sealed;
@@ -800,7 +799,7 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
                                     assert(wf->strand_.running_in_this_thread());
 
                                     if (ec) {
-                                      std::clog << "WAL: file " << wf->name << " is bad: unable to write link (and can't use live recovery)\n";
+                                      wf->logger->error("file {} is bad: unable to write link (and can't use live recovery)", wf->name.native());
                                     } else {
                                       auto insert_pos = std::lower_bound(wf->unwritten_links_.cbegin(), wf->unwritten_links_.cend(), write_offset - 4u,
                                           overload(

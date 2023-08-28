@@ -8,7 +8,6 @@
 #include <functional>
 #include <iomanip>
 #include <ios>
-#include <iostream>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -44,6 +43,7 @@
 #include <earnest/detail/deferred_on_executor.h>
 #include <earnest/detail/file_recover_state.h>
 #include <earnest/detail/wal_file_entry.h>
+#include <earnest/detail/wal_logger.h>
 #include <earnest/dir.h>
 
 namespace earnest::detail {
@@ -341,7 +341,10 @@ class wal_file
                                       return x->file->sequence == y->file->sequence;
                                     });
                                 if (same_sequence_iter != wf->entries.end()) [[unlikely]] {
-                                  std::clog << "WAL: unrecoverable error: files " << (*same_sequence_iter)->file->name << " and " << (*std::next(same_sequence_iter))->file->name << " have the same sequence number " << (*same_sequence_iter)->file->sequence << std::endl;
+                                  wf->logger->error("unrecoverable error: files {} and {} have the same sequence number {}",
+                                      (*same_sequence_iter)->file->name.native(),
+                                      (*std::next(same_sequence_iter))->file->name.native(),
+                                      (*same_sequence_iter)->file->sequence);
                                   ec = make_error_code(wal_errc::unrecoverable);
                                 }
                               }
@@ -369,7 +372,7 @@ class wal_file
                               [wf, new_entry, filename, bad_wal_files](auto handler, std::error_code ec) {
                                 assert(wf->strand_.running_in_this_thread());
                                 if (ec) [[unlikely]] {
-                                  std::clog << "WAL: error while opening WAL file '"sv << filename << "': "sv << ec << "\n";
+                                  wf->logger->error("error while opening WAL file {}: {}", filename.native(), ec.message());
                                   bad_wal_files->insert(filename);
                                   std::invoke(handler, std::error_code()); // bad ec was handled by marking the file in bad_wal_files.
                                 } else {
@@ -605,14 +608,14 @@ class wal_file
                 if (iter == bad_wal_files.end()) continue;
 
                 if (pair.second.ready) {
-                  std::clog << "WAL: unrecoverable error: " << pair.first << " should be ready, but failed at reading it\n";
+                  wf->logger->error("unrecoverable error: {} should be ready, but failed at reading it", pair.first.native());
                   fail = true;
                 } else if (pair.second.intent_declared) {
-                  std::clog << "WAL: erasing unused invalid WAL file " << pair.first << "\n";
+                  wf->logger->warn("erasing unused invalid WAL file {}", pair.first.native());
                   try {
                     wf->dir_.erase(pair.first);
                   } catch (const std::system_error& ex) {
-                    std::clog << "WAL: unable to erase invalid WAL file " << pair.first << ": " << ex.what() << "\n";
+                    wf->logger->error("unable to erase invalid WAL file {}: {}", pair.first.native(), ex.what());
                     erase_fail = true;
                     continue;
                   }
@@ -620,7 +623,7 @@ class wal_file
                 }
               }
               for (const auto& entry : bad_wal_files) { // Log any files not accounted for.
-                std::clog << "WAL: no record of creation for bad WAL file " << entry << "\n";
+                wf->logger->error("no record of creating for bad WAL file {}", entry.native());
                 fail = true;
               }
               if (fail) {
@@ -687,12 +690,12 @@ class wal_file
 
     const typename entries_list::iterator unsealed_entry = find_first_unsealed_();
     if (unsealed_entry == this->entries.end()) {
-      std::clog << "WAL: up to date (last file is sealed)\n";
+      logger->info("up to date (last file is sealed)");
       create_initial_unsealed_(++recover_barrier); // Start a new file, so we have an unsealed file.
     } else if (std::next(unsealed_entry) == this->entries.end()) {
-      std::clog << "WAL: up to date (last file is accepting writes)\n";
+      logger->info("up to date (last file is accepting writes)");
     } else {
-      std::clog << "WAL: has multiple unsealed files, recovery is required\n";
+      logger->warn("has multiple unsealed files, recovery is required");
 
       // Once we've discarded all trailing files, seal the current file.
       // Then create a new empty file.
@@ -727,8 +730,8 @@ class wal_file
       // and we cannot know if all preceding writes made it into the unsealed-entry.
       // So we must discard those files.
       std::for_each(std::next(unsealed_entry), this->entries.end(),
-          [&discard_barrier](const std::shared_ptr<entry>& e) {
-            std::clog << "WAL: discarding never-confirmed entries in " << e->file->name << "\n";
+          [this, &discard_barrier](const std::shared_ptr<entry>& e) {
+            this->logger->warn("discarding never-confirmed entries in {}", e->file->name.native());
             e->file->async_discard_all(++discard_barrier);
           });
       std::invoke(discard_barrier, std::error_code());
@@ -933,7 +936,7 @@ class wal_file
               if (undo_ec == make_error_code(std::errc::no_such_file_or_directory))
                 undo_ec.clear();
               else if (undo_ec)
-                std::clog << "WAL: rollover failed, and during recovery, the file erase failed (filename: "sv << name << ", error: "sv << undo_ec << "); further rollovers will be impossible\n"sv;
+                wf->logger->error("rollover failed, and during recovery, the file erase failed (filename: {}, error: {}); further rollovers will be impossible", name.native(), undo_ec.message());;
               std::invoke(new_barrier, undo_ec);
             },
             strand_));
@@ -968,7 +971,7 @@ class wal_file
               assert(wf->strand_.running_in_this_thread());
 
               if (ec) {
-                std::clog << "WAL: unable to apply WAL-file, " << ec.message() << "\n";
+                wf->logger->error("unable to apply WAL-file, {}", ec.message());
                 wf->apply_running_ = false;
                 return;
               }
@@ -982,7 +985,7 @@ class wal_file
                       wf->strand_,
                       [wf](std::error_code ec) {
                         // If we use old replacements, we're still functional, just a bit less efficient.
-                        if (ec) std::clog << "WAL: unable to update cache file replacements, " << ec.message() << "\n";
+                        if (ec) wf->logger->warn("unable to update cache file replacements, {}", ec.message());
 
                         if (wf->apply_impl_)
                           wf->apply_impl_();
@@ -1089,6 +1092,8 @@ class wal_file
 
   mutable std::shared_mutex cache_file_replacements_mtx_;
   std::shared_ptr<const file_replacements> cached_file_replacements_;
+
+  const std::shared_ptr<spdlog::logger> logger = get_wal_logger();
 };
 
 

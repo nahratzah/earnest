@@ -19,6 +19,7 @@
 #include <earnest/detail/overload.h>
 #include <earnest/detail/positional_stream_adapter.h>
 #include <earnest/detail/wal_flusher.h>
+#include <earnest/detail/wal_logger.h>
 #include <earnest/detail/wal_records.h>
 #include <earnest/dir.h>
 #include <earnest/fd.h>
@@ -277,6 +278,8 @@ class wal_file_entry
   // 1. all pending writes have their space allocated.
   // 2. a seal has been requested.
   fanout_barrier<executor_type, allocator_type> seal_barrier_;
+
+  const std::shared_ptr<spdlog::logger> logger = get_wal_logger();
 };
 
 
