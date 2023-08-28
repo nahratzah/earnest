@@ -1002,16 +1002,10 @@ class bplus_tree_page
             std::move(raw_db),
             target_addr,
             [self_op=this->shared_from_this(), target_addr]() {
-              return self_op->self->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
-              | asio::deferred(
-                  [self_op, target_addr]([[maybe_unused]] monitor_shlock_type self_lock) {
-                    std::error_code ec;
-                    if (self_op->self->erased_ || target_addr != self_op->self->parent_page_address())
-                      ec = make_error_code(bplus_tree_errc::restart);
-                    return asio::deferred.values(ec);
-                  });
+              return asio::deferred.values(std::error_code{});
             })
-        | [self_op=this->shared_from_this()](std::error_code ec, ptr_type target_page) -> void {
+        | [self_op=this->shared_from_this(), self_shlock](std::error_code ec, ptr_type target_page) mutable -> void {
+            self_shlock.reset();
             if (ec == make_error_code(bplus_tree_errc::restart)) {
               // Using asio::post, to prevent recursion from overflowing the stack space.
               asio::post(
@@ -1644,35 +1638,16 @@ class bplus_tree_page
           return;
         }
         db_address target_addr = std::get<db_address>(std::move(addr_or_error));
-        self_shlock.reset();
 
         async_load_op(
             self->spec,
             std::move(raw_db),
             target_addr,
             [self_op=this->shared_from_this(), target_addr]() mutable {
-              return self_op->self->page_lock.dispatch_shared(asio::append(asio::deferred, self_op, std::move(target_addr)), __FILE__, __LINE__)
-              | asio::deferred(
-                  []([[maybe_unused]] monitor_shlock_type self_lock, std::shared_ptr<op> self_op, db_address target_addr) {
-                    std::error_code ec;
-                    if (self_op->self->erased_) {
-                      ec = make_error_code(bplus_tree_errc::restart);
-                    } else {
-                      std::visit(
-                          overload(
-                              [&ec]([[maybe_unused]] const std::error_code& reload_ec) {
-                                ec = make_error_code(bplus_tree_errc::restart);
-                              },
-                              [&ec, &target_addr](const db_address& reload_addr) {
-                                if (reload_addr != target_addr)
-                                  ec = make_error_code(bplus_tree_errc::restart);
-                              }),
-                          self_op->get_target_addr_fn());
-                    }
-                    return asio::deferred.values(ec);
-                  });
+              return asio::deferred.values(std::error_code{});
             })
-        | [self_op=this->shared_from_this()](std::error_code ec, ptr_type target_page) -> void {
+        | [self_op=this->shared_from_this(), self_shlock](std::error_code ec, ptr_type target_page) mutable -> void {
+            self_shlock.reset();
             if (ec == make_error_code(bplus_tree_errc::restart)) {
               // Using asio::post, to prevent recursion from overflowing the stack space.
               asio::post(
@@ -2572,14 +2547,13 @@ class bplus_tree_leaf final
               else
                 target = self_op->self->next_page_address();
 
-              self_lock.reset(); // No longer need the lock.
-              self_op->load_page(std::move(target));
+              self_op->load_page(std::move(target), std::move(self_lock));
             },
             __FILE__, __LINE__);
       }
 
       private:
-      auto load_page(db_address address) -> void {
+      auto load_page(db_address address, monitor_shlock_type self_lock) -> void {
         if (address.offset == bplus_tree_page<raw_db_type>::nil_page) {
           std::invoke(handler, std::error_code{}, nullptr, LeafLockType{}, monitor_shlock_type{});
           return;
@@ -2594,26 +2568,9 @@ class bplus_tree_leaf final
         bplus_tree_page<raw_db_type>::async_load_op(
             self->spec, raw_db, address,
             [self_page=this->self, address]() {
-              return self_page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
-              | asio::deferred(
-                  [self_page, address]([[maybe_unused]] monitor_shlock_type self_lock) {
-                    std::error_code ec;
-
-                    if (self_page->erased_) {
-                      ec = bplus_tree_errc::restart;
-                    } else {
-                      if constexpr(Direction < 0) {
-                        if (address != self_page->prev_page_address())
-                          ec = bplus_tree_errc::restart;
-                      } else {
-                        if (address != self_page->next_page_address())
-                          ec = bplus_tree_errc::restart;
-                      }
-                    }
-
-                    return asio::deferred.values(ec);
-                  });
+              return asio::deferred.values(std::error_code{});
             })
+        | asio::consign(asio::deferred, self_lock)
         | bplus_tree_page<raw_db_type>::template variant_to_pointer_op<bplus_tree_leaf>()
         | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf> leaf) -> void {
             if (ec == make_error_code(bplus_tree_errc::restart)) {
@@ -3814,7 +3771,7 @@ class bplus_tree
         token, std::move(tx_alloc), this->shared_from_this(this));
   }
 
-  auto maybe_load_root_page_nocreate_op_() {
+  auto load_root_page_nocreate_op_() {
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
     using page_variant = std::variant<cycle_ptr::cycle_gptr<intr_type>, cycle_ptr::cycle_gptr<leaf_type>>;
 
@@ -3824,11 +3781,10 @@ class bplus_tree
     | asio::deferred(
         [self](monitor_shlock_type tree_lock) {
           const auto load_offset = self->hdr_.root;
-          tree_lock.reset();
 
           std::error_code ec;
           auto raw_db = self->raw_db.lock();
-          if (raw_db == nullptr) ec = make_error_code(db_errc::data_expired);
+          if (raw_db == nullptr || self->erased_) ec = make_error_code(db_errc::data_expired);
 
           return asio::deferred.when(!ec && load_offset != nil_page)
               .then(
@@ -3836,67 +3792,12 @@ class bplus_tree
                       self->spec,
                       raw_db,
                       db_address(self->address.file, load_offset),
-                      [self, load_offset]() {
-                        return self->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
-                        | asio::deferred(
-                            [self, load_offset]([[maybe_unused]] monitor_shlock_type tree_lock) {
-                              std::error_code ec;
-                              if (self->erased_ || self->hdr_.root != load_offset)
-                                ec = make_error_code(bplus_tree_errc::restart);
-                              return asio::deferred.values(ec);
-                            });
+                      []() {
+                        return asio::deferred.values(std::error_code{});
                       })
-                  | asio::deferred(
-                      [self, load_offset](std::error_code ec, page_variant page) {
-                        return asio::deferred.when(!ec)
-                            .then(
-                                self->page_lock.dispatch_shared(asio::append(asio::deferred, page), __FILE__, __LINE__)
-                                | asio::deferred(
-                                    [self, load_offset](monitor_shlock_type tree_lock, page_variant page) {
-                                      std::error_code ec;
-                                      if (self->erased_) [[unlikely]]
-                                        ec = make_error_code(db_errc::data_expired);
-                                      else if (self->hdr_.root != load_offset)
-                                        ec = make_error_code(bplus_tree_errc::restart);
-
-                                      return asio::deferred.values(std::move(ec), std::move(page), std::move(tree_lock));
-                                    }))
-                            .otherwise(asio::deferred.values(ec, page, monitor_shlock_type{}));
-                      }))
+                  | asio::append(asio::deferred, tree_lock))
               .otherwise(asio::deferred.values(std::error_code(), page_variant(), tree_lock));
         });
-  }
-
-  auto load_root_page_nocreate_op_() {
-    using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
-    using page_variant = std::variant<cycle_ptr::cycle_gptr<intr_type>, cycle_ptr::cycle_gptr<leaf_type>>;
-
-    return asio::async_initiate<decltype(asio::deferred), void(std::error_code, page_variant, monitor_shlock_type)>(
-        []<typename Handler>(Handler handler, cycle_ptr::cycle_gptr<bplus_tree> self) -> void {
-          struct op {
-            explicit op(cycle_ptr::cycle_gptr<bplus_tree> self) noexcept
-            : self(std::move(self))
-            {}
-
-            auto operator()(Handler handler) const -> void {
-              self->maybe_load_root_page_nocreate_op_()
-              | completion_wrapper<void(std::error_code, page_variant, monitor_shlock_type)>(
-                  std::move(handler),
-                  [op=*this](auto handler, std::error_code ec, page_variant page, monitor_shlock_type tree_lock) mutable {
-                    if (ec == make_error_code(bplus_tree_errc::restart))
-                      return std::invoke(op, std::move(handler));
-                    else
-                      std::invoke(handler, std::move(ec), std::move(page), std::move(tree_lock));
-                  });
-            }
-
-            private:
-            cycle_ptr::cycle_gptr<bplus_tree> self;
-          };
-
-          std::invoke(op(std::move(self)), std::move(handler));
-        },
-        asio::deferred, this->shared_from_this(this));
   }
 
   template<typename TxAlloc>
@@ -4104,8 +4005,8 @@ class bplus_tree
       auto search_with_page_locked(cycle_ptr::cycle_gptr<intr_type> intr, monitor_shlock_type page_lock) -> void {
         assert(!path.interior_pages.empty() && path.interior_pages.back().page == intr);
         assert(!intr->erased_);
+        assert(page_lock->holds_monitor(intr->page_lock));
 
-        auto intr_version = intr->versions.page_split;
         db_address child_page_address;
         cycle_ptr::cycle_gptr<raw_db_type> raw_db;
         {
@@ -4122,7 +4023,6 @@ class bplus_tree
                     child_page_address = std::move(addr);
                   }),
               std::invoke(address_selector_fn, intr));
-          page_lock.reset(); // No longer need the lock.
 
           if (!ec) [[likely]] {
             raw_db = intr->raw_db.lock();
@@ -4137,51 +4037,13 @@ class bplus_tree
 
         page_type::async_load_op(
             intr->spec, std::move(raw_db), child_page_address,
-            [intr, child_page_address]() {
-              return intr->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
-              | asio::deferred(
-                  [intr, child_page_address]([[maybe_unused]] monitor_shlock_type intr_lock) {
-                    std::error_code ec;
-                    if (intr->erased_ || !intr->contains(child_page_address))
-                      ec = make_error_code(bplus_tree_errc::restart);
-                    return asio::deferred.values(ec);
-                  });
+            []() {
+              return asio::deferred.values(std::error_code{});
             })
-        | asio::deferred(
-            [intr](std::error_code ec, page_variant child_page) {
-              return asio::deferred.when(!ec)
-                  .then(intr->page_lock.dispatch_shared(asio::append(asio::deferred, ec, child_page), __FILE__, __LINE__))
-                  .otherwise(asio::deferred.values(monitor_shlock_type{}, ec, child_page));
-            })
+        | asio::prepend(asio::deferred, page_lock)
         | [ self_op=this->shared_from_this(),
-            intr, intr_version
+            intr
           ](monitor_shlock_type intr_lock, std::error_code ec, page_variant child_page) mutable -> void {
-            if (!ec) [[likely]] {
-              if (intr->erased_ || intr->versions.page_split != intr_version) {
-                self_op->logger->trace("interior page was erased ({}) or split ({} vs {})", intr->erased_, intr->versions.page_split, intr_version);
-                ec = make_error_code(bplus_tree_errc::restart);
-              } else {
-                std::visit(
-                    overload(
-                        [&ec, &self_op](std::error_code addr_selection_ec) {
-                          self_op->logger->trace("address selector returned error {}", addr_selection_ec.message());
-                          if (!ec) throw std::logic_error("address selector returned an error without error state");
-                          ec = addr_selection_ec;
-                        },
-                        [&ec, &child_page, &self_op](const db_address& addr) {
-                          self_op->logger->trace("address selector returned {}", addr);
-                          const db_address& child_address = std::visit<const db_address&>(
-                              [](const auto& child_ptr) -> const db_address& {
-                                return child_ptr->address;
-                              },
-                              child_page);
-                          if (addr != child_address) [[unlikely]]
-                            ec = make_error_code(bplus_tree_errc::restart);
-                        }),
-                    std::invoke(self_op->address_selector_fn, intr));
-              }
-            }
-
             if (ec == make_error_code(bplus_tree_errc::restart)) {
               self_op->logger->trace("restarting tree-walk");
               intr_lock.reset();
@@ -4936,7 +4798,6 @@ class bplus_tree
           | asio::deferred(
               [page](monitor_shlock_type lock) {
                 db_address next_page_address = page->next_page_address();
-                lock.reset();
 
                 std::error_code ec;
                 auto raw_db = page->raw_db.lock();
@@ -4947,16 +4808,10 @@ class bplus_tree
                     .otherwise(
                         page_type::async_load_op(
                             page->spec, raw_db, next_page_address,
-                            [page, next_page_address]() {
-                              return page->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
-                              | asio::deferred(
-                                  [=]([[maybe_unused]] auto lock) {
-                                    std::error_code ec;
-                                    if (page->erased_ || next_page_address != page->next_page_address())
-                                      ec = make_error_code(bplus_tree_errc::restart);
-                                    return asio::deferred.values(ec);
-                                  });
+                            []() {
+                              return asio::deferred.values(std::error_code{});
                             })
+                        | asio::consign(asio::deferred, page, lock)
                         | page_type::template variant_to_pointer_op<leaf_type>());
               })
           | asio::deferred(
