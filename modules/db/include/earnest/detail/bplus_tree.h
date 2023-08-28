@@ -4005,7 +4005,7 @@ class bplus_tree
       auto search_with_page_locked(cycle_ptr::cycle_gptr<intr_type> intr, monitor_shlock_type page_lock) -> void {
         assert(!path.interior_pages.empty() && path.interior_pages.back().page == intr);
         assert(!intr->erased_);
-        assert(page_lock->holds_monitor(intr->page_lock));
+        assert(page_lock.holds_monitor(intr->page_lock));
 
         db_address child_page_address;
         cycle_ptr::cycle_gptr<raw_db_type> raw_db;
