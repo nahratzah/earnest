@@ -414,10 +414,7 @@ fixture::fixture(std::string_view name)
   | ensure_no_error
   | asio::deferred(
       [spec=this->spec, raw_db=this->raw_db]() {
-        return bplus_tree::async_load_op(spec, raw_db, tree_address, db_allocator(raw_db, tree_address.file),
-            []() {
-              return asio::deferred.values(std::error_code());
-            });
+        return bplus_tree::async_load_op(spec, raw_db, tree_address, db_allocator(raw_db, tree_address.file));
       })
   | asio::deferred(
       [this](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree> tree) {
@@ -451,10 +448,7 @@ auto fixture::close_and_reopen() -> void {
   | ensure_no_error
   | asio::deferred(
       [this]() {
-        return bplus_tree::async_load_op(spec, raw_db, tree_address, db_allocator(raw_db, tree_address.file),
-            []() {
-              return asio::deferred.values(std::error_code());
-            });
+        return bplus_tree::async_load_op(spec, raw_db, tree_address, db_allocator(raw_db, tree_address.file));
       })
   | asio::deferred(
       [this](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree> tree) {

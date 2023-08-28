@@ -215,41 +215,27 @@ class raw_db
   auto cache_max_mem(std::size_t new_max_mem) noexcept -> std::size_t { return cache_.max_mem(new_max_mem); }
   auto get_session_number() const noexcept -> session_number { return session_number_; }
 
-  template<typename Alloc, typename T, typename CompletionToken, typename Fn, typename AcceptanceFn, typename... Args>
-  auto async_get([[maybe_unused]] std::allocator_arg_t aa, Alloc alloc, key_type<T> k, CompletionToken&& token, Fn&& fn, AcceptanceFn&& acceptance_fn, Args&&... args) {
+  template<typename Alloc, typename T, typename CompletionToken, typename Fn, typename... Args>
+  auto async_get([[maybe_unused]] std::allocator_arg_t aa, Alloc alloc, key_type<T> k, CompletionToken&& token, Fn&& fn, Args&&... args) {
     return asio::async_initiate<CompletionToken, void(std::error_code, cycle_ptr::cycle_gptr<T>)>(
-        []<typename... LambdaArgs>(auto handler, cache_type cache, std::shared_ptr<file_db_type> fdb, key_type<T> k, Alloc alloc, auto fn, auto acceptance_fn, LambdaArgs&&... args) {
+        []<typename... LambdaArgs>(auto handler, cache_type cache, std::shared_ptr<file_db_type> fdb, key_type<T> k, Alloc alloc, auto fn, LambdaArgs&&... args) {
           return cache.async_get(
               k,
               std::move(handler),
-              [fdb, k, alloc]<typename... LambdaLambdaArgs>(auto fn, auto acceptance_fn, LambdaLambdaArgs&&... args) {
+              [fdb, k, alloc]<typename... LambdaLambdaArgs>(auto fn, LambdaLambdaArgs&&... args) {
                 auto file = fdb->tx_begin(isolation::read_commited, tx_mode::read_only, alloc)[k.file];
                 using stream_type = detail::positional_stream_adapter<decltype(file)>;
 
-                return std::invoke(fn, stream_type(std::move(file), k.offset), std::forward<LambdaLambdaArgs>(args)...)
-                | asio::deferred(
-                    [acceptance_fn=std::move(acceptance_fn)](std::error_code ec, cycle_ptr::cycle_gptr<T> new_obj) {
-                      assert(ec || new_obj != nullptr);
-                      return std::invoke(acceptance_fn)
-                      | asio::deferred(
-                          [ lookup_ec=std::move(ec),
-                            new_obj=std::move(new_obj)
-                          ](std::error_code acceptance_ec) {
-                            // Acceptance errors override any regular errors.
-                            std::error_code ec = (acceptance_ec ? acceptance_ec : lookup_ec);
-                            assert(ec || new_obj != nullptr);
-                            return asio::deferred.values(std::move(ec), new_obj);
-                          });
-                    });
+                return std::invoke(fn, stream_type(std::move(file), k.offset), std::forward<LambdaLambdaArgs>(args)...);
               },
-              std::move(fn), std::move(acceptance_fn), std::forward<LambdaArgs>(args)...);
+              std::move(fn), std::forward<LambdaArgs>(args)...);
         },
-        token, this->cache_, this->fdb_, std::move(k), std::move(alloc), std::forward<Fn>(fn), std::forward<AcceptanceFn>(acceptance_fn), std::forward<Args>(args)...);
+        token, this->cache_, this->fdb_, std::move(k), std::move(alloc), std::forward<Fn>(fn), std::forward<Args>(args)...);
   }
 
-  template<typename T, typename CompletionToken, typename Fn, typename AcceptanceFn, typename... Args>
-  auto async_get(key_type<T> k, CompletionToken&& token, Fn&& fn, AcceptanceFn&& acceptance_fn, Args&&... args) {
-    return async_get(std::allocator_arg, std::allocator<std::byte>(), std::move(k), std::forward<CompletionToken>(token), std::forward<Fn>(fn), std::forward<AcceptanceFn>(acceptance_fn), std::forward<Args>(args)...);
+  template<typename T, typename CompletionToken, typename Fn, typename... Args>
+  auto async_get(key_type<T> k, CompletionToken&& token, Fn&& fn, Args&&... args) {
+    return async_get(std::allocator_arg, std::allocator<std::byte>(), std::move(k), std::forward<CompletionToken>(token), std::forward<Fn>(fn), std::forward<Args>(args)...);
   }
 
   template<typename T>

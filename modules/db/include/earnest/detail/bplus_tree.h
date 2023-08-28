@@ -812,8 +812,7 @@ class bplus_tree_page
   auto get_executor() const -> executor_type { return ex_; }
   auto get_allocator() const -> allocator_type { return alloc_; }
 
-  template<typename AcceptanceFn>
-  static auto async_load_op(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, AcceptanceFn&& acceptance_fn) {
+  static auto async_load_op(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address) {
     return raw_db->async_get(
         typename raw_db_type::template key_type<bplus_tree_page>{.file=address.file, .offset=address.offset},
         asio::deferred,
@@ -834,7 +833,6 @@ class bplus_tree_page
                 return asio::deferred.values(std::move(ec), std::move(page));
               });
         },
-        std::forward<AcceptanceFn>(acceptance_fn),
         spec, raw_db, address)
     | asio::deferred(
         [](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_page> page) {
@@ -997,13 +995,7 @@ class bplus_tree_page
           return;
         }
 
-        async_load_op(
-            self->spec,
-            std::move(raw_db),
-            target_addr,
-            [self_op=this->shared_from_this(), target_addr]() {
-              return asio::deferred.values(std::error_code{});
-            })
+        async_load_op(self->spec, std::move(raw_db), target_addr)
         | [self_op=this->shared_from_this(), self_shlock](std::error_code ec, ptr_type target_page) mutable -> void {
             self_shlock.reset();
             if (ec == make_error_code(bplus_tree_errc::restart)) {
@@ -1639,13 +1631,7 @@ class bplus_tree_page
         }
         db_address target_addr = std::get<db_address>(std::move(addr_or_error));
 
-        async_load_op(
-            self->spec,
-            std::move(raw_db),
-            target_addr,
-            [self_op=this->shared_from_this(), target_addr]() mutable {
-              return asio::deferred.values(std::error_code{});
-            })
+        async_load_op(self->spec, std::move(raw_db), target_addr)
         | [self_op=this->shared_from_this(), self_shlock](std::error_code ec, ptr_type target_page) mutable -> void {
             self_shlock.reset();
             if (ec == make_error_code(bplus_tree_errc::restart)) {
@@ -2565,11 +2551,7 @@ class bplus_tree_leaf final
           return;
         }
 
-        bplus_tree_page<raw_db_type>::async_load_op(
-            self->spec, raw_db, address,
-            [self_page=this->self, address]() {
-              return asio::deferred.values(std::error_code{});
-            })
+        bplus_tree_page<raw_db_type>::async_load_op(self->spec, raw_db, address)
         | asio::consign(asio::deferred, self_lock)
         | bplus_tree_page<raw_db_type>::template variant_to_pointer_op<bplus_tree_leaf>()
         | [self_op=this->shared_from_this()](std::error_code ec, cycle_ptr::cycle_gptr<bplus_tree_leaf> leaf) -> void {
@@ -3565,8 +3547,7 @@ class bplus_tree
   auto get_executor() const -> executor_type { return ex_; }
   auto get_allocator() const -> allocator_type { return alloc_; }
 
-  template<typename AcceptanceFn>
-  static auto async_load_op(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, DBAllocator db_allocator, AcceptanceFn&& acceptance_fn) {
+  static auto async_load_op(std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, db_address address, DBAllocator db_allocator) {
     return raw_db->async_get(
         typename raw_db_type::template key_type<bplus_tree>{.file=address.file, .offset=address.offset},
         asio::deferred,
@@ -3579,7 +3560,6 @@ class bplus_tree
                 return asio::deferred.values(std::move(ec), std::move(tree));
               });
         },
-        std::forward<AcceptanceFn>(acceptance_fn),
         spec, raw_db, address, std::move(db_allocator));
   }
 
@@ -3788,13 +3768,7 @@ class bplus_tree
 
           return asio::deferred.when(!ec && load_offset != nil_page)
               .then(
-                  page_type::async_load_op(
-                      self->spec,
-                      raw_db,
-                      db_address(self->address.file, load_offset),
-                      []() {
-                        return asio::deferred.values(std::error_code{});
-                      })
+                  page_type::async_load_op( self->spec, raw_db, db_address(self->address.file, load_offset))
                   | asio::append(asio::deferred, tree_lock))
               .otherwise(asio::deferred.values(std::error_code(), page_variant(), tree_lock));
         });
@@ -4035,11 +4009,7 @@ class bplus_tree
           }
         }
 
-        page_type::async_load_op(
-            intr->spec, std::move(raw_db), child_page_address,
-            []() {
-              return asio::deferred.values(std::error_code{});
-            })
+        page_type::async_load_op(intr->spec, std::move(raw_db), child_page_address)
         | asio::prepend(asio::deferred, page_lock)
         | [ self_op=this->shared_from_this(),
             intr
@@ -4531,13 +4501,7 @@ class bplus_tree
                   }
 
                   while (self->reparent.size() < shift) {
-                    page_type::async_load_op(
-                        parent->spec, raw_db,
-                        db_address(parent->address.file, parent->element(parent->index_size() - shift + self->reparent.size())),
-                        []() {
-                          // We hold the lock on parent, so there's no way this address can be invalidated.
-                          return asio::deferred.values(std::error_code());
-                        })
+                    page_type::async_load_op(parent->spec, raw_db, db_address(parent->address.file, parent->element(parent->index_size() - shift + self->reparent.size())))
                     | asio::deferred(
                         [](std::error_code ec, std::variant<cycle_ptr::cycle_gptr<intr_type>, cycle_ptr::cycle_gptr<leaf_type>> page) {
                           return asio::deferred.values(
@@ -4806,11 +4770,7 @@ class bplus_tree
                 return asio::deferred.when(ec || next_page_address.offset == nil_page)
                     .then(asio::deferred.values(ec, cycle_ptr::cycle_gptr<leaf_type>()))
                     .otherwise(
-                        page_type::async_load_op(
-                            page->spec, raw_db, next_page_address,
-                            []() {
-                              return asio::deferred.values(std::error_code{});
-                            })
+                        page_type::async_load_op(page->spec, raw_db, next_page_address)
                         | asio::consign(asio::deferred, page, lock)
                         | page_type::template variant_to_pointer_op<leaf_type>());
               })
@@ -6439,12 +6399,7 @@ class bplus_tree
       auto operator()(db_address page_addr) -> void {
         // Under normal operation, you shouldn't hold a lock while loading a page.
         // But this is a debug function, so we're kinda-okay with it.
-        page_type::async_load_op(
-            spec, raw_db, page_addr,
-            []() {
-              // Because we hold from_ref and from_lock.
-              return asio::deferred.values(std::error_code());
-            })
+        page_type::async_load_op(spec, raw_db, page_addr)
         | [self_op=this->shared_from_this(), page_addr](std::error_code ec, page_variant page) -> void {
             if (ec == make_error_code(bplus_tree_errc::restart)) {
               std::invoke(*self_op, page_addr);
