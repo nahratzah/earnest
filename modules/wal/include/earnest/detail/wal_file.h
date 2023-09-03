@@ -41,6 +41,7 @@
 #include <earnest/detail/completion_barrier.h>
 #include <earnest/detail/completion_handler_fun.h>
 #include <earnest/detail/deferred_on_executor.h>
+#include <earnest/detail/err_deferred.h>
 #include <earnest/detail/file_recover_state.h>
 #include <earnest/detail/wal_file_entry.h>
 #include <earnest/detail/wal_logger.h>
@@ -848,58 +849,54 @@ class wal_file
   }
 
   auto rollover_create_new_entry_op_() {
-    return deferred_on_executor<void(std::error_code, std::shared_ptr<wal_file>, fanout_barrier<executor_type, allocator_type>)>(
-        [](std::shared_ptr<wal_file> wf) {
-          assert(wf->strand_.running_in_this_thread());
-
-          fanout_barrier<executor_type, allocator_type> new_barrier(wf->get_executor(), wf->get_allocator());
-          auto op = wf->rollover_barrier_.async_on_ready(asio::append(asio::deferred, wf, new_barrier));
-          wf->rollover_barrier_ = std::move(new_barrier);
-          return op;
-        },
-        strand_, this->shared_from_this())
+    return asio::dispatch(
+        strand_,
+        asio::append(asio::deferred, this->shared_from_this()))
     | asio::bind_executor(
         strand_,
         asio::deferred(
-            [](std::error_code ec, std::shared_ptr<wal_file> wf, fanout_barrier<executor_type, allocator_type> new_barrier) {
+            [](std::shared_ptr<wal_file> wf) {
+              assert(wf->strand_.running_in_this_thread());
+
+              fanout_barrier<executor_type, allocator_type> new_barrier(wf->get_executor(), wf->get_allocator());
+              auto op = wf->rollover_barrier_.async_on_ready(asio::append(asio::deferred, wf, new_barrier));
+              wf->rollover_barrier_ = std::move(new_barrier);
+              return op;
+            }))
+    | asio::bind_executor(
+        strand_,
+        err_deferred(
+            [](std::shared_ptr<wal_file> wf, fanout_barrier<executor_type, allocator_type> new_barrier) {
               assert(wf->strand_.running_in_this_thread());
 
               auto new_filename = filename_for_wal_(wf->active->file->sequence + 1u);
-              return asio::deferred.when(!ec)
-                  .then(
-                      wf->async_append(
-                          std::initializer_list<write_variant_type>{
-                            wal_record_rollover_intent{ .filename=new_filename.generic_string() },
-                          },
-                          asio::append(asio::deferred, wf, new_barrier, new_filename)))
-                  .otherwise(asio::deferred.values(ec, wf, new_barrier, new_filename));
+              return wf->async_append(
+                  std::initializer_list<write_variant_type>{
+                    wal_record_rollover_intent{ .filename=new_filename.generic_string() },
+                  },
+                  asio::append(asio::deferred, wf, new_barrier, new_filename));
             }))
-    | asio::deferred(
-        [](std::error_code ec, std::shared_ptr<wal_file> wf, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
+    | err_deferred(
+        [](std::shared_ptr<wal_file> wf, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
           auto new_active = allocate_shared<entry_type>(wf->get_allocator(), wf->get_executor(), wf->get_allocator());
-          return asio::deferred.when(!ec)
-              .then(
-                  deferred_on_executor<void(std::error_code, typename entry_type::link_done_event_type, std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type>, fanout_barrier<executor_type, allocator_type>, std::filesystem::path)>(
-                      [](std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
-                        assert(wf->strand_.running_in_this_thread());
+          return deferred_on_executor<void(std::error_code, typename entry_type::link_done_event_type, std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type>, fanout_barrier<executor_type, allocator_type>, std::filesystem::path)>(
+              [](std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
+                assert(wf->strand_.running_in_this_thread());
 
-                        const auto new_sequence = wf->active->file->sequence + 1u;
-                        return new_active->async_create(wf->dir_, new_filename, new_sequence, asio::append(asio::deferred, wf, new_active, new_barrier, new_filename));
-                      },
-                      wf->strand_, wf, new_active, new_barrier, new_filename))
-              .otherwise(asio::deferred.values(ec, typename entry_type::link_done_event_type(new_active->get_executor(), new_active->get_allocator()), wf, new_active, new_barrier, new_filename));
+                const auto new_sequence = wf->active->file->sequence + 1u;
+                return new_active->async_create(wf->dir_, new_filename, new_sequence, asio::append(asio::deferred, wf, new_active, new_barrier, new_filename));
+              },
+              wf->strand_, wf, new_active, new_barrier, new_filename);
         })
-    | asio::deferred(
-        [](std::error_code ec, typename entry_type::link_done_event_type link_event, std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
-          return asio::deferred.when(!ec)
-              .then(
-                  wf->async_append(
-                      std::initializer_list<write_variant_type>{
-                        wal_record_rollover_ready{ .filename=new_filename.generic_string() },
-                      },
-                      asio::append(asio::deferred, link_event, new_active, new_barrier)))
-              .otherwise(asio::deferred.values(ec, link_event, new_active, new_barrier));
-        });
+    | err_deferred(
+        [](typename entry_type::link_done_event_type link_event, std::shared_ptr<wal_file> wf, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier, std::filesystem::path new_filename) {
+          return wf->async_append(
+              std::initializer_list<write_variant_type>{
+                wal_record_rollover_ready{ .filename=new_filename.generic_string() },
+              },
+              asio::append(asio::deferred, link_event, new_active, new_barrier));
+        },
+        typename entry_type::link_done_event_type(get_executor(), get_allocator()), std::shared_ptr<entry_type>{}, fanout_barrier<executor_type, allocator_type>(get_executor(), get_allocator()));
   }
 
   auto rollover_install_new_entry_op_(typename entry_type::link_done_event_type link_event, std::shared_ptr<entry_type> new_active, fanout_barrier<executor_type, allocator_type> new_barrier) {

@@ -31,6 +31,7 @@
 #include <earnest/detail/completion_handler_fun.h>
 #include <earnest/detail/completion_wrapper.h>
 #include <earnest/detail/deferred_on_executor.h>
+#include <earnest/detail/err_deferred.h>
 #include <earnest/detail/fdb_logger.h>
 #include <earnest/detail/file_recover_state.h>
 #include <earnest/detail/forward_deferred.h>
@@ -160,50 +161,48 @@ class file_db
   auto get_dir() const -> dir { return wal->get_dir(); }
 
   private:
-  auto async_create_impl_(dir d, detail::move_only_function<void(std::error_code)> handler) -> void {
+  template<typename Handler>
+  auto async_create_impl_(dir d, Handler&& handler) -> void {
     using ::earnest::detail::completion_handler_fun;
     using ::earnest::detail::completion_wrapper;
 
-    detail::deferred_on_executor<void(std::error_code, std::shared_ptr<file_db>)>(
-        [](std::shared_ptr<file_db> fdb, dir d) {
-          assert(fdb->strand_.running_in_this_thread());
-
-          const bool wal_is_nil = (fdb->wal == nullptr);
-          if (wal_is_nil) fdb->wal = std::allocate_shared<wal_type>(fdb->get_allocator(), fdb->get_executor(), fdb->get_allocator());
-          return asio::deferred.when(wal_is_nil)
-              .then(
-                  fdb->wal->async_create(
-                      std::move(d),
-                      asio::append(asio::deferred, fdb)))
-              .otherwise(asio::deferred.values(make_error_code(wal_errc::bad_state), fdb));
-        },
-        strand_, this->shared_from_this(), std::move(d))
-    | asio::deferred(
-        [](std::error_code ec, std::shared_ptr<file_db> fdb) {
-          return asio::deferred.when(!ec)
-              .then(fdb->create_ns_file_op_() | asio::append(asio::deferred, fdb))
-              .otherwise(asio::deferred.values(ec, fdb));
-        })
+    asio::dispatch(strand_, asio::append(asio::deferred, this->shared_from_this(), std::move(d)))
     | asio::bind_executor(
         strand_,
         asio::deferred(
-            [](std::error_code ec, std::shared_ptr<file_db> fdb) {
-              return asio::deferred.when(!ec)
+            [](std::shared_ptr<file_db> fdb, dir d) {
+              assert(fdb->strand_.running_in_this_thread());
+
+              const bool wal_is_nil = (fdb->wal == nullptr);
+              if (wal_is_nil) fdb->wal = std::allocate_shared<wal_type>(fdb->get_allocator(), fdb->get_executor(), fdb->get_allocator());
+              return asio::deferred.when(wal_is_nil)
                   .then(
-                      fdb->recover_namespaces_op_()
-                      | asio::deferred(
-                          [fdb](std::error_code ec) {
-                            return asio::deferred.values(ec, fdb);
-                          }))
-                  .otherwise(asio::deferred.values(ec, fdb));
+                      fdb->wal->async_create(
+                          std::move(d),
+                          asio::append(asio::deferred, fdb)))
+                  .otherwise(asio::deferred.values(make_error_code(wal_errc::bad_state)));
             }))
-    | asio::deferred(
-        [](std::error_code ec, std::shared_ptr<file_db> fdb) {
-          if (!ec) fdb->install_apply_();
-          return asio::deferred.values(ec);
+    | detail::err_deferred(
+        [](std::shared_ptr<file_db> fdb) {
+          return fdb->create_ns_file_op_() | asio::append(asio::deferred, fdb);
+        })
+    | asio::bind_executor(
+        strand_,
+        detail::err_deferred(
+            [](std::shared_ptr<file_db> fdb) {
+              return fdb->recover_namespaces_op_()
+              | asio::deferred(
+                  [fdb](std::error_code ec) {
+                    return asio::deferred.values(ec, fdb);
+                  });
+            }))
+    | detail::err_deferred(
+        [](std::shared_ptr<file_db> fdb) {
+          fdb->install_apply_();
+          return asio::deferred.values(std::error_code{});
         })
     | undo_on_fail_op_()
-    | std::move(handler);
+    | std::forward<Handler>(handler);
   }
 
   public:
@@ -221,7 +220,8 @@ class file_db
     using ::earnest::detail::completion_handler_fun;
     using ::earnest::detail::completion_wrapper;
 
-    return detail::deferred_on_executor<void(std::error_code, std::shared_ptr<file_db>)>(
+    asio::dispatch(strand_, asio::append(asio::deferred, this->shared_from_this(), std::move(d)))
+    | asio::deferred(
         [](std::shared_ptr<file_db> fdb, dir d) {
           assert(fdb->strand_.running_in_this_thread());
 
@@ -233,25 +233,18 @@ class file_db
                       std::move(d),
                       asio::append(asio::deferred, fdb)))
               .otherwise(asio::deferred.values(make_error_code(wal_errc::bad_state), fdb));
-        },
-        strand_, this->shared_from_this(), std::move(d))
+        })
     | asio::bind_executor(
         strand_,
-        asio::deferred(
-            [](std::error_code ec, std::shared_ptr<file_db> fdb) {
-              return asio::deferred.when(!ec)
-                  .then(
-                      fdb->recover_namespaces_op_()
-                      | asio::deferred(
-                          [fdb](std::error_code ec) {
-                            return asio::deferred.values(ec, fdb);
-                          }))
-                  .otherwise(asio::deferred.values(ec, fdb));
+        detail::err_deferred(
+            [](std::shared_ptr<file_db> fdb) {
+              return fdb->recover_namespaces_op_()
+              | asio::append(asio::deferred, fdb);
             }))
-    | asio::deferred(
-        [](std::error_code ec, std::shared_ptr<file_db> fdb) {
-          if (!ec) fdb->install_apply_();
-          return asio::deferred.values(ec);
+    | detail::err_deferred(
+        [](std::shared_ptr<file_db> fdb) {
+          fdb->install_apply_();
+          return asio::deferred.values(std::error_code{});
         })
     | undo_on_fail_op_()
     | std::move(handler);
@@ -368,31 +361,28 @@ class file_db
         })
     | asio::bind_executor(
         strand_,
-        asio::deferred(
-            [](std::error_code ec, byte_vector ns_bytes, std::shared_ptr<file_db> fdb) {
+        detail::err_deferred(
+            [](byte_vector ns_bytes, std::shared_ptr<file_db> fdb) {
               assert(fdb->strand_.running_in_this_thread());
 
               const auto ns_file_size = ns_bytes.size();
               const auto ns_file_id = file_id("", std::string(namespaces_filename));
-              return asio::deferred.when(!ec)
-                  .then(
-                      fdb->wal->async_append(
-                          std::initializer_list<write_variant_type>{
-                          wal_record_create_file{
-                            .file=ns_file_id
-                          },
-                          wal_record_truncate_file{
-                            .file=ns_file_id,
-                            .new_size=ns_file_size
-                          },
-                          wal_record_modify_file_write32{
-                            .file=ns_file_id,
-                            .file_offset=0,
-                            .data=std::move(ns_bytes)
-                          }
-                        },
-                        asio::deferred))
-                  .otherwise(asio::deferred.values(ec));
+              return fdb->wal->async_append(
+                  std::initializer_list<write_variant_type>{
+                    wal_record_create_file{
+                      .file=ns_file_id
+                    },
+                    wal_record_truncate_file{
+                      .file=ns_file_id,
+                      .new_size=ns_file_size
+                    },
+                    wal_record_modify_file_write32{
+                      .file=ns_file_id,
+                      .file_offset=0,
+                      .data=std::move(ns_bytes)
+                    }
+                  },
+                  asio::deferred);
             }));
   }
 
@@ -504,19 +494,18 @@ class file_db
     | asio::append(asio::deferred, this->shared_from_this())
     | asio::bind_executor(
         this->strand_,
-        asio::deferred(
-            [](std::error_code ec, std::unique_ptr<namespace_recover_state> state_ptr, std::shared_ptr<file_db> fdb) {
+        detail::err_deferred(
+            [](std::unique_ptr<namespace_recover_state> state_ptr, std::shared_ptr<file_db> fdb) {
+              std::error_code ec;
               assert(fdb->strand_.running_in_this_thread());
 
-              if (!ec) {
-                // If nothing declared a state on the namespaces file,
-                // then propagate the filesystem state.
-                if (!state_ptr->exists.has_value()) state_ptr->exists = state_ptr->actual_file.is_open();
-                if (!state_ptr->file_size.has_value()) state_ptr->file_size = (state_ptr->exists.value() ? state_ptr->actual_file.size() : 0);
-                if (!state_ptr->exists.value()) {
-                  fdb->logger->error("namespace file does not exist");
-                  ec = make_error_code(file_db_errc::unrecoverable);
-                }
+              // If nothing declared a state on the namespaces file,
+              // then propagate the filesystem state.
+              if (!state_ptr->exists.has_value()) state_ptr->exists = state_ptr->actual_file.is_open();
+              if (!state_ptr->file_size.has_value()) state_ptr->file_size = (state_ptr->exists.value() ? state_ptr->actual_file.size() : 0);
+              if (!state_ptr->exists.value()) {
+                fdb->logger->error("namespace file does not exist");
+                ec = make_error_code(file_db_errc::unrecoverable);
               }
 
               return asio::deferred.when(!ec)
@@ -527,50 +516,49 @@ class file_db
             }))
     | asio::bind_executor(
         this->strand_,
-        asio::deferred(
-            [](std::error_code ec, namespace_map<> ns_map, std::shared_ptr<file_db> fdb) {
+        detail::err_deferred(
+            [](namespace_map<> ns_map, std::shared_ptr<file_db> fdb) {
               assert(fdb->strand_.running_in_this_thread());
 
-              if (!ec) {
-                try {
-                  std::transform(
-                      ns_map.namespaces.begin(), ns_map.namespaces.end(),
-                      std::inserter(fdb->namespaces, fdb->namespaces.end()),
-                      [](const std::pair<const std::string, std::string>& ns_entry) {
-                        return std::make_pair(ns_entry.first, ns{ .d{ns_entry.second}, .dirname=ns_entry.second });
-                      });
-                  std::transform(
-                      ns_map.files.begin(), ns_map.files.end(),
-                      std::inserter(fdb->files, fdb->files.end()),
-                      [fdb](const file_id& id) {
-                        auto result = std::make_pair(
-                            id,
-                            file(*fdb, id, true));
+              std::error_code ec;
+              try {
+                std::transform(
+                    ns_map.namespaces.begin(), ns_map.namespaces.end(),
+                    std::inserter(fdb->namespaces, fdb->namespaces.end()),
+                    [](const std::pair<const std::string, std::string>& ns_entry) {
+                      return std::make_pair(ns_entry.first, ns{ .d{ns_entry.second}, .dirname=ns_entry.second });
+                    });
+                std::transform(
+                    ns_map.files.begin(), ns_map.files.end(),
+                    std::inserter(fdb->files, fdb->files.end()),
+                    [fdb](const file_id& id) {
+                      auto result = std::make_pair(
+                          id,
+                          file(*fdb, id, true));
 
-                        if (id.ns.empty()) {
-                          try {
-                            result.second.fd->open(fdb->wal->get_dir(), id.filename, open_mode::READ_WRITE);
-                          } catch (const std::system_error& ex) {
-                            // Recovery will deal with it.
-                          }
-                        } else {
-                          const auto ns_iter = fdb->namespaces.find(id.ns);
-                          if (ns_iter == fdb->namespaces.end())
-                            throw std::system_error(std::make_error_code(std::errc::no_such_file_or_directory));
-                          try {
-                            result.second.fd->open(ns_iter->second.d, id.filename, open_mode::READ_WRITE);
-                          } catch (const std::system_error& ex) {
-                            // Recovery will deal with it.
-                          }
+                      if (id.ns.empty()) {
+                        try {
+                          result.second.fd->open(fdb->wal->get_dir(), id.filename, open_mode::READ_WRITE);
+                        } catch (const std::system_error& ex) {
+                          // Recovery will deal with it.
                         }
+                      } else {
+                        const auto ns_iter = fdb->namespaces.find(id.ns);
+                        if (ns_iter == fdb->namespaces.end())
+                          throw std::system_error(std::make_error_code(std::errc::no_such_file_or_directory));
+                        try {
+                          result.second.fd->open(ns_iter->second.d, id.filename, open_mode::READ_WRITE);
+                        } catch (const std::system_error& ex) {
+                          // Recovery will deal with it.
+                        }
+                      }
 
-                        if (result.second.fd->is_open())
-                          result.second.file_size = result.second.fd->size();
-                        return result;
-                      });
-                } catch (const std::system_error& ex) {
-                  ec = ex.code();
-                }
+                      if (result.second.fd->is_open())
+                        result.second.file_size = result.second.fd->size();
+                      return result;
+                    });
+              } catch (const std::system_error& ex) {
+                ec = ex.code();
               }
 
               return asio::deferred.values(ec);
@@ -759,21 +747,18 @@ class file_db
           asio::buffer(*tmp_ptr),
           asio::transfer_all(),
           asio::append(asio::deferred, fd_ptr, elem.offset(), tmp_ptr))
-      | asio::deferred(
-          [](std::error_code ec, std::size_t nbytes, std::shared_ptr<fd_type> fd_ptr, auto elem_offset, auto tmp_ptr) {
-            return asio::deferred.when(!ec)
-                .then(
-                    asio::async_write_at(
-                        *fd_ptr,
-                        elem_offset,
-                        asio::buffer(*tmp_ptr),
-                        asio::transfer_all(),
-                        asio::consign(asio::deferred, fd_ptr, tmp_ptr)))
-                .otherwise(asio::deferred.values(ec, nbytes));
+      | detail::err_deferred(
+          [](std::size_t nbytes, std::shared_ptr<fd_type> fd_ptr, auto elem_offset, auto tmp_ptr) {
+            return asio::async_write_at(
+                *fd_ptr,
+                elem_offset,
+                asio::buffer(*tmp_ptr),
+                asio::transfer_all(),
+                asio::consign(asio::deferred, fd_ptr, tmp_ptr));
           })
-      | asio::deferred(
-          [](std::error_code ec, [[maybe_unused]] std::size_t nbytes) {
-            return asio::deferred.values(ec);
+      | detail::err_deferred(
+          []([[maybe_unused]] std::size_t nbytes) {
+            return asio::deferred.values(std::error_code{});
           })
       | ++sync_barrier;
       need_fdatasync = true;
@@ -782,11 +767,9 @@ class file_db
     if (need_fsync || need_fdatasync) {
       std::invoke(sync_barrier, std::error_code());
       sync_barrier.async_on_ready(asio::append(asio::deferred, files_iter->second.fd, need_fsync))
-      | asio::deferred(
-          [](std::error_code ec, auto fd_ptr, bool need_fsync) {
-            return asio::deferred.when(!ec)
-                .then(fd_ptr->async_flush(!need_fsync, asio::consign(asio::deferred, fd_ptr)))
-                .otherwise(asio::deferred.values(ec));
+      | detail::err_deferred(
+          [](auto fd_ptr, bool need_fsync) {
+            return fd_ptr->async_flush(!need_fsync, asio::consign(asio::deferred, fd_ptr));
           })
       | ++barrier;
     }
@@ -819,26 +802,22 @@ class file_db
         *stream,
         xdr_writer<>() & xdr_constant(std::move(ns_map)),
         asio::append(asio::deferred, this->wal, stream))
-    | asio::deferred(
-        [](std::error_code ec, auto wal, auto stream) {
+    | detail::err_deferred(
+        [](auto wal, auto stream) {
           const auto data_len = stream->cdata().size();
-          return asio::deferred.when(!ec)
-              .then(
-                  wal->async_append(
-                      std::initializer_list<typename wal_type::write_variant_type>{
-                        wal_record_truncate_file{
-                          .file{"", std::string(namespaces_filename)},
-                          .new_size=data_len,
-                        },
-                        wal_record_modify_file_write32{
-                          .file{"", std::string(namespaces_filename)},
-                          .file_offset=0,
-                          .data=std::move(*stream).data(),
-                        },
-                      },
-                      asio::deferred)
-                  )
-              .otherwise(asio::deferred.values(ec));
+          return wal->async_append(
+              std::initializer_list<typename wal_type::write_variant_type>{
+                wal_record_truncate_file{
+                  .file{"", std::string(namespaces_filename)},
+                  .new_size=data_len,
+                },
+                wal_record_modify_file_write32{
+                  .file{"", std::string(namespaces_filename)},
+                  .file_offset=0,
+                  .data=std::move(*stream).data(),
+                },
+              },
+              asio::deferred);
         });
   }
 
@@ -1478,37 +1457,31 @@ class transaction {
   auto commit_op_(detail::move_only_function<void(std::error_code)> handler, bool delay_sync = false) {
     std::invoke(pimpl_->wait_for_writes_, std::error_code()); // Complete the writes (further write attempts will now throw an exception).
     return pimpl_->wait_for_writes_.async_on_ready(asio::append(asio::deferred, pimpl_, delay_sync))
-    | asio::deferred(
-        [](std::error_code ec, auto impl, bool delay_sync) mutable {
-          return asio::deferred.when(!ec)
-              .then(impl->writes_mon_.async_shared(asio::append(asio::prepend(asio::deferred, ec), impl, delay_sync), __FILE__, __LINE__))
-              .otherwise(asio::deferred.values(ec, typename monitor_type::shared_lock{}, impl, delay_sync));
+    | detail::err_deferred(
+        [](auto impl, bool delay_sync) mutable {
+          return impl->writes_mon_.async_shared(asio::append(asio::prepend(asio::deferred, std::error_code{}), impl, delay_sync), __FILE__, __LINE__);
         })
-    | asio::deferred(
-        [](std::error_code ec, typename monitor_type::shared_lock lock, auto impl, bool delay_sync) {
+    | detail::err_deferred(
+        [](typename monitor_type::shared_lock lock, auto impl, bool delay_sync) {
           auto writes = std::vector<typename file_db::wal_type::write_variant_type, rebind_alloc<typename file_db::wal_type::write_variant_type>>(impl->alloc_);
-          if (!ec) {
-            std::for_each(
-                impl->writes_map_->cbegin(), impl->writes_map_->cend(),
-                [&writes](const auto& wmap_pair) {
-                  commit_elems_(wmap_pair.first, *wmap_pair.second, std::back_inserter(writes));
-                });
-          }
+          std::for_each(
+              impl->writes_map_->cbegin(), impl->writes_map_->cend(),
+              [&writes](const auto& wmap_pair) {
+                commit_elems_(wmap_pair.first, *wmap_pair.second, std::back_inserter(writes));
+              });
 
-          return asio::deferred.when(!ec)
-              .then(
-                  impl->fdb_->wal->async_append(
-                      std::move(writes),
-                      asio::consign(asio::append(asio::deferred, impl), lock),
-                      can_commit_op_(impl->fdb_, impl->writes_map_, impl->alloc_),
-                      delay_sync))
-              .otherwise(asio::deferred.values(ec, impl));
+          return impl->fdb_->wal->async_append(
+              std::move(writes),
+              asio::consign(asio::append(asio::deferred, impl), lock),
+              can_commit_op_(impl->fdb_, impl->writes_map_, impl->alloc_),
+              delay_sync);
         })
-    | asio::deferred(
-        [](std::error_code ec, auto impl) {
-          if (!ec) impl->on_commit_events_->run();
-          return asio::deferred.values(ec, impl);
-        })
+    | detail::err_deferred(
+        [](auto impl) {
+          impl->on_commit_events_->run();
+          return asio::deferred.values(std::error_code{}, impl);
+        },
+        pimpl_)
     | asio::deferred(
         [](std::error_code ec, auto impl) {
           if (!ec)
@@ -1521,41 +1494,43 @@ class transaction {
   }
 
   static auto can_commit_op_(std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap, allocator_type allocator) {
-    return compute_replacements_map_op_(fdb, allocator)
-    | asio::prepend(asio::deferred, fdb, wmap)
-    | asio::deferred(
-        [](std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap, std::shared_ptr<const locked_file_replacements> fr_map) mutable {
-          return detail::deferred_on_executor<void(std::error_code)>(
-              [](std::shared_ptr<const locked_file_replacements> fr_map, std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap) {
-                std::error_code ec;
-                const bool writes_are_valid = std::all_of(
-                    wmap->begin(), wmap->end(),
-                    [&](const auto& wmap_entry) {
-                      const auto files_iter = fdb->files.find(wmap_entry.first);
-                      const bool files_iter_is_end = (files_iter == fdb->files.end());
-                      const bool files_iter_exists = (files_iter_is_end ? false : files_iter->second.fd->is_open());
-                      const auto files_iter_f_size = (files_iter_is_end || !files_iter_exists ? 0u : files_iter->second.fd->size());
+    return [=]() {
+        return compute_replacements_map_op_(fdb, allocator)
+        | asio::prepend(asio::deferred, fdb, wmap)
+        | asio::deferred(
+            [](std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap, std::shared_ptr<const locked_file_replacements> fr_map) mutable {
+              return detail::deferred_on_executor<void(std::error_code)>(
+                  [](std::shared_ptr<const locked_file_replacements> fr_map, std::shared_ptr<file_db> fdb, std::shared_ptr<const writes_map> wmap) {
+                    std::error_code ec;
+                    const bool writes_are_valid = std::all_of(
+                        wmap->begin(), wmap->end(),
+                        [&](const auto& wmap_entry) {
+                          const auto files_iter = fdb->files.find(wmap_entry.first);
+                          const bool files_iter_is_end = (files_iter == fdb->files.end());
+                          const bool files_iter_exists = (files_iter_is_end ? false : files_iter->second.fd->is_open());
+                          const auto files_iter_f_size = (files_iter_is_end || !files_iter_exists ? 0u : files_iter->second.fd->size());
 
-                      const auto fr_iter = fr_map->fr->find(wmap_entry.first);
-                      const auto fr_iter_is_end = (fr_iter == fr_map->fr->end());
-                      const bool exists = (fr_iter_is_end ? files_iter_exists : fr_iter->second.exists.value_or(files_iter_exists));
-                      const auto f_size = (fr_iter_is_end ? files_iter_f_size : fr_iter->second.file_size.value_or(files_iter_f_size));
+                          const auto fr_iter = fr_map->fr->find(wmap_entry.first);
+                          const auto fr_iter_is_end = (fr_iter == fr_map->fr->end());
+                          const bool exists = (fr_iter_is_end ? files_iter_exists : fr_iter->second.exists.value_or(files_iter_exists));
+                          const auto f_size = (fr_iter_is_end ? files_iter_f_size : fr_iter->second.file_size.value_or(files_iter_f_size));
 
-                      if (wmap_entry.second->created && exists) return false; // Double file-creation.
-                      if (wmap_entry.second->erased && !exists) return false; // Double file-erasure.
+                          if (wmap_entry.second->created && exists) return false; // Double file-creation.
+                          if (wmap_entry.second->erased && !exists) return false; // Double file-erasure.
 
-                      if (wmap_entry.second->file_size.has_value()) return true; // All writes must meet the resize constraint.
-                      if (wmap_entry.second->replacements.empty()) return true; // No writes are outside the file-size.
-                      if (std::prev(wmap_entry.second->replacements.end())->end_offset() > f_size) return false; // Write past EOF.
+                          if (wmap_entry.second->file_size.has_value()) return true; // All writes must meet the resize constraint.
+                          if (wmap_entry.second->replacements.empty()) return true; // No writes are outside the file-size.
+                          if (std::prev(wmap_entry.second->replacements.end())->end_offset() > f_size) return false; // Write past EOF.
 
-                      return true;
-                    });
-                if (!writes_are_valid) ec = make_error_code(file_db_errc::cannot_commit);
+                          return true;
+                        });
+                    if (!writes_are_valid) ec = make_error_code(file_db_errc::cannot_commit);
 
-                return asio::deferred.values(ec);
-              },
-              fdb->strand_, std::move(fr_map), std::move(fdb), std::move(wmap));
-        });
+                    return asio::deferred.values(ec);
+                  },
+                  fdb->strand_, std::move(fr_map), std::move(fdb), std::move(wmap));
+            });
+    };
   }
 
   template<typename InsertIter>

@@ -18,6 +18,7 @@
 #include <earnest/detail/completion_barrier.h>
 #include <earnest/detail/completion_handler_fun.h>
 #include <earnest/detail/completion_wrapper.h>
+#include <earnest/detail/err_deferred.h>
 #include <earnest/detail/fanout.h>
 #include <earnest/detail/on_scope_exit.h>
 #include <earnest/wal_error.h>
@@ -709,13 +710,8 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::
                                                    if constexpr(std::is_same_v<no_transaction_validation, std::remove_cvref_t<TransactionValidator>>) {
                                                      return transaction_validator;
                                                    } else {
-                                                     return lde.async_on_ready(asio::append(asio::deferred, std::forward<TransactionValidator>(transaction_validator)))
-                                                     | asio::deferred(
-                                                         [](std::error_code ec, auto transaction_validator) mutable {
-                                                           return asio::deferred.when(!ec)
-                                                               .then(std::move(transaction_validator))
-                                                               .otherwise(asio::deferred.values(ec));
-                                                         });
+                                                     return lde.async_on_ready(asio::deferred)
+                                                     | err_deferred(std::move(transaction_validator));
                                                    }
                                                  };
 
