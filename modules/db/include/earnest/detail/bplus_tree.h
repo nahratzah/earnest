@@ -571,12 +571,12 @@ struct bplus_tree_siblings {
           typename monitor<typename PageType::executor_type, typename PageType::allocator_type>::upgrade_lock,
           typename monitor<typename PageType::executor_type, typename PageType::allocator_type>::shared_lock>;
 
-    auto lock_op = [](pointer_type ptr, auto... locks) {
+    static constexpr auto lock_op = [](pointer_type&& ptr, auto&&... tail_args) {
       return asio::deferred.when(ptr == nullptr)
-          .then(asio::deferred.values(lock_type{}, locks...))
+          .then(asio::deferred.values(tail_args..., lock_type{}))
           .otherwise(
               [ ptr,
-                deferred=asio::append(asio::deferred, locks...)
+                deferred=asio::prepend(asio::deferred, tail_args...)
               ]() mutable {
                 if constexpr(ForWrite)
                   return ptr->page_lock.dispatch_upgrade(std::move(deferred), __FILE__, __LINE__);
@@ -585,18 +585,22 @@ struct bplus_tree_siblings {
               });
     };
 
-    return lock_op(predecessor)
+    return asio::deferred(predecessor, self, successor)
     | asio::deferred(
-        [self=this->self, lock_op](auto predecessor_lock) {
-          return lock_op(self, std::move(predecessor_lock));
+        [](pointer_type predecessor, pointer_type self, pointer_type successor) {
+          return lock_op(std::move(predecessor), std::move(self), std::move(successor));
         })
     | asio::deferred(
-        [successor=this->successor, lock_op](auto self_lock, auto predecessor_lock) {
-          return lock_op(successor, std::move(self_lock), std::move(predecessor_lock));
+        [](pointer_type self, pointer_type successor, lock_type predecessor_lock) {
+          return lock_op(std::move(self), std::move(successor), std::move(predecessor_lock));
         })
     | asio::deferred(
-        [](auto successor_lock, auto self_lock, auto predecessor_lock) {
-          return asio::deferred.values(
+        [](pointer_type successor, lock_type predecessor_lock, lock_type self_lock) {
+          return lock_op(std::move(successor), std::move(predecessor_lock), std::move(self_lock));
+        })
+    | asio::deferred(
+        [](lock_type predecessor_lock, lock_type self_lock, lock_type successor_lock) {
+          return asio::deferred(
               std::array<lock_type, 3>{
                 std::move(predecessor_lock),
                 std::move(self_lock),
@@ -1116,13 +1120,16 @@ class bplus_tree_page
 
   template<bool ParentForWrite, typename SiblingPageType = bplus_tree_page>
   auto sibling_page_op(std::bool_constant<ParentForWrite> parent_for_write) const {
+    using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
+    using monitor_uplock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::upgrade_lock;
     using siblings_type = bplus_tree_siblings<SiblingPageType>;
     using page_ptr = cycle_ptr::cycle_gptr<bplus_tree_page>;
+    using parent_lock_type = std::conditional_t<ParentForWrite, monitor_uplock_type, monitor_shlock_type>;
 
-    return async_parent_page(std::move(parent_for_write), asio::deferred)
-    | asio::deferred(
-        [self=this->shared_from_this(this)](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent, auto parent_lock) {
-          return asio::deferred.when(!ec && parent != nullptr)
+    return async_parent_page(std::move(parent_for_write), asio::append(asio::deferred, this->shared_from_this(this)))
+    | err_deferred(
+        [](cycle_ptr::cycle_gptr<intr_type> parent, parent_lock_type parent_lock, page_ptr self) {
+          return asio::deferred.when(parent != nullptr)
               .then(
                   [self, parent, parent_lock]() {
                     assert(parent->contains(self->address));
@@ -1135,30 +1142,34 @@ class bplus_tree_page
                       predecessor_address = parent->get_index(self_idx.value() - 1u);
                     successor_address = parent->get_index(self_idx.value() + 1u);
 
-                    return asio::deferred.values(std::error_code(), parent, parent_lock, self, std::move(predecessor_address), std::move(successor_address));
+                    return asio::deferred.values(std::error_code{}, parent, parent_lock, self, std::move(predecessor_address), std::move(successor_address));
                   })
-              .otherwise(asio::deferred.values(ec, parent, parent_lock, self, std::optional<db_address>(), std::optional<db_address>()));
+              .otherwise(asio::deferred.values(std::error_code{}, parent, parent_lock, self, std::optional<db_address>(), std::optional<db_address>()));
         })
-    | asio::deferred(
-        [](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent, auto parent_lock, page_ptr self, std::optional<db_address> predecessor_address, std::optional<db_address> successor_address) {
+    | err_deferred(
+        [](cycle_ptr::cycle_gptr<intr_type> parent, parent_lock_type parent_lock, page_ptr self, std::optional<db_address> predecessor_address, std::optional<db_address> successor_address) {
+          cycle_ptr::cycle_gptr<raw_db_type> raw_db;
+          raw_db = self->raw_db.lock();
+          std::error_code ec;
+          if (raw_db == nullptr) [[unlikely]] ec = make_error_code(db_errc::data_expired);
+
+          return asio::deferred.values(std::move(ec), std::move(raw_db), std::move(parent), std::move(parent_lock), std::move(self), std::move(predecessor_address), std::move(successor_address));
+        })
+    | err_deferred(
+        [](cycle_ptr::cycle_gptr<raw_db_type> raw_db, cycle_ptr::cycle_gptr<intr_type> parent, parent_lock_type parent_lock, page_ptr self, std::optional<db_address> predecessor_address, std::optional<db_address> successor_address) {
           const bool need_to_load_things = (predecessor_address.has_value() || successor_address.has_value());
 
-          cycle_ptr::cycle_gptr<raw_db_type> raw_db;
-          if (!ec) {
-            raw_db = self->raw_db.lock();
-            if (raw_db == nullptr) [[unlikely]] ec = make_error_code(db_errc::data_expired);
-          }
-
           const std::shared_ptr<std::array<page_ptr, 3>> state;
-          if (!ec && need_to_load_things) {
+          if (need_to_load_things) {
             state = std::make_shared<std::array<page_ptr, 3>>();
             (*state)[1] = self;
           }
 
-          return asio::deferred.when(!ec && need_to_load_things)
+          auto deferred_load_appends = asio::append(asio::deferred, parent, parent_lock, state);
+          return asio::deferred.when(need_to_load_things)
               .then(
-                  asio::async_initiate<decltype(asio::deferred), void()>(
-                      [state](auto handler, std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, std::optional<db_address> predecessor_address, std::optional<db_address> successor_address) -> void {
+                  asio::async_initiate<decltype(deferred_load_appends), void(std::error_code)>(
+                      [](auto handler, std::shared_ptr<std::array<page_ptr, 3>> state, std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, std::optional<db_address> predecessor_address, std::optional<db_address> successor_address) -> void {
                         // We load the predecessor and successor in parallel.
                         auto barrier = make_completion_barrier(std::move(handler));
 
@@ -1194,16 +1205,16 @@ class bplus_tree_page
                         }
                         std::invoke(barrier, std::error_code());
                       },
-                      asio::deferred,
-                      self->spec, std::move(raw_db), predecessor_address, successor_address)
-                  | asio::deferred(
-                      [state, parent, parent_lock, self](std::error_code ec) mutable {
-                        return asio::deferred.values(ec, std::move(parent), std::move(parent_lock), (*state)[0], (*state)[1], (*state)[2]);
+                      deferred_load_appends,
+                      state, self->spec, std::move(raw_db), predecessor_address, successor_address)
+                  | err_deferred(
+                      [](cycle_ptr::cycle_gptr<intr_type> parent, parent_lock_type parent_lock, std::shared_ptr<std::array<page_ptr, 3>> state) {
+                        return asio::deferred.values(std::error_code{}, std::move(parent), std::move(parent_lock), std::move((*state)[0]), std::move((*state)[1]), std::move((*state)[2]));
                       }))
-              .otherwise(asio::deferred.values(ec, parent, parent_lock, page_ptr(nullptr), self, page_ptr(nullptr)));
+              .otherwise(asio::deferred.values(std::error_code{}, parent, parent_lock, nullptr, self, nullptr));
         })
-    | asio::deferred(
-        [](std::error_code ec, cycle_ptr::cycle_gptr<intr_type> parent, auto parent_lock, page_ptr predecessor, page_ptr self, page_ptr successor) {
+    | err_deferred(
+        [](cycle_ptr::cycle_gptr<intr_type> parent, parent_lock_type parent_lock, page_ptr predecessor, page_ptr self, page_ptr successor) {
           auto cast = [](std::error_code& ec, page_ptr ptr) {
             if constexpr(std::is_same_v<std::remove_cv_t<SiblingPageType>, bplus_tree_page>) {
               return ptr;
@@ -1215,11 +1226,13 @@ class bplus_tree_page
             }
           };
 
+          std::error_code ec;
           auto siblings = siblings_type(cast(ec, predecessor), cast(ec, self), cast(ec, successor));
           assert(siblings.self != nullptr);
 
           return asio::deferred.values(std::move(ec), std::move(parent), std::move(parent_lock), std::move(siblings));
-        });
+        },
+        cycle_ptr::cycle_gptr<intr_type>{}, parent_lock_type{}, siblings_type{});
   }
 
   // Must lock:
@@ -1840,15 +1853,16 @@ class bplus_tree_intr final
       std::span<const std::byte> child_augment,
       std::uint32_t level,
       CompletionToken&& token) {
-    using tx_file_type = typename raw_db_type::template fdb_transaction<TxAlloc>::file;
+    using tx_type = typename raw_db_type::template fdb_transaction<TxAlloc>;
+    using tx_file_type = typename tx_type::file;
     using stream_type = positional_stream_adapter<tx_file_type>;
     using page_type = bplus_tree_page<RawDbType>;
 
     return asio::async_initiate<CompletionToken, void(std::error_code, cycle_ptr::cycle_gptr<bplus_tree_intr>)>(
         [](auto handler, typename raw_db_type::template fdb_transaction<TxAlloc> tx, DbAlloc db_alloc, std::shared_ptr<const bplus_tree_spec> spec, cycle_ptr::cycle_gptr<raw_db_type> raw_db, std::uint64_t parent_offset, std::uint64_t child_offset, std::span<const std::byte> child_augment, std::uint32_t level) -> void {
-          db_alloc.async_allocate(tx, spec->bytes_per_intr(), asio::deferred)
+          db_alloc.async_allocate(tx, spec->bytes_per_intr(), asio::append(asio::deferred, tx, raw_db, spec, parent_offset, child_offset, child_augment, level))
           | err_deferred(
-              [tx, raw_db, spec, parent_offset, child_offset, child_augment, level](db_address addr) mutable {
+              [](db_address addr, tx_type tx, cycle_ptr::cycle_gptr<raw_db_type> raw_db, std::shared_ptr<const bplus_tree_spec> spec, std::uint64_t parent_offset, std::uint64_t child_offset, std::span<const std::byte> child_augment, std::uint32_t level) mutable {
                 cycle_ptr::cycle_gptr<bplus_tree_intr> new_page = cycle_ptr::allocate_cycle<bplus_tree_intr>(raw_db->get_cache_allocator(), spec, raw_db, std::move(addr), bplus_tree_page_header{.level=level, .parent=parent_offset});
                 new_page->hdr_.size = 0u;
 
@@ -1861,7 +1875,7 @@ class bplus_tree_intr final
                     boost::endian::native_to_big_inplace(child_offset_be);
                     auto child_offset_be_span = std::as_bytes(std::span<std::uint64_t, 1>(&child_offset_be, 1));
                     auto new_element_span = new_page->element_span(0);
-                    if (new_element_span.size() != child_offset_be_span.size())
+                    if (new_element_span.size() != child_offset_be_span.size()) [[unlikely]]
                       ec = make_error_code(xdr_errc::encoding_error);
                     else
                       std::copy(child_offset_be_span.begin(), child_offset_be_span.end(), new_element_span.begin());
@@ -3730,23 +3744,26 @@ class bplus_tree
     using monitor_shlock_type = typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock;
     using page_variant = std::variant<cycle_ptr::cycle_gptr<intr_type>, cycle_ptr::cycle_gptr<leaf_type>>;
 
-    auto self = this->shared_from_this(this);
-
-    return self->page_lock.dispatch_shared(asio::deferred, __FILE__, __LINE__)
+    return this->page_lock.dispatch_shared(asio::prepend(asio::deferred, this->shared_from_this(this)), __FILE__, __LINE__)
     | asio::deferred(
-        [self](monitor_shlock_type tree_lock) {
-          const auto load_offset = self->hdr_.root;
-
+        [](cycle_ptr::cycle_gptr<bplus_tree> self, monitor_shlock_type tree_lock) {
           std::error_code ec;
           auto raw_db = self->raw_db.lock();
           if (raw_db == nullptr || self->erased_) ec = make_error_code(db_errc::data_expired);
 
-          return asio::deferred.when(!ec && load_offset != nil_page)
+          return asio::deferred.values(std::move(ec), std::move(raw_db), std::move(self), std::move(tree_lock));
+        })
+    | err_deferred(
+        [](cycle_ptr::cycle_gptr<raw_db_type> raw_db, cycle_ptr::cycle_gptr<bplus_tree> self, monitor_shlock_type tree_lock) {
+          const auto load_offset = self->hdr_.root;
+
+          return asio::deferred.when(load_offset != nil_page)
               .then(
-                  page_type::async_load_op(self->spec, raw_db, db_address(self->address.file, load_offset))
-                  | asio::append(asio::deferred, tree_lock))
-              .otherwise(asio::deferred.values(std::error_code(), page_variant(), tree_lock));
-        });
+                  page_type::async_load_op(self->spec, std::move(raw_db), db_address(self->address.file, load_offset))
+                  | asio::append(asio::consign(asio::deferred, self), tree_lock))
+              .otherwise(asio::deferred.values(std::error_code{}, page_variant(), tree_lock));
+        },
+        page_variant{}, monitor_shlock_type{});
   }
 
   template<typename TxAlloc>
@@ -5850,24 +5867,23 @@ class bplus_tree
               .then(leaf->async_set_use_list_diskonly_op(tx, elem_ref->index, bplus_tree_leaf_use_element::used, asio::append(asio::deferred, tx, leaf, leaf_lock, elem_ref, elem_lock)))
               .otherwise(asio::deferred.values(ec, tx, leaf, leaf_lock, elem_ref, elem_lock));
         })
-    | asio::deferred(
-        [](std::error_code ec, tx_type tx, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, bplus_element_reference<raw_db_type, false> elem_ref, monitor_uplock_type elem_lock) {
-          if (!ec) [[likely]] {
-            tx.on_commit(
-                [leaf, leaf_lock, elem_ref, elem_lock]() mutable -> void {
-                  std::move(elem_lock).dispatch_exclusive(
-                      asio::consign(
-                          [ leaf=std::move(leaf),
-                            elem_ref=std::move(elem_ref)
-                          ]([[maybe_unused]] monitor_exlock_type elem_lock) -> void {
-                            leaf->use_list_span()[elem_ref->index] = bplus_tree_leaf_use_element::used;
-                          },
-                          std::move(leaf_lock)),
-                      __FILE__, __LINE__);
-                });
-          }
-          return asio::deferred.values(ec, elem_ref);
-        });
+    | err_deferred(
+        [](tx_type tx, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock, bplus_element_reference<raw_db_type, false> elem_ref, monitor_uplock_type elem_lock) {
+          tx.on_commit(
+              [leaf, leaf_lock, elem_ref, elem_lock]() mutable -> void {
+                std::move(elem_lock).dispatch_exclusive(
+                    asio::consign(
+                        [ leaf=std::move(leaf),
+                          elem_ref=std::move(elem_ref)
+                        ]([[maybe_unused]] monitor_exlock_type elem_lock) -> void {
+                          leaf->use_list_span()[elem_ref->index] = bplus_tree_leaf_use_element::used;
+                        },
+                        std::move(leaf_lock)),
+                    __FILE__, __LINE__);
+              });
+          return asio::deferred.values(std::error_code{}, elem_ref);
+        },
+        bplus_element_reference<raw_db_type, false>{});
   }
 
   template<typename TxAlloc>
@@ -5878,24 +5894,22 @@ class bplus_tree
     | asio::deferred(
         [](cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, false> elem_ref, TxAlloc tx_alloc, bool delay_flush) {
           std::error_code ec;
-          tx_type tx;
-          cycle_ptr::cycle_gptr<raw_db_type> raw_db = self->raw_db.lock();
-          if (raw_db == nullptr) [[unlikely]]
-            ec = make_error_code(db_errc::data_expired);
-          else
-            tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
+          auto raw_db = self->raw_db.lock();
+          if (raw_db == nullptr) [[unlikely]] ec = make_error_code(db_errc::data_expired);
+          return asio::deferred.values(std::move(ec), std::move(raw_db), std::move(self), std::move(elem_ref), std::move(tx_alloc), std::move(delay_flush));
+        })
+    | err_deferred(
+        [](cycle_ptr::cycle_gptr<raw_db_type> raw_db, cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, false> elem_ref, TxAlloc tx_alloc, bool delay_flush) {
+          tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
 
-          return asio::deferred.when(!ec)
-              .then(
-                  self->promote_element_op_(tx, elem_ref)
-                  | asio::deferred(
-                      [tx, delay_flush](std::error_code ec, bplus_element_reference<raw_db_type, false> elem_ref) mutable {
-                        return asio::deferred.when(!ec)
-                            .then(tx.async_commit(asio::append(asio::deferred, elem_ref), delay_flush))
-                            .otherwise(asio::deferred.values(ec, elem_ref));
-                      }))
-              .otherwise(asio::deferred.values(ec, elem_ref));
-        });
+          return self->promote_element_op_(tx, elem_ref)
+          | asio::append(asio::deferred, tx, delay_flush);
+        })
+    | err_deferred(
+        [](bplus_element_reference<raw_db_type, false> elem_ref, tx_type tx, bool delay_flush) mutable {
+          return tx.async_commit(asio::append(asio::deferred, elem_ref), delay_flush);
+        },
+        bplus_element_reference<raw_db_type, false>{});
   }
 
   // tx should be a read-commited writeable transaction.
@@ -5943,30 +5957,26 @@ class bplus_tree
 
           return asio::deferred.values(ec, tx, self, elem, elem_lock, leaf, leaf_lock);
         })
-    | asio::deferred(
-        [](std::error_code ec, tx_type tx, cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, false> elem, monitor_uplock_type elem_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
-          if (!ec) {
-            tx.on_commit(
-                [elem, elem_lock, leaf, leaf_lock]() mutable -> void {
-                  std::move(elem_lock).dispatch_exclusive(
-                      asio::consign(
-                          [leaf, elem]([[maybe_unused]] monitor_exlock_type elem_lock) -> void {
-                            leaf->use_list_span()[elem->index] = bplus_tree_leaf_use_element::ghost_delete;
-                          },
-                          leaf_lock),
-                      __FILE__, __LINE__);
-                });
-          }
+    | err_deferred(
+        [](tx_type tx, cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, false> elem, monitor_uplock_type elem_lock, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
+          tx.on_commit(
+              [elem, elem_lock, leaf, leaf_lock]() mutable -> void {
+                std::move(elem_lock).dispatch_exclusive(
+                    asio::consign(
+                        [leaf, elem]([[maybe_unused]] monitor_exlock_type elem_lock) -> void {
+                          leaf->use_list_span()[elem->index] = bplus_tree_leaf_use_element::ghost_delete;
+                        },
+                        leaf_lock),
+                    __FILE__, __LINE__);
+              });
 
-          return asio::deferred.when(!ec)
-              .then(leaf->async_set_use_list_diskonly_op(tx, elem->index, bplus_tree_leaf_use_element::ghost_delete, asio::append(asio::consign(asio::deferred, elem, elem_lock), tx, self, leaf, leaf_lock)))
-              .otherwise(asio::deferred.values(ec, tx, self, leaf, leaf_lock));
+          return leaf->async_set_use_list_diskonly_op(tx, elem->index, bplus_tree_leaf_use_element::ghost_delete, asio::append(asio::consign(asio::deferred, elem, elem_lock), tx, self, leaf, leaf_lock));
         })
-    | asio::deferred(
-        [](std::error_code ec, tx_type tx, cycle_ptr::cycle_gptr<bplus_tree> self, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
+    | err_deferred(
+        [](tx_type tx, cycle_ptr::cycle_gptr<bplus_tree> self, cycle_ptr::cycle_gptr<bplus_tree_leaf<raw_db_type>> leaf, monitor_uplock_type leaf_lock) {
           const bool has_augments = !self->spec->element.augments.empty();
 
-          if (!ec && has_augments) {
+          if (has_augments) {
             // Ensure augments are fixed after commiting.
             tx.on_commit(
                 [leaf, leaf_lock]() mutable -> void {
@@ -5980,9 +5990,9 @@ class bplus_tree
                 });
           }
 
-          return asio::deferred.when(!ec && has_augments)
+          return asio::deferred.when(has_augments)
               .then(leaf->async_set_augment_propagation_required_diskonly_op(tx, asio::consign(asio::deferred, leaf, leaf_lock)))
-              .otherwise(asio::deferred.values(ec));
+              .otherwise(asio::deferred.values(std::error_code{}));
         });
   }
 
@@ -6038,12 +6048,11 @@ class bplus_tree
           auto key_span = std::span<const std::byte>(key.data(), key.size());
           auto value_span = std::span<const std::byte>(value.data(), value.size());
           self->ghost_insert(key_span, value_span, tx_alloc, asio::append(asio::deferred, self, tx_alloc, delay_flush))
-          | asio::deferred(
-              [](std::error_code ec, bplus_element_reference<raw_db_type, false> elem, cycle_ptr::cycle_gptr<bplus_tree> self, TxAlloc tx_alloc, bool delay_flush) {
-                return asio::deferred.when(!ec)
-                    .then(self->promote_element(elem, tx_alloc, asio::deferred, delay_flush))
-                    .otherwise(asio::deferred.values(ec, elem));
-              })
+          | err_deferred(
+              [](bplus_element_reference<raw_db_type, false> elem, cycle_ptr::cycle_gptr<bplus_tree> self, TxAlloc tx_alloc, bool delay_flush) {
+                return self->promote_element(elem, tx_alloc, asio::deferred, delay_flush);
+              },
+              bplus_element_reference<raw_db_type, false>{})
           | std::move(handler);
         },
         token,
@@ -6069,17 +6078,16 @@ class bplus_tree
           std::error_code ec;
           auto raw_db = self->raw_db.lock();
           if (!raw_db) ec = db_errc::data_expired;
-          tx_type tx = raw_db ? raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc) : tx_type{};
-
-          return asio::deferred.when(!ec)
-              .then(self->erase(tx, std::move(elem), asio::append(asio::deferred, tx, delay_flush)))
-              .otherwise(asio::deferred.values(ec, tx, delay_flush));
+          return asio::deferred.values(std::move(ec), std::move(raw_db), std::move(self), std::move(elem), std::move(tx_alloc), std::move(delay_flush));
         })
-    | asio::deferred(
-        [](std::error_code ec, tx_type tx, bool delay_flush) {
-          return asio::deferred.when(!ec)
-              .then(tx.async_commit(asio::deferred, delay_flush))
-              .otherwise(asio::deferred.values(ec));
+    | err_deferred(
+        [](cycle_ptr::cycle_gptr<raw_db_type> raw_db, cycle_ptr::cycle_gptr<bplus_tree> self, bplus_element_reference<raw_db_type, true> elem, TxAlloc tx_alloc, bool delay_flush) {
+          tx_type tx = raw_db->fdb_tx_begin(isolation::read_commited, tx_mode::write_only, tx_alloc);
+          return self->erase(tx, std::move(elem), asio::append(asio::deferred, tx, delay_flush));
+        })
+    | err_deferred(
+        [](tx_type tx, bool delay_flush) {
+          return tx.async_commit(asio::deferred, delay_flush);
         })
     | std::forward<CompletionToken>(token);
   }
