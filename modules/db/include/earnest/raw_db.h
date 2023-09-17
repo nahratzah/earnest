@@ -15,6 +15,7 @@
 #include <earnest/detail/err_deferred.h>
 #include <earnest/detail/handler_traits.h>
 #include <earnest/detail/move_only_function.h>
+#include <earnest/detail/semaphore.h>
 #include <earnest/detail/type_erased_handler.h>
 #include <earnest/dir.h>
 #include <earnest/file_db.h>
@@ -39,10 +40,13 @@ class raw_db
   template<typename T> using key_type = typename cache_type::template key_type<T>;
   template<typename TxAllocator> using fdb_transaction = transaction<file_db_type, TxAllocator>;
 
+  static inline constexpr std::size_t default_max_background_tasks = 64;
+
   private:
   explicit raw_db(executor_type ex, std::shared_ptr<prometheus::Registry> prom_registry, std::string_view db_name, Allocator alloc, allocator_type prom_alloc)
   : fdb_(std::allocate_shared<file_db_type>(prom_alloc, ex, prom_alloc)),
     cache_(*this, prom_registry, db_name, ex, alloc),
+    background_task_semaphore_(ex, default_max_background_tasks, prom_alloc),
     db_name_(db_name)
   {}
 
@@ -72,6 +76,19 @@ class raw_db
           self->async_create_impl_(std::move(d), detail::type_erased_handler<void(std::error_code)>(std::move(handler), self->get_executor()));
         },
         token, this->shared_from_this(this), std::move(d));
+  }
+
+  template<typename CompletionToken>
+  auto async_background_task(CompletionToken&& token) {
+    return background_task_semaphore_.async_wait(std::forward<CompletionToken>(token));
+  }
+
+  auto max_background_tasks() const noexcept -> std::size_t {
+    return background_task_semaphore_.get_semcount();
+  }
+
+  auto max_background_tasks(std::size_t new_background_task_count) noexcept -> void {
+    background_task_semaphore_.set_semcount(new_background_task_count);
   }
 
   private:
@@ -245,6 +262,7 @@ class raw_db
 
   std::shared_ptr<file_db_type> fdb_;
   cache_type cache_;
+  detail::semaphore<executor_type, allocator_type> background_task_semaphore_;
   session_number session_number_ = 0;
   const std::string db_name_;
   const std::shared_ptr<spdlog::logger> logger = get_logger();

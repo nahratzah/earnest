@@ -1255,33 +1255,37 @@ class bplus_tree_page
     // (similar to how what we do with the monitors).
     auto raw_db_allocator = raw_db->get_allocator();
 
-    asio::defer(
-        get_executor(),
-        [self=this->shared_from_this(this), raw_db_allocator]() {
-          self->page_lock.async_shared(
-              [self, raw_db_allocator](auto lock) {
+    raw_db->async_background_task(asio::append(asio::deferred, std::move(raw_db_allocator), this->shared_from_this(this)))
+    | asio::deferred(
+        [](semaphore_lock background_lock, auto raw_db_allocator, cycle_ptr::cycle_gptr<bplus_tree_page> self) {
+          return self->page_lock.async_shared(asio::prepend(asio::deferred, std::move(background_lock), std::move(raw_db_allocator), std::move(self)), __FILE__, __LINE__);
+        })
+    | asio::deferred(
+        [](semaphore_lock background_lock, auto raw_db_allocator, cycle_ptr::cycle_gptr<bplus_tree_page> self, auto self_lock) {
+          auto deferred_completion = asio::append(asio::consign(asio::deferred, std::move(background_lock)), self->logger);
+          return asio::async_initiate<decltype(deferred_completion), void(std::error_code)>(
+              [](auto handler, auto raw_db_allocator, cycle_ptr::cycle_gptr<bplus_tree_page> self, auto self_lock) {
                 self->async_fix_augment_impl_(
-                    [logger=self->logger](std::error_code ec) {
-                      if (!ec)
-                        logger->trace("background augmentation completed");
-                      else if (ec == make_error_code(db_errc::data_expired))
-                        logger->trace("background augmentation aborted: data expired");
-                      else
-                        logger->warn("background augmentation update failed: {}", ec.message());
-                    },
-                    false,
-                    raw_db_allocator,
-                    std::move(lock));
+                    type_erased_handler<void(std::error_code)>(std::move(handler), self->get_executor()),
+                    false, raw_db_allocator, std::move(self_lock));
               },
-              __FILE__, __LINE__);
-        });
+              deferred_completion, std::move(raw_db_allocator), std::move(self), std::move(self_lock));
+        })
+    | [](std::error_code ec, auto logger) {
+        if (!ec)
+          logger->trace("background augmentation completed");
+        else if (ec == make_error_code(db_errc::data_expired))
+          logger->trace("background augmentation aborted: data expired");
+        else
+          logger->warn("background augmentation update failed: {}", ec.message());
+      };
   }
 
   template<typename TxAlloc, typename CompletionToken>
   auto async_fix_augment(TxAlloc tx_alloc, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock page_lock, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [](auto handler, cycle_ptr::cycle_gptr<bplus_tree_page> self, TxAlloc tx_alloc, typename monitor<executor_type, typename raw_db_type::allocator_type>::shared_lock page_lock) {
-          self->async_fix_augment_impl_(std::move(handler), true, std::move(tx_alloc), std::move(page_lock));
+          self->async_fix_augment_impl_(type_erased_handler<void(std::error_code)>(std::move(handler), self->get_executor()), true, std::move(tx_alloc), std::move(page_lock));
         },
         token, this->shared_from_this(this), std::move(tx_alloc), std::move(page_lock));
   }

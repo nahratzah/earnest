@@ -26,6 +26,9 @@ class db
 
   using raw_db<Executor, Allocator>::cache_max_mem;
   using raw_db<Executor, Allocator>::get_session_number;
+
+  using raw_db<Executor, Allocator>::default_max_background_tasks;
+  using raw_db<Executor, Allocator>::max_background_tasks;
 };
 
 
