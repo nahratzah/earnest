@@ -2876,10 +2876,11 @@ class bplus_tree_leaf final
     struct op
     : public std::enable_shared_from_this<op>
     {
-      op(cycle_ptr::cycle_gptr<bplus_tree_leaf> page, cycle_ptr::cycle_gptr<raw_db_type> raw_db) noexcept
+      op(cycle_ptr::cycle_gptr<bplus_tree_leaf> page, cycle_ptr::cycle_gptr<raw_db_type> raw_db, semaphore_lock bglock) noexcept
       : page(std::move(page)),
         logger(this->page->logger),
-        cleanups(raw_db->get_allocator())
+        cleanups(raw_db->get_allocator()),
+        bglock(std::move(bglock))
       {}
 
       op(const op&) = delete;
@@ -3033,11 +3034,21 @@ class bplus_tree_leaf final
       monitor_uplock_type page_uplock;
       monitor_exlock_type page_exlock;
       cleanup_data_vector cleanups;
+      [[maybe_unused]] semaphore_lock bglock;
     };
 
     cycle_ptr::cycle_gptr<raw_db_type> raw_db = this->raw_db.lock();
     if (raw_db == nullptr) return;
-    std::invoke(*std::allocate_shared<op>(raw_db->get_allocator(), this->shared_from_this(this), raw_db));
+
+    raw_db->async_background_task(asio::append(asio::deferred, cycle_ptr::cycle_weak_ptr<bplus_tree_leaf>(this->shared_from_this(this))))
+    | [](semaphore_lock bglock, cycle_ptr::cycle_weak_ptr<bplus_tree_leaf> weak_self) {
+        cycle_ptr::cycle_gptr<bplus_tree_leaf> self = weak_self.lock();
+        if (self != nullptr) {
+          cycle_ptr::cycle_gptr<raw_db_type> raw_db = self->raw_db.lock();
+          if (raw_db == nullptr) return;
+          std::invoke(*std::allocate_shared<op>(raw_db->get_allocator(), std::move(self), raw_db, std::move(bglock)));
+        }
+      };
   }
 
   template<typename TxAlloc>
