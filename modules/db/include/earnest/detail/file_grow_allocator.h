@@ -5,6 +5,7 @@
 #include <asio/async_result.hpp>
 #include <spdlog/spdlog.h>
 
+#include <earnest/asio_context.h>
 #include <earnest/db_address.h>
 #include <earnest/db_error.h>
 #include <earnest/detail/completion_handler_fun.h>
@@ -54,8 +55,17 @@ class file_grow_allocator {
 
   template<typename FdbTxAlloc, typename CompletionToken>
   auto async_allocate(typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, std::size_t bytes, CompletionToken&& token) {
+    return async_allocate(
+        asio_context::null_context(),
+        std::move(fdb_tx), std::move(bytes), std::forward<CompletionToken>(token));
+  }
+
+  template<typename FdbTxAlloc, typename CompletionToken>
+  auto async_allocate(asio_context_ptr caller_ctx, typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, std::size_t bytes, CompletionToken&& token) {
     return asio::async_initiate<CompletionToken, void(std::error_code, db_address)>(
-        [](auto handler, typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, monitor<executor_type, allocator_type> lock, cycle_ptr::cycle_weak_ptr<raw_db_type> weak_raw_db, std::size_t bytes, executor_type ex, std::shared_ptr<spdlog::logger> logger) -> void {
+        [](auto handler, asio_context_ptr caller_ctx, typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, monitor<executor_type, allocator_type> lock, cycle_ptr::cycle_weak_ptr<raw_db_type> weak_raw_db, std::size_t bytes, executor_type ex, std::shared_ptr<spdlog::logger> logger) -> void {
+          auto fn_ctx = caller_ctx->child_context("grow file");
+
           if (fdb_tx.get_isolation() != isolation::read_commited) {
             logger->error("cannot use {} transaction level when calling file_grow_allocator: would not read the correct file size", fdb_tx.get_isolation());
             throw std::logic_error("must use read-commited transaction level");
@@ -70,15 +80,15 @@ class file_grow_allocator {
             return;
           }
 
-          allocation_op_(std::move(fdb_tx), std::move(id), std::move(lock), std::move(bytes), logger)
+          allocation_op_(std::move(fn_ctx), std::move(fdb_tx), std::move(id), std::move(lock), std::move(bytes), logger)
           | type_erased_handler<void(std::error_code, db_address)>(std::move(handler), std::move(ex));
         },
-        token, std::move(fdb_tx), id_, lock_, raw_db_, std::move(bytes), get_executor(), logger);
+        token, std::move(caller_ctx), std::move(fdb_tx), id_, lock_, raw_db_, std::move(bytes), get_executor(), logger);
   }
 
   private:
   template<typename FdbTxAlloc>
-  static auto allocation_op_(typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, monitor<executor_type, allocator_type> lock, std::size_t bytes, std::shared_ptr<spdlog::logger> logger) {
+  static auto allocation_op_(asio_context_ptr fn_ctx, typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, monitor<executor_type, allocator_type> lock, std::size_t bytes, std::shared_ptr<spdlog::logger> logger) {
     return lock.dispatch_exclusive(asio::append(asio::deferred, fdb_tx, id, bytes, logger), __FILE__, __LINE__)
     | asio::deferred(
         [](typename monitor<executor_type, allocator_type>::exclusive_lock lock, typename raw_db_type::template fdb_transaction<FdbTxAlloc> fdb_tx, file_id id, std::size_t bytes, std::shared_ptr<spdlog::logger> logger) mutable {

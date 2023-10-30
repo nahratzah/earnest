@@ -16,3 +16,6 @@
 [submodule "modules/spdlog"]
 	path = modules/spdlog
 	url = https://github.com/gabime/spdlog.git
+[submodule "modules/opentelemetry-cpp"]
+	path = modules/opentelemetry-cpp
+	url = https://github.com/open-telemetry/opentelemetry-cpp.git

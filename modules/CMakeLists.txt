@@ -11,7 +11,9 @@ add_subdirectory(unittest-cpp)
 
 add_subdirectory(prometheus-cpp)
 add_subdirectory(spdlog)
+add_subdirectory(opentelemetry-cpp)
 
+add_subdirectory(execution)
 add_subdirectory(cycle_ptr)
 add_subdirectory(libhoard)
 add_subdirectory(util)

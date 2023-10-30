@@ -12,7 +12,7 @@ target_sources(asio_util
     include/earnest/detail/fanout.h
     include/earnest/detail/positional_stream_adapter.h)
 target_compile_features(asio_util INTERFACE cxx_std_17)
-target_link_libraries(asio_util INTERFACE asio util cycle_ptr spdlog)
+target_link_libraries(asio_util INTERFACE asio util cycle_ptr spdlog opentelemetry_api)
 
 find_package(Boost REQUIRED)
 target_include_directories(asio_util INTERFACE ${Boost_INCLUDE_DIR})
