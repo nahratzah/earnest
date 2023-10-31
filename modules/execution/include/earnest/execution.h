@@ -48,6 +48,9 @@
  *   should advertise `get_completion_scheduler<set_value_t>(LetDone) = ValueSched'.
  *   But if Predecessor were to issue the set_done signal, our `LetDone` adapter
  *   should advertise `get_completion_scheduler<set_value_t>(LetDone) = DoneSched'.
+ * - connect: Whenever a sender and receiver are connected, an operation state must be created.
+ *   Thus, the sender must always be a complete sender.
+ *   We've decided to use typed_sender instead of sender, for the sender-constraint on connect.
  *
  *   Unless both schedulers are the same, this is a contradiction. Even if they have the same type,
  *   they may still be different schedulers. So the only way to deal with that, is to not advertise
@@ -979,7 +982,7 @@ inline constexpr get_stop_token_t get_stop_token{};
 //
 // Returns an operation-state, which can be started to execute the whole chain of operations.
 struct connect_t {
-  template<sender S, receiver R>
+  template<typed_sender S, receiver R>
   constexpr auto operator()(S&& s, R&& r) const
   noexcept(noexcept(_generic_operand_base<>(std::declval<const connect_t&>(), std::declval<S>(), std::declval<R>())))
   -> operation_state decltype(auto) {
