@@ -334,6 +334,50 @@ TEST(lazy_let_value) {
   CHECK_EQUAL(19, x);
 }
 
+TEST(lazy_let_error) {
+  // Confirm type-defs match.
+  using let_error_traits = sender_traits<decltype(just() | lazy_let_error([]([[maybe_unused]] std::exception_ptr ex) { return just(1); }))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<>, std::tuple<int>>,
+      let_error_traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      let_error_traits::error_types<std::variant>>);
+  static_assert(let_error_traits::sends_done == false);
+
+  auto [x] = sync_wait(
+      just()
+      | then([]() -> int { throw std::exception(); }) // test exception
+      | lazy_let_error(
+          [](std::exception_ptr ex) {
+            CHECK(ex != nullptr);
+            return just(19);
+          })
+      ).value();
+  CHECK_EQUAL(19, x);
+}
+
+TEST(lazy_let_done) {
+  // Confirm type-defs match.
+  using let_error_traits = sender_traits<decltype(just() | lazy_let_error([]([[maybe_unused]] std::exception_ptr ex) { return just(1); }))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<>, std::tuple<int>>,
+      let_error_traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      let_error_traits::error_types<std::variant>>);
+  static_assert(let_error_traits::sends_done == false);
+
+  auto [x] = sync_wait(
+      just(0)
+      | lazy_let_done( // this branch isn't taken
+          []() {
+            return just(19);
+          })
+      ).value();
+  CHECK_EQUAL(0, x);
+}
+
 TEST(adapters_are_chainable) {
   // We want to verify that an adapter-chain can be late-bound.
   // In order to allow check this, we create an adapter chain with
@@ -355,6 +399,14 @@ TEST(adapters_are_chainable) {
       | let_value(
           [](int i) {
             return just(i + 1); // returns 5
+          })
+      | let_error(
+          [](std::exception_ptr ex) {
+            return just(10000); // doesn't change anything because there's no exception
+          })
+      | let_done(
+          []() {
+            return just(20000); // doesn't change anything because there's no exception
           })
       | then([](int i) { return i; }); // to make sure the previous adapter will have to deal with |
 
