@@ -1463,31 +1463,7 @@ struct lazy_then_t {
     {}
 
     template<receiver Receiver>
-    friend auto tag_invoke([[maybe_unused]] const connect_t& tag, const impl& self, Receiver&& r)
-    noexcept(noexcept(
-            ::earnest::execution::connect(
-                std::declval<const Sender&>(),
-                wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(std::declval<const Fn&>(), std::declval<Receiver>()))))
-    -> operation_state decltype(auto) {
-      return ::earnest::execution::connect(
-          self.s,
-          wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(self.fn, std::forward<Receiver>(r)));
-    }
-
-    template<receiver Receiver>
-    friend auto tag_invoke([[maybe_unused]] const connect_t& tag, impl& self, Receiver&& r)
-    noexcept(noexcept(
-            ::earnest::execution::connect(
-                std::declval<Sender&>(),
-                wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(std::declval<Fn&>(), std::declval<Receiver>()))))
-    -> operation_state decltype(auto) {
-      return ::earnest::execution::connect(
-          self.s,
-          wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(self.fn, std::forward<Receiver>(r)));
-    }
-
-    template<receiver Receiver>
-    friend auto tag_invoke([[maybe_unused]] const connect_t& tag, impl&& self, Receiver&& r)
+    friend auto tag_invoke([[maybe_unused]] connect_t, impl&& self, Receiver&& r)
     noexcept(noexcept(
             ::earnest::execution::connect(
                 std::declval<Sender>(),
@@ -1781,31 +1757,7 @@ struct lazy_upon_error_t {
     {}
 
     template<receiver Receiver>
-    friend auto tag_invoke([[maybe_unused]] const connect_t& tag, const impl& self, Receiver&& r)
-    noexcept(noexcept(
-            ::earnest::execution::connect(
-                std::declval<const Sender&>(),
-                wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(std::declval<const Fn&>(), std::declval<Receiver>()))))
-    -> operation_state decltype(auto) {
-      return ::earnest::execution::connect(
-          self.s,
-          wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(self.fn, std::forward<Receiver>(r)));
-    }
-
-    template<receiver Receiver>
-    friend auto tag_invoke([[maybe_unused]] const connect_t& tag, impl& self, Receiver&& r)
-    noexcept(noexcept(
-            ::earnest::execution::connect(
-                std::declval<Sender&>(),
-                wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(std::declval<Fn&>(), std::declval<Receiver>()))))
-    -> operation_state decltype(auto) {
-      return ::earnest::execution::connect(
-          self.s,
-          wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(self.fn, std::forward<Receiver>(r)));
-    }
-
-    template<receiver Receiver>
-    friend auto tag_invoke([[maybe_unused]] const connect_t& tag, impl&& self, Receiver&& r)
+    friend auto tag_invoke([[maybe_unused]] connect_t, impl&& self, Receiver&& r)
     noexcept(noexcept(
             ::earnest::execution::connect(
                 std::declval<Sender>(),
@@ -2087,31 +2039,7 @@ struct lazy_upon_done_t {
     {}
 
     template<receiver Receiver>
-    friend auto tag_invoke([[maybe_unused]] const connect_t& tag, const impl& self, Receiver&& r)
-    noexcept(noexcept(
-            ::earnest::execution::connect(
-                std::declval<const Sender&>(),
-                wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(std::declval<const Fn&>(), std::declval<Receiver>()))))
-    -> operation_state decltype(auto) {
-      return ::earnest::execution::connect(
-          self.s,
-          wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(self.fn, std::forward<Receiver>(r)));
-    }
-
-    template<receiver Receiver>
-    friend auto tag_invoke([[maybe_unused]] const connect_t& tag, impl& self, Receiver&& r)
-    noexcept(noexcept(
-            ::earnest::execution::connect(
-                std::declval<Sender&>(),
-                wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(std::declval<Fn&>(), std::declval<Receiver>()))))
-    -> operation_state decltype(auto) {
-      return ::earnest::execution::connect(
-          self.s,
-          wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(self.fn, std::forward<Receiver>(r)));
-    }
-
-    template<receiver Receiver>
-    friend auto tag_invoke([[maybe_unused]] const connect_t& tag, impl&& self, Receiver&& r)
+    friend auto tag_invoke([[maybe_unused]] connect_t, impl&& self, Receiver&& r)
     noexcept(noexcept(
             ::earnest::execution::connect(
                 std::declval<Sender>(),
@@ -2482,7 +2410,7 @@ struct sync_wait_t {
     static auto make_operation_state(execution_context& ex_ctx, OpState&& op_state)
     noexcept(std::is_nothrow_constructible_v<operation_state<std::remove_cvref_t<OpState>>, OpState>)
     -> operation_state<std::remove_cvref_t<OpState>> {
-      return operation_state<std::remove_cvref_t<OpState>>(std::forward<OpState>(op_state));
+      return operation_state<std::remove_cvref_t<OpState>>(ex_ctx, std::forward<OpState>(op_state));
     }
 
     // A sender for this execution context.
@@ -2497,7 +2425,13 @@ struct sync_wait_t {
       static inline constexpr bool sends_done = false;
 
       template<receiver Receiver>
-      friend auto tag_invoke([[maybe_unused]] const connect_t&, const sender& self, Receiver&& r)
+      friend auto tag_invoke([[maybe_unused]] connect_t, const sender& self, Receiver&& r)
+      -> auto {
+        return make_operation_state(self.ex_ctx, just() | std::forward<Receiver>(r));
+      }
+
+      template<receiver Receiver>
+      friend auto tag_invoke([[maybe_unused]] connect_t, sender&& self, Receiver&& r)
       -> auto {
         return make_operation_state(self.ex_ctx, just() | std::forward<Receiver>(r));
       }
