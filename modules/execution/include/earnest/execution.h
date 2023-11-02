@@ -51,18 +51,24 @@
  * - connect: Whenever a sender and receiver are connected, an operation state must be created.
  *   Thus, the sender must always be a complete sender.
  *   We've decided to use typed_sender instead of sender, for the sender-constraint on connect.
+ * - lazy_bulk: the spec says that, if any of the lazy-bulk operations throws an exception, we are to catch-and-forward it.
+ *   We've chosen not to do this, because all implementations of start in the spec are required to catch-and-forward
+ *   exception whenever they occur. So we can rely on the exception handler of the start-invocation instead.
  *
  *   Unless both schedulers are the same, this is a contradiction. Even if they have the same type,
  *   they may still be different schedulers. So the only way to deal with that, is to not advertise
  *   the `get_completion_scheduler's that would thus contradict.
  *
  * 9.6.1 sender traits
+ *
  * Item (5) talks about the error_types, stating that if an error type is emitted that's not in the error_types,
  * that the program shall be ill-formed. However the document itself shows the `just' sender do exactly that:
  * call set_error (with std::exception_ptr) while advertising an empty error_types.
  * I'm pretty sure that's unintentional. But it does leave one wondering what the correct implementation is.
  * I've decided to add std::exception_ptr to the error-types of just.
  *
+ * Item (6) says that if a sender with `sends_done = true` sends a done-signal, the program is ill-formed.
+ * I'm pretty sure that `sends_done = false` was meant here.
  *
  * IMPLEMENTATION
  *
@@ -227,6 +233,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <exception>
+#include <execution>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -498,8 +505,9 @@ struct _sender_traits_<S,
 struct start_t {
   template<typename O>
   auto operator()(O&& o) const
-  noexcept(nothrow_tag_invocable<start_t, O>)
+  noexcept
   -> tag_invoke_result_t<start_t, O> {
+    static_assert(nothrow_tag_invocable<start_t, O>, "start should be a no-except invocation");
     return tag_invoke(*this, std::forward<O>(o));
   }
 };
@@ -869,7 +877,7 @@ class _generic_adapter_t
 {
   public:
   template<typename... Args_>
-  constexpr _generic_adapter_t(const Tag& tag, Args_&&... args)
+  explicit constexpr _generic_adapter_t(const Tag& tag, Args_&&... args)
   noexcept(std::is_nothrow_copy_constructible_v<Tag> && std::is_nothrow_constructible_v<std::tuple<Args...>, Args_...>)
   : tag(tag),
     args(std::forward<Args_>(args)...)
@@ -953,7 +961,7 @@ template<typename Tag, typename... Args>
 constexpr auto _generic_adapter(const Tag& tag, Args&&... args)
 noexcept(std::is_nothrow_constructible_v<_generic_adapter_t<Tag, std::remove_cvref_t<Args>...>, const Tag&, Args...>)
 -> _generic_adapter_t<Tag, std::remove_cvref_t<Args>...> {
-  return {tag, std::forward<Args>(args)...};
+  return _generic_adapter_t<Tag, std::remove_cvref_t<Args>...>(tag, std::forward<Args>(args)...);
 }
 
 
@@ -3837,6 +3845,698 @@ struct let_done_t {
   }
 };
 inline constexpr let_done_t let_done;
+
+
+// Create a bulk-execution adapter.
+// This adapter takes a function argument, and a number N. When it receives the set_value-signal,
+// it'll run the function N times, as if by `for (i=0; i<N; ++i) f(i, args...)'.
+// Afterwards, it'll forward the orginal values.
+//
+// Note that the function will be invoked via non-const lvalue-reference.
+// The args to the set-value signal will be forwarded to the function as by lvalue-reference.
+// The index will be passed by const-reference.
+//
+// Lazy adapters never execute until start is called on the operation-state.
+struct lazy_bulk_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<sender Sender, std::integral Shape, typename Fn>
+  constexpr auto operator()(Sender&& s, Shape&& shape, Fn&& fn) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const lazy_bulk_t&>(), std::declval<Sender>(), std::declval<Shape>(), std::declval<Fn>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s), std::forward<Shape>(shape), std::forward<Fn>(fn));
+  }
+
+  template<std::integral Shape, typename Fn>
+  constexpr auto operator()(Shape&& shape, Fn&& fn) const
+  noexcept(noexcept(_generic_adapter(std::declval<const lazy_bulk_t&>(), std::declval<Shape>(), std::declval<Fn>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Shape>(shape), std::forward<Fn>(fn));
+  }
+
+  private:
+  // The receiver only intercepts the set_value signal.
+  // When it is receiver, it'll do a for-loop on the arguments.
+  // And then pass on the orginal arguments from set_value.
+  template<receiver Receiver, std::integral Shape, typename Fn>
+  class receiver_impl
+  : public _generic_receiver_wrapper<Receiver, set_value_t>
+  {
+    public:
+    receiver_impl(Receiver&& r, Shape&& shape, Fn&& fn)
+    noexcept(
+        std::is_nothrow_move_constructible_v<Receiver> &&
+        std::is_nothrow_move_constructible_v<Shape> &&
+        std::is_nothrow_move_constructible_v<Fn>)
+    : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
+      shape(std::move(shape)),
+      fn(std::move(fn))
+    {}
+
+    template<typename... Args>
+    friend auto tag_invoke([[maybe_unused]] set_value_t, receiver_impl&& self, Args&&... args)
+    noexcept(
+        noexcept(Shape(0)) && noexcept(std::declval<const Shape&>() < std::declval<const Shape&>()) && noexcept(++std::declval<Shape&>()) && // Confirm we can execute the for-loop.
+        std::is_nothrow_invocable_v<Fn, const Shape&, std::add_lvalue_reference_t<std::remove_reference_t<Args>>...> &&
+        noexcept(set_value(std::declval<Receiver>(), std::declval<Args>()...)))
+    -> decltype(auto) {
+      for (Shape i = Shape(0); i < self.shape; ++i)
+        std::invoke(self.fn, std::as_const(i), args...);
+      return set_value(std::move(self.r), std::forward<Args>(args)...);
+    }
+
+    private:
+    [[no_unique_address]] Shape shape;
+    [[no_unique_address]] Fn fn;
+  };
+
+  // The sender simply creates a receiver wrapper when invoked.
+  template<sender Sender, std::integral Shape, typename Fn>
+  class sender_impl
+  : public _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    sender_impl(Sender&& s, Shape&& shape, Fn&& fn)
+    noexcept(
+        std::is_nothrow_move_constructible_v<Sender> &&
+        std::is_nothrow_move_constructible_v<Shape> &&
+        std::is_nothrow_move_constructible_v<Fn>)
+    : _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>(std::move(s)),
+      shape(std::move(shape)),
+      fn(std::move(fn))
+    {}
+
+    sender_impl(Sender&& s, Shape&& shape, const Fn& fn)
+    noexcept(
+        std::is_nothrow_move_constructible_v<Sender> &&
+        std::is_nothrow_move_constructible_v<Shape> &&
+        std::is_nothrow_copy_constructible_v<Fn>)
+    : _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>(std::move(s)),
+      shape(std::move(shape)),
+      fn(fn)
+    {}
+
+    sender_impl(Sender&& s, const Shape& shape, Fn&& fn)
+    noexcept(
+        std::is_nothrow_move_constructible_v<Sender> &&
+        std::is_nothrow_copy_constructible_v<Shape> &&
+        std::is_nothrow_move_constructible_v<Fn>)
+    : _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>(std::move(s)),
+      shape(shape),
+      fn(std::move(fn))
+    {}
+
+    sender_impl(Sender&& s, const Shape& shape, const Fn& fn)
+    noexcept(
+        std::is_nothrow_move_constructible_v<Sender> &&
+        std::is_nothrow_copy_constructible_v<Shape> &&
+        std::is_nothrow_copy_constructible_v<Fn>)
+    : _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>(std::move(s)),
+      shape(shape),
+      fn(fn)
+    {}
+
+    sender_impl(const Sender& s, Shape&& shape, Fn&& fn)
+    noexcept(
+        std::is_nothrow_copy_constructible_v<Sender> &&
+        std::is_nothrow_move_constructible_v<Shape> &&
+        std::is_nothrow_move_constructible_v<Fn>)
+    : _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>(s),
+      shape(std::move(shape)),
+      fn(std::move(fn))
+    {}
+
+    sender_impl(const Sender& s, Shape&& shape, const Fn& fn)
+    noexcept(
+        std::is_nothrow_copy_constructible_v<Sender> &&
+        std::is_nothrow_move_constructible_v<Shape> &&
+        std::is_nothrow_copy_constructible_v<Fn>)
+    : _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>(s),
+      shape(std::move(shape)),
+      fn(fn)
+    {}
+
+    sender_impl(const Sender& s, const Shape& shape, Fn&& fn)
+    noexcept(
+        std::is_nothrow_copy_constructible_v<Sender> &&
+        std::is_nothrow_copy_constructible_v<Shape> &&
+        std::is_nothrow_move_constructible_v<Fn>)
+    : _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>(s),
+      shape(shape),
+      fn(std::move(fn))
+    {}
+
+    sender_impl(const Sender& s, const Shape& shape, const Fn& fn)
+    noexcept(
+        std::is_nothrow_copy_constructible_v<Sender> &&
+        std::is_nothrow_copy_constructible_v<Shape> &&
+        std::is_nothrow_copy_constructible_v<Fn>)
+    : _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>(s),
+      shape(shape),
+      fn(fn)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(
+        std::is_nothrow_constructible_v<
+            receiver_impl<std::remove_cvref_t<Receiver>, Shape, Fn>,
+            Receiver, Shape, Fn> &&
+        noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl<std::remove_cvref_t<Receiver>, Shape, Fn>>())))
+    -> operation_state decltype(auto) {
+      return ::earnest::execution::connect(
+          std::move(self.s),
+          receiver_impl<std::remove_cvref_t<Receiver>, Shape, Fn>(std::forward<Receiver>(r), std::move(self.shape), std::move(self.fn)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    noexcept(std::is_nothrow_constructible_v<
+        sender_impl<std::remove_cvref_t<OtherSender>, Shape, Fn>,
+        OtherSender, Shape, Fn>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Shape, Fn> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Shape, Fn>(std::forward<OtherSender>(other_sender), std::move(shape), std::move(fn));
+    }
+
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) const &
+    noexcept(std::is_nothrow_constructible_v<
+        sender_impl<std::remove_cvref_t<OtherSender>, Shape, Fn>,
+        OtherSender, const Shape&, const Fn&>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Shape, Fn> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Shape, Fn>(std::forward<OtherSender>(other_sender), std::move(shape), std::move(fn));
+    }
+
+    [[no_unique_address]] Shape shape;
+    [[no_unique_address]] Fn fn;
+  };
+
+  template<sender Sender, std::integral Shape, typename Fn>
+  constexpr auto default_impl(Sender&& s, Shape&& shape, Fn&& fn) const
+  noexcept(std::is_nothrow_constructible_v<
+      sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Shape>, std::remove_cvref_t<Fn>>,
+      Sender, Shape, Fn>)
+  -> sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Shape>, std::remove_cvref_t<Fn>> {
+    return sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Shape>, std::remove_cvref_t<Fn>>(
+        std::forward<Sender>(s), std::forward<Shape>(shape), std::forward<Fn>(fn));
+  }
+};
+inline constexpr lazy_bulk_t lazy_bulk;
+
+
+// Create a bulk-execution adapter.
+// This adapter takes a function argument, and a number N. When it receives the set_value-signal,
+// it'll run the function N times, as if by `for (i=0; i<N; ++i) f(i, args...)'.
+// Afterwards, it'll forward the orginal values.
+//
+// Note that the function will be invoked via non-const lvalue-reference.
+// The args to the set-value signal will be forwarded to the function as by lvalue-reference.
+// The index will be passed by const-reference.
+struct bulk_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  // When sender produces the set-done signal, invoke fn.
+  // Fn will return a sender, and we'll run that next.
+  template<sender Sender, std::integral Shape, typename Fn>
+  constexpr auto operator()(Sender&& s, Shape&& shape, Fn&& fn) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const bulk_t&>(), std::declval<Sender>(), std::declval<Shape>(), std::declval<Fn>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s), std::forward<Shape>(shape), std::forward<Fn>(fn));
+  }
+
+  template<std::integral Shape, typename Fn>
+  constexpr auto operator()(Shape&& shape, Fn&& fn) const
+  noexcept(noexcept(_generic_adapter(std::declval<const bulk_t&>(), std::declval<Shape>(), std::declval<Fn>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Shape>(shape), std::forward<Fn>(fn));
+  }
+
+  private:
+  template<sender Sender, std::integral Shape, typename Fn>
+  constexpr auto default_impl(Sender&& s, Shape&& shape, Fn&& fn) const
+  noexcept(noexcept(lazy_bulk(std::declval<Sender>(), std::declval<Shape>(), std::declval<Fn>())))
+  -> sender decltype(auto) {
+    return lazy_bulk(std::forward<Sender>(s), std::forward<Shape>(shape), std::forward<Fn>(fn));
+  }
+};
+inline constexpr bulk_t bulk;
+
+
+// Create the ensure_started adapter.
+// This adapter starts a sender chain early, but still allows attaching receiver.
+//
+// There is no lazy version of ensure_started. Furthermore, an `ensure_started' adapter
+// cannot be part of an incomplete adapter chain. (Because how would we start that?)
+// Furthermore, `ensure_started' may cause the next operation in the chain to run
+// either on the scheduler of the preceding chain, or inside the function context
+// of the start operation. So you should treat it as a `| transfer(<undefined>)'.
+//
+// The implementation creates an intermediate_operation_state, which it holds on to
+// using a shared_ptr. (The intermediate_operation_state derives from outcome_handler,
+// and that's the type used in the chain.)
+//
+// The intermediate_operation_state holds on to
+// - an `outcome_handler' which will hold on to the values until a receiver is attached,
+// - a `Sender | ...'-operation state, which will deliver into the `outcome_handler'.
+//
+// When a receiver is attached and started, the `outcome_handler' is informed of its
+// existence.
+//
+// The `outcome_handler' is a type that:
+// - holds a variant of all the possible outcome types
+// - has a (late-installed) next_receiver_fn, which will pick up the values in the variant
+// - a lock, so that the attachment is safe across threads.
+struct ensure_started_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<typed_sender Sender>
+  constexpr auto operator()(Sender&& s) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const ensure_started_t>(), std::declval<Sender>())))
+  -> typed_sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
+  }
+
+  constexpr auto operator()() const
+  noexcept(noexcept(_generic_adapter(std::declval<const ensure_started_t&>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this);
+  }
+
+  private:
+  // The outcome of the early-started sender.
+  //
+  // An outcome has an `void apply(Receiver&& r) noexcept' function that'll forward its values to a receiver.
+  template<typename Signal, typename...> class outcome;
+  // Outcome for the set-value signal.
+  template<typename... T>
+  class outcome<set_value_t, T...> {
+    public:
+    template<typename... T_>
+    explicit outcome(T_&&... values)
+    noexcept(std::is_nothrow_constructible_v<std::tuple<T...>, T_...>)
+    : values(std::forward<T_>(values)...)
+    {}
+
+    template<receiver_of<T...> Receiver>
+    auto apply(Receiver&& r) noexcept -> void {
+      try {
+        std::apply(
+            [&r]<typename... Args>(Args&&... args) {
+              ::earnest::execution::set_value(std::forward<Receiver>(r), std::forward<Args>(args)...);
+            },
+            std::move(values));
+      } catch (...) {
+        ::earnest::execution::set_error(std::forward<Receiver>(r), std::current_exception());
+      }
+    }
+
+    private:
+    [[no_unique_address]] std::tuple<T...> values;
+  };
+  // Outcome for the set-error signal.
+  template<typename Error>
+  class outcome<set_error_t, Error> {
+    public:
+    template<typename Error_>
+    explicit outcome(Error_&& error)
+    noexcept(std::is_nothrow_constructible_v<Error, Error_>)
+    : error(std::forward<Error_>(error))
+    {}
+
+    template<receiver<Error> Receiver>
+    auto apply(Receiver&& r) noexcept -> void {
+      ::earnest::execution::set_error(std::forward<Receiver>(r), std::move(error));
+    }
+
+    private:
+    [[no_unique_address]] Error error;
+  };
+  // Outcome for the set-done signal.
+  template<>
+  class outcome<set_done_t> {
+    public:
+    explicit outcome() noexcept {}
+
+    template<receiver Receiver>
+    auto apply(Receiver&& r) noexcept -> void {
+      ::earnest::execution::set_done(std::forward<Receiver>(r));
+    }
+  };
+
+  // Helper type, that creates an outcome for a given signal.
+  template<typename Signal>
+  struct outcome_selector {
+    // The actual application of outcome.
+    // We strip away and const/volative/references, so that we have clean types
+    // that we can assign to a tuple.
+    template<typename... T>
+    using type = outcome<Signal, std::remove_cvref_t<T>...>;
+  };
+
+  // Figure out all the outcomes that a given sender can produce.
+  template<typed_sender Sender>
+  struct all_outcomes_ {
+    // Compute all the value-outcomes.
+    // Yields `_type_appender<outcome<set_value_t, ...>, outcome<set_value_t, ...>, ...>'.
+    using computed_value_outcomes = typename sender_traits<Sender>::template value_types<outcome_selector<set_value_t>::template type, _type_appender>;
+
+    // Compute all the error-outcomes from the sender.
+    // Yields `_type_appender<outcome<set_error_t, Error1>, outcome<set_error_t, Error2>, ...>'.
+    using computed_error_outcomes_from_sender =
+        typename sender_traits<Sender>::template error_types<_type_appender>:: // collect all errors (`_type_appender<Error1, Error2, ...>')
+        template transform<outcome_selector<set_error_t>::template type>;      // convert each error-type into an error-outcome.
+
+    // We have the std::exception_ptr error type,
+    // in addition to all the error types from the sender type.
+    using computed_error_outcomes =
+        typename _type_appender<>::merge<                             // Union of outcome-for-exception_ptr, and outcomes-from-sender.
+            _type_appender<outcome<set_error_t, std::exception_ptr>>, // (Note that we may have a duplicate, if sender advertised exception_ptr.
+            computed_error_outcomes_from_sender                       //
+        >::                                                           //
+        template type<_deduplicate<_type_appender>::template type>;   // Deduplicate the error types into a _type_appender.
+
+    // Compute the done-outcomes.
+    // There are no done-outcomes, if the caller doesn't emit the done-signal.
+    using computed_done_outcomes = std::conditional_t<
+        sender_traits<Sender>::sends_done,
+        _type_appender<outcome<set_done_t>>,
+        _type_appender<>>;
+
+    public:
+    // Take the union of the different outcome types.
+    //
+    // We're not deduplicating any, because we're counting on the type-deduplication done by sender_traits.
+    using types = typename _type_appender<>::merge<
+        computed_value_outcomes,
+        computed_error_outcomes,
+        computed_done_outcomes>;
+  };
+  // Figure out all the outcomes that a given sender can produce.
+  // Something of the form: `_type_appender<outcome<...>, outcome<...>, ...>'
+  template<typed_sender Sender>
+  using all_outcomes = typename all_outcomes_<Sender>::types;
+
+  // An outcome selector.
+  //
+  // AllOutcomes: the type `all_outcomes<Sender>'.
+  //
+  // The selector implements the lockable concept, and methods should be called with the lock held.
+  template<typename AllOutcomes, bool SendsDone>
+  class outcome_handler {
+    private:
+    using variant_type = _type_appender<std::monostate>::merge<AllOutcomes>::template type<std::variant>;
+
+    public:
+    using next_receiver_fn = void(void*, outcome_handler&) noexcept;
+
+    public:
+    // Receiver that delivers its signals into a matching outcome_selector.
+    class receiver_impl {
+      public:
+      explicit receiver_impl(std::shared_ptr<outcome_handler> handler) noexcept
+      : handler(handler)
+      {}
+
+      // Handler of the done signal.
+      template<typename... Args>
+      friend auto tag_invoke([[maybe_unused]] set_value_t, receiver_impl&& self, Args&&... args) noexcept -> void {
+        using outcome_type = outcome<set_value_t, std::remove_cvref_t<Args>...>;
+
+        const auto handler = self.clear();
+        std::lock_guard lck{*handler};
+
+        assert(handler->impl.index() == 0 || handler->impl.valueless_by_exception());
+        try {
+          handler->impl.template emplace<outcome_type>(std::forward<Args>(args)...);
+        } catch (...) {
+          handler->impl.template emplace<outcome<set_error_t, std::exception_ptr>>(std::current_exception());
+        }
+
+        // Notify the handler.
+        handler->notify();
+      }
+
+      // Handler of the error signal.
+      template<typename Error>
+      friend auto tag_invoke([[maybe_unused]] set_error_t, receiver_impl&& self, Error&& error) noexcept -> void {
+        using outcome_type = outcome<set_error_t, std::remove_cvref_t<Error>>;
+
+        const auto handler = self.clear();
+        std::lock_guard lck{*handler};
+
+        assert(handler->impl.index() == 0 || handler->impl.valueless_by_exception());
+        handler->impl.template emplace<outcome_type>(std::forward<Error>(error));
+
+        // Notify the handler.
+        handler->notify();
+      }
+
+      // Handler for the done-signal.
+      // If the sender advertises no sending of done, then this function will trip undefined behaviour
+      // (in debug mode, we'll assert).
+      friend auto tag_invoke([[maybe_unused]] set_done_t, receiver_impl&& self) noexcept -> void {
+        using outcome_type = outcome<set_done_t>;
+
+        const auto handler = self.clear();
+        std::lock_guard lck{*handler};
+
+        assert(handler->impl.index() == 0 || handler->impl.valueless_by_exception());
+        assert(SendsDone); // If not advertised as sending a done-signal, we optimize out the done-outcome.
+        if constexpr(SendsDone) handler->impl.template emplace<outcome_type>();
+
+        // Notify the handler.
+        handler->notify();
+      }
+
+      private:
+      auto clear() noexcept -> std::shared_ptr<outcome_handler> {
+        // We need to clear selector.
+        //
+        // But since this is a self-referential pointer, clearing the pointer will cause
+        // this to be destroyed. I'm a little concerned if the final writes to `selector'
+        // will happen before or after the destructor.
+        //
+        // So in order to be safe, I use exchange:
+        // this way, `outcome_selector' will exist until after `selector = nullptr' has
+        // completed.
+        return std::exchange(handler, nullptr);
+      }
+
+      // The handler into which to install the values.
+      // The handler pointer also holds a reference to the shared state (which contains this receiver).
+      // So once the values have been set, the handler should be cleared, or a memory leak will result.
+      std::shared_ptr<outcome_handler> handler;
+    };
+
+    constexpr outcome_handler() noexcept = default;
+
+    // Move/copy are not permitted.
+    outcome_handler(outcome_handler&&) = delete;
+    outcome_handler(const outcome_handler&) = delete;
+    outcome_handler& operator=(outcome_handler&&) = delete;
+    outcome_handler& operator=(const outcome_handler&) = delete;
+
+    // Propagate state to the receiver.
+    //
+    // Should be called as part of the `next_receiver' function.
+    //
+    // Don't acquire a lock on this: the `next_receiver' is always called with the lock held.
+    template<receiver Receiver>
+    auto apply(Receiver&& r) noexcept -> void {
+      std::visit(
+          [&](auto&& oc) {
+            assert((!std::is_same_v<std::monostate, std::remove_cvref_t<decltype(oc)>>));
+
+            if constexpr(!std::is_same_v<std::monostate, std::remove_cvref_t<decltype(oc)>>)
+              oc.apply(std::forward<Receiver>(r));
+          },
+          std::move(impl));
+    }
+
+    // Install the next receiver.
+    // Must be called with the handler lock held.
+    template<receiver Receiver>
+    auto install_next_receiver(Receiver* r) -> void {
+      assert(next_receiver == nullptr && next_receiver_arg == nullptr);
+      next_receiver_arg = r;
+      next_receiver = [](void* void_r, outcome_handler& handler) noexcept {
+        handler.apply(std::move(*static_cast<Receiver*>(void_r)));
+      };
+      notify();
+    }
+
+    // Mark the outcome as a failure.
+    // Must be called with the handler lock held.
+    auto fail(std::exception_ptr ex) noexcept -> void {
+      impl.template emplace<outcome<set_error_t, std::exception_ptr>>(std::move(ex));
+      notify();
+    }
+
+    // Allow the handler to be locked.
+    auto lock() -> void {
+      mtx.lock();
+    }
+
+    // Allow the handler to be unlocked.
+    auto unlock() -> void {
+      mtx.unlock();
+    }
+
+    private:
+    // Notify a change in impl or next_receiver.
+    //
+    // If both impl and next_receiver are ready to propagate a signal,
+    // the signal shall be propagated.
+    auto notify() noexcept -> void {
+      if (!std::holds_alternative<std::monostate>(impl) && next_receiver != nullptr)
+        std::invoke(next_receiver, next_receiver_arg, *this);
+    }
+
+    std::mutex mtx;
+    variant_type impl;
+
+    // We use two pointers for the next-receiver invocation:
+    // - next_receiver_arg: the void* for the receiver
+    // - next_receiver_fn: a function which handles applying the outcome_handler to the receiver.
+    //   The receiver is passed through as the void* argument.
+    //
+    // The reason for this is that we'll not need to run a constructor.
+    // (Aka it's cheaper this way than using a move_only_function.)
+    void* next_receiver_arg{nullptr};
+    next_receiver_fn* next_receiver{nullptr};
+  };
+
+  // Hold on to the operation-state of the sender,
+  // and to the outcomes.
+  template<typed_sender Sender>
+  class intermediate_operation_state
+  : public outcome_handler<all_outcomes<Sender>, sender_traits<Sender>::sends_done>,
+    public std::enable_shared_from_this<intermediate_operation_state<Sender>>
+  {
+    private:
+    using outcome_handler_type = outcome_handler<all_outcomes<Sender>, sender_traits<Sender>::sends_done>;
+    using nested_operation_state_type = std::remove_cvref_t<decltype(::earnest::execution::connect(std::declval<Sender>(), std::declval<typename outcome_handler_type::receiver_impl>()))>;
+
+    public:
+    intermediate_operation_state() = default;
+
+    // Operation state is not copyable/moveable.
+    intermediate_operation_state(const intermediate_operation_state&) = delete;
+    intermediate_operation_state(intermediate_operation_state&&) = delete;
+    intermediate_operation_state& operator=(const intermediate_operation_state&) = delete;
+    intermediate_operation_state& operator=(intermediate_operation_state&&) = delete;
+
+    // Create the nested operation state and start execution.
+    auto start(Sender&& s) noexcept -> void {
+      try {
+        assert(!nested_operation_state.has_value());
+        receiver auto r = typename outcome_handler_type::receiver_impl(this->shared_from_this()); // Never throws
+        nested_operation_state.emplace(::earnest::execution::connect(std::forward<Sender>(s), std::move(r)));
+        ::earnest::execution::start(*nested_operation_state);
+      } catch (...) {
+        // The spec says we must pass on the exception to the next step in the chain,
+        // by calling `set_error(r, current_exception())'.
+        // This is the equivalent call.
+        std::lock_guard lck{*this};
+        this->fail(std::current_exception());
+      }
+    }
+
+    private:
+    std::optional<nested_operation_state_type> nested_operation_state;
+  };
+
+  // Create an operation state and handler.
+  // Starts the operation state.
+  // And returns only the handler.
+  template<typed_sender Sender>
+  static auto make_handler(Sender&& s)
+  -> std::shared_ptr<outcome_handler<all_outcomes<std::remove_cvref_t<Sender>>, sender_traits<std::remove_cvref_t<Sender>>::sends_done>> {
+    auto handler = std::make_shared<intermediate_operation_state<std::remove_cvref_t<Sender>>>();
+    handler->start(std::forward<Sender>(s));
+    return handler;
+  }
+
+  // The operation state that we will expose.
+  //
+  // This operation state holds on to the outcome handler,
+  // and will at some point, install the next_receiver.
+  template<typename OutcomeHandlerType, receiver Receiver>
+  class opstate {
+    public:
+    explicit opstate(std::shared_ptr<OutcomeHandlerType>&& outcome_handler, Receiver&& r)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : outcome_handler(std::move(outcome_handler)),
+      next_receiver(std::move(r))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
+      std::lock_guard lck{*self.outcome_handler};
+      self.outcome_handler->install_next_receiver(&self.next_receiver);
+    }
+
+    private:
+    std::shared_ptr<OutcomeHandlerType> outcome_handler;
+    Receiver next_receiver;
+  };
+
+  // Implementation of the sender.
+  //
+  // Unlike regular sender-implementations, this time we don't wrap the nested sender.
+  // This is because we have to pass it on, so it can be started, instead.
+  // In addition, we couldn't forward any queries to that sender anyway:
+  // - connect: we would have to override that anyway
+  // - get_completion_scheduler: we cannot know if the next operation in the chain
+  //   will execute on the scheduler of the nested Sender, or inside the function
+  //   context of the calling function.
+  template<typed_sender Sender>
+  class sender_impl
+  : public sender_traits<Sender>
+  {
+    private:
+    using outcome_handler_type = outcome_handler<all_outcomes<Sender>, sender_traits<Sender>::sends_done>;
+
+    public:
+    explicit sender_impl(Sender&& s)
+    noexcept(noexcept(make_handler(std::declval<Sender>())))
+    : handler(make_handler(std::move(s)))
+    {}
+
+    explicit sender_impl(const Sender& s)
+    noexcept(noexcept(make_handler(std::declval<const Sender&>())))
+    : handler(make_handler(std::move(s)))
+    {}
+
+    sender_impl(sender_impl&&) noexcept = default;
+
+    // Disallow copies, because we can only attach once.
+    sender_impl(const sender_impl&) = delete;
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(std::is_nothrow_constructible_v<
+        opstate<outcome_handler_type, std::remove_cvref_t<Receiver>>,
+        std::shared_ptr<outcome_handler_type>, Receiver>)
+    -> opstate<outcome_handler_type, std::remove_cvref_t<Receiver>> {
+      return opstate<outcome_handler_type, std::remove_cvref_t<Receiver>>(std::move(self.handler), std::forward<Receiver>(r));
+    }
+
+    private:
+    std::shared_ptr<outcome_handler_type> handler;
+  };
+
+  // Creates the sender.
+  template<typed_sender Sender>
+  constexpr auto default_impl(Sender&& s) const
+  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<Sender>>, Sender>)
+  -> sender_impl<std::remove_cvref_t<Sender>> {
+    return sender_impl<std::remove_cvref_t<Sender>>(std::forward<Sender>(s));
+  }
+};
+inline constexpr ensure_started_t ensure_started{};
 
 
 } /* namespace earnest::execution */

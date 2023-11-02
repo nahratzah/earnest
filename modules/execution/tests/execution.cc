@@ -378,6 +378,45 @@ TEST(lazy_let_done) {
   CHECK_EQUAL(0, x);
 }
 
+TEST(bulk) {
+  using bulk_traits = sender_traits<decltype(just(0) | bulk(4, [](int idx, int& value) { value += idx; }))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<int>>,
+      bulk_traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      bulk_traits::error_types<std::variant>>);
+  static_assert(bulk_traits::sends_done == false);
+
+  auto [x] = sync_wait(
+      just(0)
+      | bulk(4, [](int idx, int& value) { value += idx; })).value();
+  CHECK_EQUAL(6, x);
+}
+
+TEST(ensure_started) {
+  using ensure_started_traits = sender_traits<decltype(just() | ensure_started())>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<>>,
+      ensure_started_traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      ensure_started_traits::error_types<std::variant>>);
+  static_assert(ensure_started_traits::sends_done == false);
+
+  bool started = false;
+  auto partial = just(7)
+      | lazy_then([&started](int i) {
+            started = true;
+            return i;
+          })
+      | ensure_started();
+  CHECK(started);
+
+  auto [x] = sync_wait(std::move(partial)).value();
+  CHECK_EQUAL(7, x);
+}
+
 TEST(adapters_are_chainable) {
   // We want to verify that an adapter-chain can be late-bound.
   // In order to allow check this, we create an adapter chain with
@@ -408,12 +447,16 @@ TEST(adapters_are_chainable) {
           []() {
             return just(20000); // doesn't change anything because there's no exception
           })
+      | bulk(14, // 14 increments of 5, means it'll return 19
+          []([[maybe_unused]] int, int& i) {
+            ++i;
+          })
       | then([](int i) { return i; }); // to make sure the previous adapter will have to deal with |
 
   auto [x] = sync_wait(
       just()
       | std::move(adapter_chain)).value();
-  CHECK_EQUAL(5, x);
+  CHECK_EQUAL(19, x);
 }
 
 TEST(adapter_chains_are_chainable) {
