@@ -58,6 +58,8 @@
  *   Unless both schedulers are the same, this is a contradiction. Even if they have the same type,
  *   they may still be different schedulers. So the only way to deal with that, is to not advertise
  *   the `get_completion_scheduler's that would thus contradict.
+ * - ensure_started: the spec doesn't require us to hang on to the execution-state of the preceding operation-chain.
+ *   So I opted to throw it away at earliest opportunity.
  *
  * 9.6.1 sender traits
  *
@@ -4474,8 +4476,16 @@ struct ensure_started_t {
     {}
 
     friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
-      std::lock_guard lck{*self.outcome_handler};
-      self.outcome_handler->install_next_receiver(&self.next_receiver);
+      { // Use a scope, to limit the life-time of the lock.
+        std::lock_guard lck{*self.outcome_handler};
+        self.outcome_handler->install_next_receiver(&self.next_receiver);
+      }
+
+      // The spec does not mandate we keep a hold of the execution state.
+      // So... why not shed it right now, and allow the system to reclaim some memory?
+      //
+      // (Requires we don't hold the lock.)
+      self.outcome_handler.reset();
     }
 
     private:
