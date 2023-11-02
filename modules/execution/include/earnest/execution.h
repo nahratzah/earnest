@@ -4458,8 +4458,7 @@ struct ensure_started_t {
   // and to the outcomes.
   template<typed_sender Sender>
   class intermediate_operation_state
-  : public outcome_handler<all_outcomes<Sender>, sender_traits<Sender>::sends_done>,
-    public std::enable_shared_from_this<intermediate_operation_state<Sender>>
+  : public std::enable_shared_from_this<intermediate_operation_state<Sender>>
   {
     private:
     using outcome_handler_type = outcome_handler<all_outcomes<Sender>, sender_traits<Sender>::sends_done>;
@@ -4478,19 +4477,25 @@ struct ensure_started_t {
     auto start(Sender&& s) noexcept -> void {
       try {
         assert(!nested_operation_state.has_value());
-        receiver auto r = typename outcome_handler_type::receiver_impl(this->shared_from_this()); // Never throws
+        receiver auto r = typename outcome_handler_type::receiver_impl(handler_ptr()); // Never throws
         nested_operation_state.emplace(::earnest::execution::connect(std::forward<Sender>(s), std::move(r)));
         ::earnest::execution::start(*nested_operation_state);
       } catch (...) {
         // The spec says we must pass on the exception to the next step in the chain,
         // by calling `set_error(r, current_exception())'.
         // This is the equivalent call.
-        std::lock_guard lck{*this};
-        this->fail(std::current_exception());
+        std::lock_guard lck{handler};
+        handler.fail(std::current_exception());
       }
     }
 
+    // Returns an alias pointer to the handler.
+    auto handler_ptr() noexcept -> std::shared_ptr<outcome_handler_type> {
+      return std::shared_ptr<outcome_handler_type>(this->shared_from_this(), &handler);
+    }
+
     private:
+    outcome_handler_type handler;
     std::optional<nested_operation_state_type> nested_operation_state;
   };
 
@@ -4500,9 +4505,9 @@ struct ensure_started_t {
   template<typed_sender Sender>
   static auto make_handler(Sender&& s)
   -> std::shared_ptr<outcome_handler<all_outcomes<std::remove_cvref_t<Sender>>, sender_traits<std::remove_cvref_t<Sender>>::sends_done>> {
-    auto handler = std::make_shared<intermediate_operation_state<std::remove_cvref_t<Sender>>>();
-    handler->start(std::forward<Sender>(s));
-    return handler;
+    auto intermediate_opstate_ptr = std::make_shared<intermediate_operation_state<std::remove_cvref_t<Sender>>>();
+    intermediate_opstate_ptr->start(std::forward<Sender>(s));
+    return intermediate_opstate_ptr->handler_ptr();
   }
 
   // The operation state that we will expose.
