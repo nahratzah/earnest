@@ -4136,6 +4136,9 @@ struct ensure_started_t {
   template<typename... T>
   class outcome<set_value_t, T...> {
     public:
+    template<template<typename...> class Tuple> using value_types = _type_appender<Tuple<T...>>;
+    using error_types = _type_appender<>;
+
     template<typename... T_>
     explicit outcome(T_&&... values)
     noexcept(std::is_nothrow_constructible_v<std::tuple<T...>, T_...>)
@@ -4162,6 +4165,9 @@ struct ensure_started_t {
   template<typename Error>
   class outcome<set_error_t, Error> {
     public:
+    template<template<typename...> class Tuple> using value_types = _type_appender<>;
+    using error_types = _type_appender<Error>;
+
     template<typename Error_>
     explicit outcome(Error_&& error)
     noexcept(std::is_nothrow_constructible_v<Error, Error_>)
@@ -4180,6 +4186,9 @@ struct ensure_started_t {
   template<>
   class outcome<set_done_t> {
     public:
+    template<template<typename...> class Tuple> using value_types = _type_appender<>;
+    using error_types = _type_appender<>;
+
     explicit outcome() noexcept {}
 
     template<receiver Receiver>
@@ -4241,20 +4250,54 @@ struct ensure_started_t {
   template<typed_sender Sender>
   using all_outcomes = typename all_outcomes_<Sender>::types;
 
+  template<template<typename...> class Tuple>
+  struct _select_value_types_from_outcome_ {
+    template<typename Outcome>
+    using type = typename Outcome::template value_types<Tuple>;
+  };
+  struct _select_error_types_from_outcome_ {
+    template<typename Outcome>
+    using type = typename Outcome::error_types;
+  };
+
   // An outcome selector.
   //
   // AllOutcomes: the type `all_outcomes<Sender>'.
+  // We provide value_types, error_types, and sends_done, so you can request sender_traits on this outcome_handler.
   //
   // The selector implements the lockable concept, and methods should be called with the lock held.
   template<typename AllOutcomes, bool SendsDone>
   class outcome_handler {
     private:
     using variant_type = _type_appender<std::monostate>::merge<AllOutcomes>::template type<std::variant>;
-
-    public:
     using next_receiver_fn = void(void*, outcome_handler&) noexcept;
 
     public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = typename AllOutcomes::
+        template transform<_select_value_types_from_outcome_<Tuple>::template type>:: // Each outcome is converted to a collection of zero or one tuples
+                                                                                      // which are then all bundled together in a collection:
+                                                                                      // `_type_appender<
+                                                                                      //   _type_appender<Tuple<...>>,
+                                                                                      //   _type_appender<>,
+                                                                                      //   ...>'
+        template type<_type_appender<>::merge>::                                      // Squash the double collections down to a single collection
+        template type<Variant>;                                                       // And then turn it into a variant.
+
+    template<template<typename...> class Variant>
+    using error_types = typename AllOutcomes::
+        template transform<_select_error_types_from_outcome_::type>::                 // Similar to the value_types, each outcome is transformed
+                                                                                      // into a collection of zero or one errors, and all that is
+                                                                                      // wrapped in a collection:
+                                                                                      // `_type_appender<
+                                                                                      //   _type_appender<Error1>,
+                                                                                      //   _type_appender<>,
+                                                                                      //   ...>'
+        template type<_type_appender<>::merge>::                                      // Squash the double collections down to a single collection
+        template type<Variant>;                                                       // And then turn it into a variant.
+
+    static inline constexpr bool sends_done = SendsDone;
+
     // Receiver that delivers its signals into a matching outcome_selector.
     class receiver_impl {
       public:
@@ -4502,22 +4545,27 @@ struct ensure_started_t {
   // - get_completion_scheduler: we cannot know if the next operation in the chain
   //   will execute on the scheduler of the nested Sender, or inside the function
   //   context of the calling function.
-  template<typed_sender Sender>
-  class sender_impl
-  : public sender_traits<Sender>
-  {
+  //
+  // As an advantage, this means we don't need to know anything about the sender except
+  // the value_types/error_types/sends_done. And we can get those from the outcome_handler.
+  // So we get a lot of type-erase.
+  template<typename OutcomeHandlerType>
+  class sender_impl {
     private:
-    using outcome_handler_type = outcome_handler<all_outcomes<Sender>, sender_traits<Sender>::sends_done>;
+    using outcome_handler_type = OutcomeHandlerType;
 
     public:
-    explicit sender_impl(Sender&& s)
-    noexcept(noexcept(make_handler(std::declval<Sender>())))
-    : handler(make_handler(std::move(s)))
-    {}
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = typename outcome_handler_type::template value_types<Tuple, Variant>;
 
-    explicit sender_impl(const Sender& s)
-    noexcept(noexcept(make_handler(std::declval<const Sender&>())))
-    : handler(make_handler(std::move(s)))
+    template<template<typename...> class Variant>
+    using error_types = typename outcome_handler_type::template error_types<Variant>;
+
+    static inline constexpr bool sends_done = outcome_handler_type::sends_done;
+
+    explicit sender_impl(std::shared_ptr<outcome_handler_type>&& handler)
+    noexcept
+    : handler(std::move(handler))
     {}
 
     sender_impl(sender_impl&&) noexcept = default;
@@ -4541,9 +4589,10 @@ struct ensure_started_t {
   // Creates the sender.
   template<typed_sender Sender>
   constexpr auto default_impl(Sender&& s) const
-  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<Sender>>, Sender>)
-  -> sender_impl<std::remove_cvref_t<Sender>> {
-    return sender_impl<std::remove_cvref_t<Sender>>(std::forward<Sender>(s));
+  noexcept(noexcept(make_handler(std::declval<Sender>())))
+  -> typed_sender decltype(auto) {
+    using outcome_handler_type = outcome_handler<all_outcomes<std::remove_cvref_t<Sender>>, sender_traits<std::remove_cvref_t<Sender>>::sends_done>;
+    return sender_impl<outcome_handler_type>(make_handler(std::forward<Sender>(s)));
   }
 };
 inline constexpr ensure_started_t ensure_started{};
