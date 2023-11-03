@@ -5234,4 +5234,106 @@ struct when_all_with_variant_t {
 inline constexpr when_all_with_variant_t when_all_with_variant{};
 
 
+// A when-all, that transfers to a specific scheduler upon completion.
+struct transfer_when_all_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<scheduler Scheduler, typed_sender... Sender>
+  constexpr auto operator()(Scheduler&& sch, Sender&&... s) const
+  noexcept(noexcept(_generic_operand_base<>(std::declval<transfer_when_all_t>(), std::declval<Scheduler>(), std::declval<Sender>()...)))
+  -> typed_sender decltype(auto) {
+    return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s)...);
+  }
+
+  private:
+  template<scheduler Scheduler, typed_sender... Sender>
+  constexpr auto default_impl(Scheduler&& sch, Sender&&... s) const
+  noexcept(noexcept(::earnest::execution::transfer(::earnest::execution::when_all(std::forward<Sender>(s)...), std::forward<Scheduler>(sch))))
+  -> typed_sender decltype(auto) {
+    return ::earnest::execution::transfer(
+        ::earnest::execution::when_all(std::forward<Sender>(s)...),
+        std::forward<Scheduler>(sch));
+  }
+};
+inline constexpr transfer_when_all_t transfer_when_all{};
+
+
+// A when-all, that lazily transfers to a specific scheduler upon completion.
+struct lazy_transfer_when_all_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<scheduler Scheduler, typed_sender... Sender>
+  constexpr auto operator()(Scheduler&& sch, Sender&&... s) const
+  noexcept(noexcept(_generic_operand_base<>(std::declval<lazy_transfer_when_all_t>(), std::declval<Scheduler>(), std::declval<Sender>()...)))
+  -> typed_sender decltype(auto) {
+    return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s)...);
+  }
+
+  private:
+  template<scheduler Scheduler, typed_sender... Sender>
+  constexpr auto default_impl(Scheduler&& sch, Sender&&... s) const
+  noexcept(noexcept(::earnest::execution::lazy_transfer(::earnest::execution::when_all(std::forward<Sender>(s)...), std::forward<Scheduler>(sch))))
+  -> typed_sender decltype(auto) {
+    return ::earnest::execution::lazy_transfer(
+        ::earnest::execution::when_all(std::forward<Sender>(s)...),
+        std::forward<Scheduler>(sch));
+  }
+};
+inline constexpr lazy_transfer_when_all_t lazy_transfer_when_all{};
+
+
+// A when-all-with-variant, that transfers to a specific scheduler upon completion.
+struct transfer_when_all_with_variant_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<scheduler Scheduler, typed_sender... Sender>
+  constexpr auto operator()(Scheduler&& sch, Sender&&... s) const
+  noexcept(noexcept(_generic_operand_base<>(std::declval<transfer_when_all_with_variant_t>(), std::declval<Scheduler>(), std::declval<Sender>()...)))
+  -> typed_sender decltype(auto) {
+    return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s)...);
+  }
+
+  private:
+  template<scheduler Scheduler, typed_sender... Sender>
+  constexpr auto default_impl(Scheduler&& sch, Sender&&... s) const
+  noexcept(noexcept(
+          ::earnest::execution::transfer(
+              ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...),
+              std::forward<Scheduler>(sch))))
+  -> typed_sender decltype(auto) {
+    return ::earnest::execution::transfer(
+        ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...),
+        std::forward<Scheduler>(sch));
+  }
+};
+inline constexpr transfer_when_all_with_variant_t transfer_when_all_with_variant{};
+
+
+// A when-all-with-variant, that lazily transfers to a specific scheduler upon completion.
+struct lazy_transfer_when_all_with_variant_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<scheduler Scheduler, typed_sender... Sender>
+  constexpr auto operator()(Scheduler&& sch, Sender&&... s) const
+  noexcept(noexcept(_generic_operand_base<>(std::declval<lazy_transfer_when_all_with_variant_t>(), std::declval<Scheduler>(), std::declval<Sender>()...)))
+  -> typed_sender decltype(auto) {
+    return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s)...);
+  }
+
+  private:
+  template<scheduler Scheduler, typed_sender... Sender>
+  constexpr auto default_impl(Scheduler&& sch, Sender&&... s) const
+  noexcept(noexcept(
+          ::earnest::execution::lazy_transfer(
+              ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...),
+              std::forward<Scheduler>(sch))))
+  -> typed_sender decltype(auto) {
+    return ::earnest::execution::lazy_transfer(
+        ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...),
+        std::forward<Scheduler>(sch));
+  }
+};
+inline constexpr lazy_transfer_when_all_with_variant_t lazy_transfer_when_all_with_variant{};
+
+
 } /* namespace earnest::execution */
