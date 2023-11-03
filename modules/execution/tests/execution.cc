@@ -417,6 +417,23 @@ TEST(ensure_started) {
   CHECK_EQUAL(7, x);
 }
 
+TEST(when_all) {
+  using when_all_traits = sender_traits<decltype(when_all(just(1), just(), just(std::string(), 19)))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<int, std::string, int>>,
+      when_all_traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      when_all_traits::error_types<std::variant>>);
+  static_assert(when_all_traits::sends_done == false);
+
+  auto [x, y, z] = sync_wait(
+      when_all(just(1), just(), just(std::string("text"), 19))).value();
+  CHECK_EQUAL(1, x);
+  CHECK_EQUAL(std::string("text"), y);
+  CHECK_EQUAL(19, z);
+}
+
 TEST(adapters_are_chainable) {
   // We want to verify that an adapter-chain can be late-bound.
   // In order to allow check this, we create an adapter chain with

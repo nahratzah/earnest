@@ -969,20 +969,17 @@ noexcept(std::is_nothrow_constructible_v<_generic_adapter_t<Tag, std::remove_cvr
 
 // Get stop token returns a stop-token for a receiver.
 struct get_stop_token_t {
-  template<typename> friend struct _generic_operand_base_t;
-
   template<receiver R>
   constexpr auto operator()(const R& r) const noexcept -> decltype(auto) {
-    static_assert(stoppable_token<decltype(_generic_operand_base<>(*this, r))>,
-        "get_stop_token must return a stoppable token");
-    static_assert(noexcept(_generic_operand_base<>(*this, r)),
-        "get_stop_token must be a noexcept function");
-    return _generic_operand_base<>(*this, r);
-  }
-
-  private:
-  constexpr auto default_impl() const noexcept -> never_stop_token {
-    return {};
+    if constexpr(!tag_invocable<get_stop_token_t, const R&>) {
+      return never_stop_token{};
+    } else {
+      static_assert(stoppable_token<decltype(_generic_operand_base<>(*this, r))>,
+          "get_stop_token must return a stoppable token");
+      static_assert(noexcept(_generic_operand_base<>(*this, r)),
+          "get_stop_token must be a noexcept function");
+      return _generic_operand_base<>(*this, r);
+    }
   }
 };
 inline constexpr get_stop_token_t get_stop_token{};
@@ -4592,8 +4589,11 @@ struct ensure_started_t {
   };
 
   // Creates the sender.
+  //
+  // Note that this is never a constexpr function,
+  // because the `make_handler' function performs a heap allocation.
   template<typed_sender Sender>
-  constexpr auto default_impl(Sender&& s) const
+  auto default_impl(Sender&& s) const
   noexcept(noexcept(make_handler(std::declval<Sender>())))
   -> typed_sender decltype(auto) {
     using outcome_handler_type = outcome_handler<all_outcomes<std::remove_cvref_t<Sender>>, sender_traits<std::remove_cvref_t<Sender>>::sends_done>;
@@ -4601,6 +4601,637 @@ struct ensure_started_t {
   }
 };
 inline constexpr ensure_started_t ensure_started{};
+
+
+// The when-all adapter takes multiple senders, and concatenates their values.
+//
+// Note:
+// - When zero senders are specified, it returns the `just()' sender.
+//   I don't think that's in violation of the spec.
+//   This makes implementing the receiver easier, because we don't have to care for the
+//   "zero-out-of-zero ready".
+// - When one sender is specified, it returns only that sender.
+//   I don't think that's in violation of the spec, as the observed behaviour
+//   of the pipeline is no different.
+struct when_all_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<typed_sender... Sender>
+  requires ((std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1) &&...)
+  constexpr auto operator()(Sender&&... s) const
+  noexcept(noexcept(_generic_operand_base<>(std::declval<when_all_t>(), std::declval<Sender>()...)))
+  -> typed_sender decltype(auto) {
+    return _generic_operand_base<>(*this, std::forward<Sender>(s)...);
+  }
+
+  private:
+  // A local receiver is a receiver that'll accept the values for a single sender.
+  //
+  // It plays nice with `local_opstate', which'll provide the storage for its outcome.
+  template<receiver_of<> Receiver, typename TupleType>
+  class local_receiver_impl
+  : public _generic_receiver_wrapper<Receiver, set_value_t>
+  {
+    public:
+    explicit local_receiver_impl(Receiver&& r, std::optional<TupleType>* outcome)
+    : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
+      outcome(outcome)
+    {}
+
+    // Only permit move construction.
+    local_receiver_impl(local_receiver_impl&&) = default;
+    local_receiver_impl(const local_receiver_impl&) = delete;
+
+    // When we receive the value-signal:
+    // - save the values in the opstate
+    // - and then notify the wrapped receiver
+    template<typename... Args>
+    requires std::constructible_from<TupleType, Args...>
+    friend auto tag_invoke([[maybe_unused]] set_value_t, local_receiver_impl&& self, Args&&... args)
+    noexcept(
+        std::is_nothrow_constructible_v<TupleType, Args...> &&
+        noexcept(::earnest::execution::set_value(std::declval<Receiver>())))
+    -> void {
+      assert(!self.outcome->has_value());
+      self.outcome->emplace(std::forward<Args>(args)...);  // Save our value (may throw).
+      ::earnest::execution::set_value(std::move(self.r)); // And invoke our wrapped sender (without arguments).
+    }
+
+    private:
+    std::optional<TupleType>*const outcome;
+  };
+
+  // A local operation-state, that stores the value-signal of the Sender.
+  template<typed_sender Sender, receiver_of<> Receiver, typename = void>
+  class local_opstate {
+    public:
+    using tuple_type = typename sender_traits<Sender>::template value_types<std::tuple, std::type_identity_t>;
+
+    private:
+    using receiver_impl = local_receiver_impl<Receiver, tuple_type>;
+    using nested_opstate = decltype(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>()));
+
+    public:
+    explicit local_opstate(Sender&& s, Receiver&& r)
+    noexcept(
+        noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>())) &&
+        std::is_nothrow_constructible_v<receiver_impl, Receiver, std::optional<tuple_type>*>)
+    : impl(::earnest::execution::connect(std::forward<Sender>(s), receiver_impl(std::move(r), &this->values)))
+    {}
+
+    // Initialize local-opstate from a tuple of sender and receiver.
+    // This because we like to initialize tuples of these things,
+    // and tuples don't have a `std::tuple(std::inplace, tuple-of-args...)'
+    // style constructor.
+    explicit local_opstate(std::tuple<Sender&&, Receiver&&> tpl)
+    noexcept(
+        noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>())) &&
+        std::is_nothrow_constructible_v<receiver_impl, Receiver, std::optional<tuple_type>*>)
+    : local_opstate(std::get<0>(std::move(tpl)), std::get<1>(std::move(tpl)))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, local_opstate& self) noexcept -> void {
+      ::earnest::execution::start(self.impl);
+    }
+
+    auto get_outcome() const & noexcept -> const tuple_type& {
+      assert(values.has_value());
+      return *values;
+    }
+
+    auto get_outcome() & noexcept -> tuple_type& {
+      assert(values.has_value());
+      return *values;
+    }
+
+    auto get_outcome() && noexcept -> tuple_type&& {
+      assert(values.has_value());
+      return *std::move(values);
+    }
+
+    private:
+    std::optional<tuple_type> values;
+    [[no_unique_address]] nested_opstate impl;
+  };
+
+  // A specialization for local_opstate, for when the sender sends zero values.
+  //
+  // In this case, we can cut out the outcome-tuple, and thus don't need to wrap a local_receiver_impl.
+  template<typed_sender Sender, receiver_of<> Receiver>
+  class local_opstate<
+      Sender, Receiver,
+      std::enable_if_t<std::is_same_v<
+          std::variant<std::tuple<>>,
+          typename sender_traits<Sender>::template value_types<std::tuple, std::variant>>>>
+  {
+    public:
+    using tuple_type = std::tuple<>;
+
+    private:
+    using receiver_impl = Receiver;
+    using nested_opstate = decltype(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>()));
+
+    public:
+    explicit local_opstate(Sender&& s, Receiver&& r)
+    noexcept(noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>())))
+    : impl(::earnest::execution::connect(std::forward<Sender>(s), std::move(r)))
+    {}
+
+    // Initialize local-opstate from a tuple of sender and receiver.
+    // This because we like to initialize tuples of these things,
+    // and tuples don't have a `std::tuple(std::inplace, tuple-of-args...)'
+    // style constructor.
+    explicit local_opstate(std::tuple<Sender&&, Receiver&&> tpl)
+    noexcept(noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>())))
+    : local_opstate(std::get<0>(std::move(tpl)), std::get<1>(std::move(tpl)))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, local_opstate& self) noexcept -> void {
+      ::earnest::execution::start(self.impl);
+    }
+
+    constexpr auto get_outcome() const noexcept -> tuple_type {
+      return {};
+    }
+
+    private:
+    [[no_unique_address]] nested_opstate impl;
+  };
+
+  // A functor, which, when invoked, will request-stop on a stop-source.
+  struct cascade_stop {
+    public:
+    explicit cascade_stop(in_place_stop_source& stop_source) noexcept
+    : stop_source(stop_source)
+    {}
+
+    auto operator()() const noexcept -> void {
+      stop_source.request_stop();
+    }
+
+    private:
+    in_place_stop_source& stop_source;
+  };
+
+  // Summary that indicates all senders completed with a value-signal.
+  class value_signal_summary {
+    public:
+    template<typename... LocalOpstates, receiver Receiver>
+    auto apply(std::tuple<LocalOpstates...>&& local_states, Receiver&& r) noexcept -> void {
+      try {
+        apply_(std::index_sequence_for<LocalOpstates...>(), std::move(local_states), std::forward<Receiver>(r));
+      } catch (...) {
+        ::earnest::execution::set_error(std::forward<Receiver>(r), std::current_exception());
+      }
+    }
+
+    private:
+    template<std::size_t... Idx, typename... LocalOpstates, receiver Receiver>
+    auto apply_([[maybe_unused]] std::index_sequence<Idx...>, std::tuple<LocalOpstates...>&& local_states, Receiver&& r)
+    -> void {
+      std::apply(
+          [&r](auto&&... args) {
+            ::earnest::execution::set_value(std::forward<Receiver>(r), std::move(args)...);
+          },
+          // All the values in the outcomes, by rvalue-reference, in one giant tuple.
+          std::tuple_cat(tuple_for_forwarding(std::get<Idx>(std::move(local_states)).get_outcome())...));
+    }
+
+    // Turn a tuple of values into a tuple of rvalue-references.
+    // We need rvalue-references, so we won't make copies (or moves) when we call tuple-cat.
+    template<typename... T>
+    static auto tuple_for_forwarding(std::tuple<T...>&& tpl) noexcept -> std::tuple<std::add_rvalue_reference_t<T>...> {
+      return std::apply(
+          [](std::add_rvalue_reference_t<T>... args) -> std::tuple<std::add_rvalue_reference_t<T>...> {
+            return std::tuple<std::add_rvalue_reference_t<T>...>(std::forward<std::add_rvalue_reference_t<T>>(args)...);
+          },
+          std::move(tpl));
+    }
+  };
+
+  // Summary that indicates at least one sender completed with an error-signal.
+  template<typename Error>
+  class error_signal_summary {
+    public:
+    explicit error_signal_summary(const Error& error)
+    : error(error)
+    {}
+
+    explicit error_signal_summary(Error&& error)
+    : error(std::move(error))
+    {}
+
+    template<typename... LocalOpstates, receiver Receiver>
+    auto apply([[maybe_unused]] std::tuple<LocalOpstates...>&&, Receiver&& r) noexcept -> void {
+      ::earnest::execution::set_error(std::forward<Receiver>(r), std::move(error));
+    }
+
+    private:
+    Error error;
+  };
+
+  // Summary that indicates at least one sender completed with a done-signal.
+  class done_signal_summary {
+    public:
+    template<typename... LocalOpstates, receiver Receiver>
+    auto apply([[maybe_unused]] std::tuple<LocalOpstates...>&&, Receiver&& r) noexcept -> void {
+      ::earnest::execution::set_done(std::forward<Receiver>(r));
+    }
+  };
+
+  // The operation state for when-all, has a few things in common.
+  // We split them off into a basic_opstate.
+  template<bool SendsDone, typename... Error>
+  class basic_opstate {
+    private:
+    // Summaries describe how the when-all operation completed.
+    // - value_signal_summary: used to indicate that all senders completed with a value-signal
+    // - error_signal_summary: used to indicate that a sender completed with an error-signal
+    // - done_signal_summary: used to indicate that a sender completed with a done-signal
+    using summary_type =
+        typename _type_appender<>::merge<                                                        // The union of
+            _type_appender<value_signal_summary>,                                                // the value-summary
+            _type_appender<error_signal_summary<Error>...>,                                      // each of the error-summaries,
+            std::conditional_t<SendsDone, _type_appender<done_signal_summary>, _type_appender<>> // and the done-summary (iff sends-done)
+        >::                                                                                      //
+        template type<std::variant>;                                                             // combined into a variant.
+
+    protected:
+    // Implementation of the receiver.
+    // This receiver implementation accesses basic_opstate, through opstate.
+    //
+    // Note: we have to use `typename' here, because OpState cannot become a complete type
+    // until it's figured out receiver_impl type.
+    template<receiver Receiver, typename OpState>
+    class receiver_impl {
+      public:
+      explicit receiver_impl(OpState& state) noexcept
+      : state(state)
+      {}
+
+      receiver_impl(const receiver_impl&) = delete;
+      receiver_impl(receiver_impl&&) = default;
+
+      // Accept the value-signal.
+      friend auto tag_invoke([[maybe_unused]] set_value_t, receiver_impl&& self) noexcept -> void {
+        if (self.state.basic_opstate::on_value_completion_())
+          self.state.notify();
+      }
+
+      // Accept the error-signal.
+      // Updates state with an error-summary.
+      template<typename ErrorArgument>
+      friend auto tag_invoke([[maybe_unused]] set_error_t, receiver_impl&& self, ErrorArgument&& error) noexcept -> void {
+        if (self.state.basic_opstate::on_error_completion_(std::forward<ErrorArgument>(error)))
+          self.state.notify();
+      }
+
+      // Accept the done-signal.
+      // Updates state with a done-summary.
+      friend auto tag_invoke([[maybe_unused]] set_done_t, receiver_impl&& self) noexcept -> void {
+        if (self.state.basic_opstate::on_done_completion_())
+          self.state.notify();
+      }
+
+      // Expose the local cancelation state.
+      friend auto tag_invoke([[maybe_unused]] get_stop_token_t, const receiver_impl& self) noexcept -> in_place_stop_token {
+        return self.state.basic_opstate::local_cancelation.get_token();
+      }
+
+      // Any other receiver queries are forwarded.
+      //
+      // This tag_invoke will be used when receiver_impl is a const-reference.
+      template<typename Tag, typename... Args,
+          typename = std::enable_if_t<
+              _is_forwardable_receiver_tag<Tag> &&
+              std::negation_v<
+                  std::disjunction<
+                      std::is_same<set_value_t, Tag>,
+                      std::is_same<set_error_t, Tag>,
+                      std::is_same<set_done_t, Tag>,
+                      std::is_same<get_stop_token_t, Tag>>>>>
+      friend auto tag_invoke(Tag tag, const receiver_impl& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, const Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, const Receiver&, Args...> {
+        return ::earnest::execution::tag_invoke(std::move(tag), std::as_const(self.state.r), std::forward<Args>(args)...);
+      }
+
+      // Any other receiver queries are forwarded.
+      //
+      // This tag_invoke will be used when receiver_impl is a non-const-reference.
+      template<typename Tag, typename... Args,
+          typename = std::enable_if_t<
+              _is_forwardable_receiver_tag<Tag> &&
+              std::negation_v<
+                  std::disjunction<
+                      std::is_same<set_value_t, Tag>,
+                      std::is_same<set_error_t, Tag>,
+                      std::is_same<set_done_t, Tag>,
+                      std::is_same<get_stop_token_t, Tag>>>>>
+      friend auto tag_invoke(Tag tag, receiver_impl& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver&, Args...> {
+        return ::earnest::execution::tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
+      }
+
+      // Any other receiver queries are forwarded.
+      //
+      // This tag_invoke will be used when receiver_impl is an rvalue-reference.
+      template<typename Tag, typename... Args,
+          typename = std::enable_if_t<
+              _is_forwardable_receiver_tag<Tag> &&
+              std::negation_v<
+                  std::disjunction<
+                      std::is_same<set_value_t, Tag>,
+                      std::is_same<set_error_t, Tag>,
+                      std::is_same<set_done_t, Tag>,
+                      std::is_same<get_stop_token_t, Tag>>>>>
+      friend auto tag_invoke(Tag tag, receiver_impl&& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver&&, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver&&, Args...> {
+        return ::earnest::execution::tag_invoke(std::move(tag), std::move(self.state.r), std::forward<Args>(args)...);
+      }
+
+      private:
+      OpState& state;
+    };
+
+    protected:
+    explicit basic_opstate(std::size_t pending) noexcept
+    : pending(pending)
+    {}
+
+    public:
+    basic_opstate(basic_opstate&&) = delete;
+    basic_opstate(const basic_opstate&) = delete;
+
+    protected:
+    ~basic_opstate() = default;
+
+    private:
+    // Internal implementation of on_value_completion.
+    // Updates internal structures.
+    // Returns true if all the local opstates have completed.
+    //
+    // This function holds the lock, so it may not call notify.
+    [[nodiscard]]
+    auto on_value_completion_() noexcept -> bool {
+      std::lock_guard lck{mtx};
+      return --pending == 0;
+    }
+
+    // Internal implementation of on_error_completion.
+    // Updates internal structures.
+    // Returns true if all the local opstates have completed.
+    //
+    // This function holds the lock, so it may not call notify.
+    template<typename ErrorArgument>
+    [[nodiscard]]
+    auto on_error_completion_(ErrorArgument&& error) noexcept -> bool {
+      std::lock_guard lck{mtx};
+
+      // Only update the state, if this is the first non-value-signal we encounter.
+      if (std::holds_alternative<value_signal_summary>(summary))
+        summary.template emplace<error_signal_summary<std::remove_cvref_t<ErrorArgument>>>(std::forward<ErrorArgument>(error));
+      // Signal any in-progress senders that they can abort early (since we'll discard the value/error it produces anyway).
+      local_cancelation.request_stop();
+
+      return --pending == 0;
+    }
+
+    // Internal implementation of on_done_completion.
+    // Updates internal structures.
+    // Returns true if all the local opstates have completed.
+    //
+    // This function holds the lock, so it may not call notify.
+    [[nodiscard]]
+    auto on_done_completion_() noexcept -> bool {
+      std::lock_guard lck{mtx};
+
+      assert(SendsDone);
+      if constexpr(SendsDone) {
+        // Only update the state, if this is the first non-value-signal we encounter.
+        if (std::holds_alternative<value_signal_summary>(summary))
+          summary.template emplace<done_signal_summary>();
+        // Signal any in-progress senders that they can abort early (since we'll discard the value/error it produces anyway).
+        local_cancelation.request_stop();
+      }
+
+      return --pending == 0;
+    }
+
+    protected:
+    template<typename LocalStates, receiver Receiver>
+    auto deliver_signal(LocalStates&& local_states, Receiver&& r) noexcept {
+#ifndef NDEBUG
+      {
+        std::lock_guard lck{mtx};
+        assert(pending == 0);
+      }
+#endif
+
+      std::visit(
+          [&local_states, &r](auto& summary) {
+            summary.apply(std::forward<LocalStates>(local_states), std::forward<Receiver>(r));
+          },
+          summary);
+    }
+
+    private:
+    std::mutex mtx; // Protect updating local structures.
+    std::size_t pending;
+
+    // Summarizes how the local-opstates completed.
+    //
+    // By default, we expect to pass on a value-signal.
+    // But if any of the local-opstates emits a different signal, it'll update the summary.
+    // (The summary is only updated for the first non-value signal.)
+    std::variant<value_signal_summary, error_signal_summary<Error>..., done_signal_summary> summary;
+
+    protected:
+    in_place_stop_source local_cancelation; // We cancel all the invocations, if we receive a done-signal or error-signal.
+  };
+
+  // Helper type, that computes
+  // `_type_appender<ErrorsForFirstSender..., ErrorsForSecondSender, ...>'
+  // with any duplicates removed.
+  template<typed_sender... Sender>
+  using compute_error_types_for_senders =
+      typename _type_appender<>::merge<
+          _type_appender<std::exception_ptr>,
+          typename sender_traits<Sender>::template error_types<_type_appender>... // create `_type_appender<Error1, Error2, ...>' per sender
+      >::                                                                         // and merge them all together into a single _type_appender
+      template type<_deduplicate<_type_appender>::template type>;                 // and then remove any duplicates
+
+  // Helper type for basic_opstate_for_senders.
+  template<bool SendsDone>
+  struct basic_opstate_for_senders_ {
+    template<typename... Error>
+    using type = basic_opstate<SendsDone, Error...>;
+  };
+  // The `basic_opstate<SendsDone, Error...>' type, filled in correctly for the given Senders.
+  template<typed_sender... Sender>
+  using basic_opstate_for_senders = typename compute_error_types_for_senders<Sender...>::template type<
+      basic_opstate_for_senders_<(sender_traits<Sender>::sends_done ||...)>::template type>;
+
+  template<receiver Receiver, typed_sender... Sender>
+  class opstate
+  : private basic_opstate_for_senders<Sender...>
+  {
+    template<bool, typename...> friend class basic_opstate;
+
+    private:
+    // Figure out the stop-token-type for the receiver.
+    using receiver_stop_token_type = std::remove_cvref_t<decltype(::earnest::execution::get_stop_token(std::declval<Receiver>()))>;
+    // Local senders are completing using the local-receiver-type.
+    using local_receiver_type = typename basic_opstate_for_senders<Sender...>::template receiver_impl<Receiver, opstate>;
+
+    public:
+    opstate(Receiver&& r, Sender&&... s)
+    : basic_opstate_for_senders<Sender...>(sizeof...(Sender)),
+      r(std::move(r)),
+      local_states(
+          std::forward_as_tuple(std::move(s), local_receiver_type(*this))...
+          ),
+      cancelation_cascader(::earnest::execution::get_stop_token(this->r), this->local_cancelation)
+    {}
+
+    // Prevent copy/move, so we can rely on our pointer-identities.
+    opstate(const opstate&) = delete;
+    opstate(opstate&&) = delete;
+
+    friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
+      self.start_all_states_(std::index_sequence_for<Sender...>());
+    }
+
+    private:
+    template<std::size_t Idx, std::size_t... Tail>
+    auto start_all_states_([[maybe_unused]] std::index_sequence<Idx, Tail...>) noexcept -> void {
+      ::earnest::execution::start(std::get<Idx>(local_states));
+      start_all_states_(std::index_sequence<Tail...>());
+    }
+
+    auto start_all_states_([[maybe_unused]] std::index_sequence<>) noexcept -> void {
+      // Nothing to do
+    }
+
+    auto notify() noexcept -> void {
+      this->basic_opstate_for_senders<Sender...>::deliver_signal(std::move(local_states), std::move(r));
+    }
+
+    Receiver r;
+    std::tuple<local_opstate<Sender, local_receiver_type>...> local_states; // Operation state for each of the senders.
+
+    [[no_unique_address]]
+    [[maybe_unused]]
+    typename receiver_stop_token_type::template callback_type<cascade_stop> cancelation_cascader; // Glue, so that the Receiver will cascade
+                                                                                                  // its stop-state into our local_cancelation.
+  };
+
+  template<typed_sender... Sender>
+  class sender_impl {
+    public:
+    // The value-types is the concatenation of each of the value-types:
+    // `Variant<Tuple<TypesOfFirstSender..., TypesOfSecondSender..., ...>'
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types =
+        Variant<
+            typename _type_appender<>::merge<
+                typename sender_traits<Sender>::template value_types<_type_appender, _type_appender>... // create
+                                                                                                        // `_type_appender<
+                                                                                                        //     _type_appender<T0, T1, ...>,
+                                                                                                        //     ...>'
+                                                                                                        // per sender
+            >::                                                                                         // and merge them all together into
+                                                                                                        // a single _type_appender
+            template type<_type_appender<>::merge>::                                                    // concatenate all the type-appenders
+                                                                                                        // `_type_appender<
+                                                                                                        //     TypesOfFirstSender...,
+                                                                                                        //     TypesOfSecondSender...,
+                                                                                                        //     ...>'
+            template type<Tuple>>;                                                                      // and then apply the tuple (and everything
+                                                                                                        // is wrapped inside the one Variant)
+
+    // The error-types is the union of the error-types of each sender.
+    template<template<typename...> class Variant>
+    using error_types = typename compute_error_types_for_senders<Sender...>::template type<Variant>;
+
+    // We send a done-signal, if any of our senders sends one.
+    static inline constexpr bool sends_done = (sender_traits<Sender>::sends_done ||...);
+
+    template<typename... Sender_>
+    explicit constexpr sender_impl(Sender_&&... s)
+    noexcept(std::is_nothrow_constructible_v<std::tuple<Sender...>, Sender_...>)
+    : senders(std::forward<Sender_>(s)...)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(std::is_nothrow_constructible_v<
+        opstate<std::remove_cvref_t<Receiver>, Sender...>,
+        Receiver, Sender...>)
+    -> operation_state decltype(auto) {
+      return std::apply(
+          [&](auto&&... s) {
+            return opstate<std::remove_cvref_t<Receiver>, Sender...>(std::forward<Receiver>(r), std::move(s)...);
+          },
+          std::move(self.senders));
+    }
+
+    private:
+    std::tuple<Sender...> senders;
+  };
+
+  // When at least two senders are specified, we'll do the work of concatenating them
+  // into the when-all operation.
+  template<typed_sender... Sender, typename = std::enable_if_t<(sizeof...(Sender) >= 2)>>
+  requires ((std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1) &&...)
+  constexpr auto default_impl(Sender&&... s) const
+  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<Sender>...>, Sender...>)
+  -> sender_impl<std::remove_cvref_t<Sender>...> {
+    return sender_impl<std::remove_cvref_t<Sender>...>(std::forward<Sender>(s)...);
+  }
+
+  // If no senders are specified, we'll return the `just()' sender.
+  // Having the zero-senders case covered, makes implementing the when_all operation a little easier.
+  constexpr auto default_impl() const noexcept -> typed_sender decltype(auto) {
+    return just();
+  }
+
+  // If there is one sender specified, when-all is just a very expensive way of creating an identity-operation.
+  // In this case, we can just forward the sender back, and spare the compiler (and runtime) some work.
+  template<typed_sender Sender>
+  constexpr auto default_impl(Sender&& s) noexcept -> std::add_rvalue_reference_t<Sender> {
+    return std::forward<Sender>(s);
+  }
+};
+inline constexpr when_all_t when_all{};
+
+
+// The when-all-with-variant adapter, takes each sender it is given,
+// squashes each of their value-types into a `std::variant<std::tuple<...>, ...>'
+// and then does the same as when_all.
+//
+// The default-implementation is `when_all(into_variant(s1), into_variant(s2), ...)'.
+struct when_all_with_variant_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<typed_sender... Sender>
+  constexpr auto operator()(Sender&&... s) const
+  noexcept(noexcept(_generic_operand_base<>(std::declval<when_all_with_variant_t>(), std::declval<Sender>()...)))
+  -> typed_sender decltype(auto) {
+    return _generic_operand_base<>(*this, std::forward<Sender>(s)...);
+  }
+
+  private:
+  template<typed_sender... Sender>
+  constexpr auto default_impl(Sender&&... s) const
+  noexcept(noexcept(::earnest::execution::when_all(::earnest::execution::into_variant(std::declval<Sender>())...)))
+  -> typed_sender decltype(auto) {
+    return ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...);
+  }
+};
+inline constexpr when_all_with_variant_t when_all_with_variant{};
 
 
 } /* namespace earnest::execution */
