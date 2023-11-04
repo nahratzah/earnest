@@ -49,7 +49,7 @@ struct fake_scheduler {
 
   struct sender_impl {
     template<template<typename...> class Tuple, template<typename...> class Variant>
-    using value_types = Variant<>;
+    using value_types = Variant<Tuple<>>;
 
     template<template<typename...> class Variant>
     using error_types = Variant<std::exception_ptr>;
@@ -462,10 +462,30 @@ TEST(split) {
   CHECK_EQUAL(1, calls);
 
   auto [y] = sync_wait(split_chain).value();
-#if 0
   CHECK_EQUAL(1, y);
   CHECK_EQUAL(1, calls);
-#endif
+}
+
+TEST(on) {
+  using on_traits = sender_traits<decltype(on(std::declval<fake_scheduler<false>>(), just(1)))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<int>>,
+      on_traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      on_traits::error_types<std::variant>>);
+  static_assert(on_traits::sends_done == false);
+
+  bool scheduler_started = false;
+  auto [x] = sync_wait(
+      on(
+          fake_scheduler<false>{&scheduler_started},
+          just(1)
+          | lazy_then([&scheduler_started](int i) {
+                CHECK(scheduler_started);
+                return i + 1;
+              }))).value();
+  CHECK_EQUAL(2, x);
 }
 
 TEST(adapters_are_chainable) {

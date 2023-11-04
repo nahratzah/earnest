@@ -3327,6 +3327,7 @@ struct _let_adapter_common_t {
   // Once the `apply' method is called, it'll create the requires values_and_opstate,
   // and then start that.
   template<typename... ValuesAndOpstates>
+  requires (sizeof...(ValuesAndOpstates) > 0)
   class op_state {
     public:
     constexpr op_state() noexcept = default;
@@ -3349,6 +3350,8 @@ struct _let_adapter_common_t {
         noexcept(std::declval<typename values_and_opstate_type<Fn, Receiver>::template type<Args...>&>().start()))
     -> void {
       using opstate_type = typename values_and_opstate_type<Fn, Receiver>::template type<Args...>;
+      static_assert(std::disjunction_v<std::is_same<ValuesAndOpstates, opstate_type>...>,
+          "chosen operation type must be present in the variant");
       assert(std::holds_alternative<std::monostate>(opstates));
       opstates
           .template emplace<opstate_type>(std::forward<Fn>(fn), std::forward<Receiver>(r), std::forward<Args>(args)...)
@@ -3370,6 +3373,11 @@ struct _let_adapter_common_t {
   // will partially apply what it can. And then complain if it can't.
   template<sender Sender, typename Signal, typename Fn, receiver Receiver>
   struct op_state_type_ {
+    static_assert(!std::is_same_v<
+        _type_appender<>,
+        typename sender_types_helper<Sender, Signal>::function_arguments>,
+        "function must be invoked with non-zero variations on arguments (i.e. is must be invoked)");
+
     using type = typename sender_types_helper<Sender, Signal>::function_arguments::
         template transform<type_appender_to_tuple_<values_and_opstate_type<Fn, Receiver>::template type>::template type>::
         template type<op_state>;
@@ -3571,12 +3579,12 @@ struct _let_adapter_common_t {
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
     noexcept(
         std::is_nothrow_constructible_v<
-            wrapped_receiver_type<Receiver>,
+            wrapped_receiver_type<std::remove_cvref_t<Receiver>>,
             Receiver, Fn> &&
         noexcept(
             ::earnest::execution::connect(
                 std::declval<Sender>(),
-                std::declval<wrapped_receiver_type<Receiver>>())))
+                std::declval<wrapped_receiver_type<std::remove_cvref_t<Receiver>>>())))
     -> operation_state decltype(auto) {
       return ::earnest::execution::connect(
           std::move(self.s),
@@ -5776,6 +5784,207 @@ struct split_t {
   }
 };
 inline constexpr split_t split{};
+
+
+struct lazy_on_t {
+  template<scheduler Scheduler, typed_sender Sender>
+  constexpr auto operator()(Scheduler&& sch, Sender&& s) const
+  noexcept(
+      tag_invocable<lazy_on_t, Scheduler, Sender> ?
+      nothrow_tag_invocable<lazy_on_t, Scheduler, Sender> :
+      noexcept(std::declval<const lazy_on_t&>().default_impl(std::forward<Scheduler>(sch), std::forward<Sender>(s))))
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_on_t, Scheduler, Sender>)
+      return ::earnest::execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s));
+    else
+      return this->default_impl(std::forward<Scheduler>(sch), std::forward<Sender>(s));
+  }
+
+  private:
+  template<scheduler Scheduler, sender Sender, receiver Receiver>
+  class opstate {
+    private:
+    template<receiver LocalReceiver>
+    class scheduler_receiver
+    : public _generic_receiver_wrapper<LocalReceiver, set_value_t, set_error_t, set_done_t, get_scheduler_t>
+    {
+      public:
+      explicit scheduler_receiver(LocalReceiver&& r, opstate& state)
+      noexcept(std::is_nothrow_move_constructible_v<LocalReceiver>)
+      : _generic_receiver_wrapper<LocalReceiver, set_value_t, set_error_t, set_done_t, get_scheduler_t>(std::move(r)),
+        state(state)
+      {}
+
+      template<typename... Args>
+      friend auto tag_invoke([[maybe_unused]] set_value_t, scheduler_receiver&& self, Args&&... args) noexcept -> void {
+        // Forward value-signal to the receiver in opstate.
+        try {
+          ::earnest::execution::set_value(std::move(self.state.r), std::forward<Args>(args)...);
+        } catch (...) {
+          ::earnest::execution::set_error(std::move(self.state.r), std::current_exception());
+        }
+
+        self.complete();
+      }
+
+      template<typename Error>
+      friend auto tag_invoke([[maybe_unused]] set_error_t, scheduler_receiver&& self, Error&& error) noexcept -> void {
+        // Forward the error-signal to the receiver in opstate.
+        ::earnest::execution::set_error(std::move(self.state.r), std::forward<Error>(error));
+        self.complete();
+      }
+
+      friend auto tag_invoke([[maybe_unused]] set_done_t, scheduler_receiver&& self) noexcept -> void {
+        // Forward the done-signal to the receiver in opstate.
+        ::earnest::execution::set_done(std::move(self.state.r));
+        self.complete();
+      }
+
+      friend auto tag_invoke([[maybe_unused]] get_scheduler_t, const scheduler_receiver& self) noexcept -> auto {
+        return self.state.sch;
+      }
+
+      private:
+      // Inform wrapped receiver that we're done (with no values).
+      auto complete() noexcept -> void {
+        try {
+          ::earnest::execution::set_value(std::move(this->r));
+        } catch (...) {
+          ::earnest::execution::set_error(std::move(this->r), std::current_exception());
+        }
+      }
+
+      opstate& state;
+    };
+
+    class scheduler_sender {
+      public:
+      template<template<typename...> class Tuple, template<typename...> class Variant>
+      using value_types = Variant<Tuple<>>;
+
+      template<template<typename...> class Variant>
+      using error_types = Variant<std::exception_ptr>;
+
+      static inline constexpr bool sends_done = false;
+
+      explicit scheduler_sender(opstate& state) noexcept
+      : state(state)
+      {}
+
+      template<receiver LocalReceiver>
+      friend auto tag_invoke([[maybe_unused]] connect_t, scheduler_sender&& self, LocalReceiver&& r)
+      -> decltype(auto) {
+        return ::earnest::execution::connect(
+            ::earnest::execution::schedule(self.state.sch)
+            | lazy_let_value(
+                [state=&self.state]() noexcept -> decltype(auto) {
+                  return std::move(state->s);
+                }),
+            scheduler_receiver<std::remove_cvref_t<LocalReceiver>>(std::forward<LocalReceiver>(r), self.state));
+      }
+
+      private:
+      opstate& state;
+    };
+
+    public:
+    opstate(Scheduler&& sch, Sender&& s, Receiver&& r)
+    noexcept(
+        std::is_nothrow_move_constructible_v<Scheduler> &&
+        std::is_nothrow_move_constructible_v<Sender> &&
+        std::is_nothrow_move_constructible_v<Receiver>)
+    : sch(std::move(sch)),
+      s(std::move(s)),
+      r(std::move(r))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
+      try {
+        ::earnest::execution::start_detached(scheduler_sender(self));
+      } catch (...) {
+        ::earnest::execution::set_error(std::move(self.r), std::current_exception());
+      }
+    }
+
+    private:
+    Scheduler sch;
+    Sender s;
+    Receiver r;
+  };
+
+  template<scheduler Scheduler, typed_sender Sender>
+  class sender_impl
+  : public _generic_sender_wrapper<sender_impl<Scheduler, Sender>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
+  {
+    public:
+    static inline constexpr bool sends_done =
+        sender_traits<Sender>::sends_done ||
+        sender_traits<decltype(::earnest::execution::schedule(std::declval<Scheduler>()))>::sends_done;
+
+    constexpr sender_impl(const Scheduler& sch, const Sender& s)
+    noexcept(std::is_nothrow_copy_constructible_v<Scheduler> && std::is_nothrow_copy_constructible_v<Sender>)
+    : _generic_sender_wrapper<sender_impl<Scheduler, Sender>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>(s),
+      sch(sch)
+    {}
+
+    constexpr sender_impl(const Scheduler& sch, Sender&& s)
+    noexcept(std::is_nothrow_copy_constructible_v<Scheduler> && std::is_nothrow_move_constructible_v<Sender>)
+    : _generic_sender_wrapper<sender_impl<Scheduler, Sender>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>(std::move(s)),
+      sch(sch)
+    {}
+
+    constexpr sender_impl(Scheduler&& sch, const Sender& s)
+    noexcept(std::is_nothrow_move_constructible_v<Scheduler> && std::is_nothrow_copy_constructible_v<Sender>)
+    : _generic_sender_wrapper<sender_impl<Scheduler, Sender>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>(s),
+      sch(std::move(sch))
+    {}
+
+    constexpr sender_impl(Scheduler&& sch, Sender&& s)
+    noexcept(std::is_nothrow_move_constructible_v<Scheduler> && std::is_nothrow_move_constructible_v<Sender>)
+    : _generic_sender_wrapper<sender_impl<Scheduler, Sender>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>(std::move(s)),
+      sch(std::move(sch))
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(std::is_nothrow_constructible_v<
+        opstate<Scheduler, Sender, std::remove_cvref_t<Receiver>>,
+        Scheduler, Sender, Receiver>)
+    -> opstate<Scheduler, Sender, std::remove_cvref_t<Receiver>> {
+      return opstate<Scheduler, Sender, std::remove_cvref_t<Receiver>>(std::move(self.sch), std::move(self.s), std::forward<Receiver>(r));
+    }
+
+    private:
+    Scheduler sch;
+  };
+
+  template<scheduler Scheduler, typed_sender Sender>
+  constexpr auto default_impl(Scheduler&& sch, Sender&& s) const
+  noexcept(std::is_nothrow_constructible_v<
+      sender_impl<std::remove_cvref_t<Scheduler>, std::remove_cvref_t<Sender>>,
+      Scheduler, Sender>)
+  -> sender_impl<std::remove_cvref_t<Scheduler>, std::remove_cvref_t<Sender>> {
+    return sender_impl<std::remove_cvref_t<Scheduler>, std::remove_cvref_t<Sender>>(std::forward<Scheduler>(sch), std::forward<Sender>(s));
+  }
+};
+inline constexpr lazy_on_t lazy_on{};
+
+
+struct on_t {
+  template<scheduler Scheduler, typed_sender Sender>
+  constexpr auto operator()(Scheduler&& sch, Sender&& s) const
+  noexcept(
+      tag_invocable<on_t, Scheduler, Sender> ?
+      nothrow_tag_invocable<on_t, Scheduler, Sender> :
+      noexcept(lazy_on(std::forward<Scheduler>(sch), std::forward<Sender>(s))))
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<on_t, Scheduler, Sender>)
+      return ::earnest::execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s));
+    else
+      return lazy_on(std::forward<Scheduler>(sch), std::forward<Sender>(s));
+  }
+};
+inline constexpr on_t on{};
 
 
 } /* namespace earnest::execution */
