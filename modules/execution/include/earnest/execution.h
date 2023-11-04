@@ -5801,6 +5801,17 @@ struct lazy_on_t {
   }
 
   private:
+  // Operation-state for the lazy-on operation.
+  //
+  // Upon connect, the `scheduler_sender' will invoke:
+  // `schedule(Scheduler) | lazy_let_value(returning Sender) | scheduler_receiver(Receiver)'
+  // The trailing receiver of is stored in the opstate, and assigned to
+  // by the scheduler_receiver.
+  //
+  // The scheduler_receiver takes care of delivering the completion-signal into the receiver,
+  // and the completing the receiver from `start_detached'.
+  //
+  // When this opstate is started, it'll run `start_detached(scheduler_sender)'.
   template<scheduler Scheduler, sender Sender, receiver Receiver>
   class opstate {
     private:
