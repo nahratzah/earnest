@@ -604,9 +604,9 @@ template<typename T> concept sender =
 // A typed-sender, is a sender, for which the sender_traits are all populated.
 template<typename T> concept typed_sender =
     sender<T> && requires {
-      typename sender_traits<T>::template value_types<std::tuple, std::variant>;
-      typename sender_traits<T>::template error_types<std::variant>;
-      typename std::integral_constant<bool, sender_traits<T>::sends_done>;
+      typename sender_traits<std::remove_cvref_t<T>>::template value_types<std::tuple, std::variant>;
+      typename sender_traits<std::remove_cvref_t<T>>::template error_types<std::variant>;
+      typename std::integral_constant<bool, sender_traits<std::remove_cvref_t<T>>::sends_done>;
     };
 
 // An operation-state is something that can be started.
@@ -2364,7 +2364,7 @@ struct sync_wait_t {
   template<typename> friend struct _generic_operand_base_t;
 
   template<typed_sender Sender>
-  requires (std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1)
+  requires (std::variant_size_v<typename sender_traits<std::remove_cvref_t<Sender>>::template value_types<std::tuple, std::variant>> == 1)
   constexpr auto operator()(Sender&& s) const
   noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const sync_wait_t&>(), std::declval<Sender>())))
   -> decltype(_generic_operand_base<set_value_t>(std::declval<const sync_wait_t&>(), std::declval<Sender>())) {
@@ -2675,10 +2675,10 @@ struct sync_wait_t {
   using no_variant_type = T;
 
   template<typed_sender Sender>
-  requires (std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1)
+  requires (std::variant_size_v<typename sender_traits<std::remove_cvref_t<Sender>>::template value_types<std::tuple, std::variant>> == 1)
   auto default_impl(Sender&& s) const
-  -> std::optional<typename sender_traits<Sender>::template value_types<tuple_type, no_variant_type>> {
-    using receiver_type = receiver<typename sender_traits<Sender>::template value_types<tuple_type, no_variant_type>>;
+  -> std::optional<typename sender_traits<std::remove_cvref_t<Sender>>::template value_types<tuple_type, no_variant_type>> {
+    using receiver_type = receiver<typename sender_traits<std::remove_cvref_t<Sender>>::template value_types<tuple_type, no_variant_type>>;
 
     execution_context ex_ctx; // Execution context, used for any tasks that use the scheduler.
                               // XXX should we allocate this on the heap?
@@ -2712,11 +2712,6 @@ struct sync_wait_t {
       case 3: // Completed with set_done.
         return std::nullopt;
     }
-  }
-
-  template<typename... Args>
-  auto default_impl(Args&&... args) const -> void {
-    static_assert(sizeof...(Args) == 1);
   }
 };
 inline constexpr sync_wait_t sync_wait{};
@@ -5334,6 +5329,453 @@ struct lazy_transfer_when_all_with_variant_t {
   }
 };
 inline constexpr lazy_transfer_when_all_with_variant_t lazy_transfer_when_all_with_variant{};
+
+
+// Split a sender, allowing for multiple chains to be attached, all sharing the same
+// chain leading up to the split.
+struct lazy_split_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<typed_sender Sender>
+  constexpr auto operator()(Sender&& s) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<lazy_split_t>(), std::declval<Sender>())))
+  -> typed_sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
+  }
+
+  private:
+  template<typename... Args>
+  class value_outcome {
+    public:
+    template<typename... Args_>
+    explicit constexpr value_outcome(Args_&&... args)
+    noexcept(std::is_nothrow_constructible_v<std::tuple<Args...>, Args_...>)
+    : values(std::forward<Args_>(args)...)
+    {}
+
+    template<receiver Receiver>
+    auto apply(Receiver&& r) const noexcept -> void {
+      std::apply(
+          [&r](const auto&... args) -> void {
+            ::earnest::execution::set_value(std::forward<Receiver>(r), args...);
+          },
+          values);
+    }
+
+    private:
+    std::tuple<Args...> values;
+  };
+
+  template<typename Error>
+  class error_outcome {
+    public:
+    explicit constexpr error_outcome(Error&& error) noexcept(std::is_nothrow_move_constructible_v<Error>)
+    : error(std::move(error))
+    {}
+
+    explicit constexpr error_outcome(const Error& error) noexcept(std::is_nothrow_copy_constructible_v<Error>)
+    : error(error)
+    {}
+
+    template<receiver Receiver>
+    auto apply(Receiver&& r) const noexcept -> void {
+      ::earnest::execution::set_error(std::forward<Receiver>(r), error);
+    }
+
+    private:
+    Error error;
+  };
+
+  class done_outcome {
+    public:
+    constexpr done_outcome() noexcept = default;
+
+    template<receiver Receiver>
+    auto apply(Receiver&& r) const noexcept -> void {
+      ::earnest::execution::set_done(std::forward<Receiver>(r));
+    }
+  };
+
+  // Helper type to compute all the outcome-types for this sender.
+  template<typed_sender Sender>
+  struct outcome_types_ {
+    private:
+    // Create a value_outcome for given types.
+    template<typename... T>
+    using computed_value_type_ = value_outcome<std::remove_cvref_t<T>...>;
+    // Figure out all the value_outcomes we need.
+    using computed_value_types = typename sender_traits<Sender>::template value_types<computed_value_type_, _type_appender>;
+
+    // Create an error_outcome for given error type.
+    template<typename... T>
+    using computed_error_type_ = error_outcome<std::remove_cvref_t<T>...>;
+    // Figure out all the error_outcomes we need.
+    using computed_error_types = typename sender_traits<Sender>::template error_types<_type_appender>::template transform<computed_error_type_>;
+
+    // Figure out all the done_outcomes we need.
+    using computed_done_types = std::conditional_t<sender_traits<Sender>::sends_done, _type_appender<done_outcome>, _type_appender<>>;
+
+    public:
+    // Create a type-appender containing all the required outcome-types.
+    using type = _type_appender<>::merge<                           // We want the union of
+            computed_value_types,                                   // all value-outcome types
+            computed_error_types,                                   // all error-outcome types
+            computed_done_types                                     // and the done-outcome type (if we need one)
+        >::                                                         //
+        template type<_deduplicate<_type_appender>::template type>; // and remove any duplicates.
+  };
+  // Collect all the outcome-types we need.
+  template<typed_sender Sender>
+  using outcome_types = typename outcome_types_<Sender>::type;
+
+  // A marker type, to indicate the operation has not been started.
+  // We use a specific type, so we can encode it inside the shared_upstate_outcomes variant,
+  // without requiring an extra 4+ bytes of memory.
+  struct unstarted {};
+  // A marker type, to indicate the operation has started.
+  // We use a specific type, so we can encode it inside the shared_upstate_outcomes variant,
+  // without requiring an extra 4+ bytes of memory.
+  struct started {};
+
+  // We use embedded double-linked-list, that way, we can link (and unlink)
+  // without requiring additional memory (and thus also without additional
+  // exceptions).
+  struct opstate_link {
+    using callback_fn = void(opstate_link&) noexcept;
+
+    protected:
+    constexpr opstate_link(callback_fn* callback) noexcept
+    : callback(callback)
+    {}
+
+#ifdef NDEBUG
+    ~opstate_link() {
+      // Confirm we aren't linked.
+      assert(succ == nullptr && pred == nullptr);
+    }
+#else
+    ~opstate_link() = default;
+#endif
+
+    public:
+    opstate_link* succ = nullptr;
+    opstate_link* pred = nullptr;
+    callback_fn* const callback;
+  };
+
+  // The outcomes from the sender chain.
+  template<bool SendsDone, typename OutcomeTypes>
+  class shared_opstate_outcomes {
+    public:
+    // Variant with all the outcome types.
+    // The first type is `unstarted', and it gets initialized to that.
+    //
+    // The `unstarted' and `started' marker type are used to indicate what state
+    // the system is in. Both indicate that there is no outcome available.
+    using variant_type = typename _type_appender<unstarted, started>::merge<OutcomeTypes>::template type<std::variant>;
+
+    // Implementation of the receiver that'll populate this opstate.
+    class receiver_impl {
+      public:
+      receiver_impl(shared_opstate_outcomes& state) noexcept
+      : state(state)
+      {}
+
+      // Consume the value-signal.
+      template<typename... Args>
+      friend auto tag_invoke([[maybe_unused]] set_value_t, receiver_impl&& self, Args&&... args) noexcept -> void {
+        using outcome_type = value_outcome<std::remove_cvref_t<Args>...>;
+
+        {
+          std::lock_guard lck{self.state.mtx};
+          try {
+            self.state.outcome.template emplace<outcome_type>(std::forward<Args>(args)...);
+          } catch (...) {
+            self.state.outcome.template emplace<error_outcome<std::exception_ptr>>(std::current_exception());
+          }
+        }
+
+        self.state.notify();
+      }
+
+      // Consume the error-signal.
+      template<typename Error>
+      friend auto tag_invoke([[maybe_unused]] set_error_t, receiver_impl&& self, Error&& error) noexcept -> void {
+        using outcome_type = error_outcome<std::remove_cvref_t<Error>>;
+
+        {
+          std::lock_guard lck{self.state.mtx};
+          self.state.outcome.template emplace<outcome_type>(std::forward<Error>(error));
+        }
+
+        self.state.notify();
+      }
+
+      // Consume the done-signal.
+      friend auto tag_invoke([[maybe_unused]] set_done_t, receiver_impl&& self) noexcept -> void {
+        using outcome_type = done_outcome;
+
+        {
+          std::lock_guard lck{self.state.mtx};
+          assert(SendsDone);
+          if constexpr(SendsDone) self.state.outcome.template emplace<outcome_type>();
+        }
+
+        // Notify any queued operations.
+        // Must be run outside the lock.
+        self.state.notify();
+      }
+
+      private:
+      shared_opstate_outcomes& state;
+    };
+
+    protected:
+    shared_opstate_outcomes() = default;
+
+    // Prevent copy/move (so that pointer can be used).
+    shared_opstate_outcomes(const shared_opstate_outcomes&) = delete;
+    shared_opstate_outcomes(shared_opstate_outcomes&&) = delete;
+    shared_opstate_outcomes& operator=(const shared_opstate_outcomes&) = delete;
+    shared_opstate_outcomes& operator=(shared_opstate_outcomes&&) = delete;
+
+    ~shared_opstate_outcomes() = default;
+
+    public:
+    // Apply the outcome to a receiver.
+    //
+    // The outcome must have been populated.
+    // (If the outcome hasn't been populated, we fail the call.)
+    //
+    // You should never call this with the lock held:
+    // the completion of the receiver may destroy *this.
+    template<receiver Receiver>
+    auto apply(Receiver&& r) const noexcept -> void {
+#ifndef NDEBUG
+      {
+        std::lock_guard lck{mtx};
+        assert(!std::holds_alternative<unstarted>(outcome) &&
+            !std::holds_alternative<started>(outcome));
+      }
+#endif
+      std::visit(
+          [&r](const auto& oc) noexcept {
+            if constexpr(std::is_same_v<std::remove_cvref_t<decltype(oc)>, unstarted>) {
+              // Skip, should never happen.
+            } else if constexpr(std::is_same_v<std::remove_cvref_t<decltype(oc)>, started>) {
+              // Skip, should never happen.
+            } else {
+              oc.apply(std::forward<Receiver>(r));
+            }
+          },
+          outcome);
+    }
+
+    // Link an opstate to the completion of this.
+    //
+    // If the operation-state has already completed,
+    // it'll invoke the link immediately.
+    // Otherwise, it'll link it into the list of pending-completions,
+    // which will be invoked once the state ends.
+    auto attach(opstate_link& link) noexcept -> void {
+      {
+        std::lock_guard lck{mtx};
+        if (std::holds_alternative<unstarted>(this->outcome) || std::holds_alternative<unstarted>(this->outcome)) {
+          // We only link, if the nested-opstate hasn't completed yet.
+          link.succ = std::exchange(pending_completions, &link);
+          return;
+        }
+      }
+
+      // Only reached if the state was complete.
+      // Invokes the link-callback, which initiates the next operation-state.
+      //
+      // Must be called outside the lock, because it may destroy *this.
+      std::invoke(link.callback, link);
+    }
+
+    private:
+    // Start any pending completions.
+    //
+    // Must be called without lock.
+    auto notify() noexcept -> void {
+      bool last = false;
+      while (!last) {
+        opstate_link* lnk;
+        std::tie(lnk, last) = pop_link();
+        if (lnk != nullptr) std::invoke(lnk->callback, *lnk);
+      }
+    }
+
+    // Unlink and return an opstate-link.
+    // Handles locking by itsef.
+    auto pop_link() noexcept -> std::tuple<opstate_link*, bool> {
+      std::lock_guard lck{mtx};
+      opstate_link*const lnk = pending_completions;
+      if (lnk == nullptr) return std::make_tuple(nullptr, true);
+
+      assert(lnk->pred == nullptr);
+      pending_completions = std::exchange(lnk->succ, nullptr);
+      if (pending_completions != nullptr) pending_completions->pred = nullptr;
+      lnk->succ = nullptr;
+      return std::make_tuple(lnk, pending_completions == nullptr);
+    }
+
+    protected:
+    mutable std::mutex mtx;
+    variant_type outcome;
+
+    private:
+    opstate_link* pending_completions = nullptr;
+  };
+  // Returns the outcome-types corresponding to this sender type.
+  template<typed_sender Sender>
+  using shared_opstate_outcomes_for_sender = shared_opstate_outcomes<sender_traits<Sender>::sends_done, outcome_types<Sender>>;
+
+  // Shared operation state.
+  //
+  // Runs the preceding chain, and then keeps a hold of the outcomes.
+  template<typed_sender Sender>
+  class shared_opstate
+  : public shared_opstate_outcomes_for_sender<Sender>
+  {
+    private:
+    using receiver_type = typename shared_opstate_outcomes_for_sender<Sender>::receiver_impl;
+    using nested_opstate_type = decltype(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_type>()));
+
+    public:
+    explicit shared_opstate(Sender&& s)
+    : shared_opstate_outcomes_for_sender<Sender>(),
+      nested_opstate(::earnest::execution::connect(std::move(s), receiver_type(*this)))
+    {}
+
+    // Ensure the shared_opstate is started.
+    // You should not hold the lock during this call:
+    // the function managed it itself.
+    auto ensure_started() noexcept -> void {
+      {
+        std::lock_guard lck{this->mtx};
+        if (!std::holds_alternative<unstarted>(this->outcome)) return; // already started
+        this->outcome.template emplace<started>();
+      }
+      // Ensure we start the operation outside the mutex.
+      ::earnest::execution::start(nested_opstate);
+    }
+
+    private:
+    [[no_unique_address]] nested_opstate_type nested_opstate;
+  };
+
+  // The operation state for successive operations.
+  template<typed_sender Sender, receiver Receiver>
+  class opstate
+  : private opstate_link
+  {
+    public:
+    explicit opstate(std::shared_ptr<shared_opstate<Sender>>&& shared_state, Receiver&& r)
+    noexcept(std::is_nothrow_move_assignable_v<Receiver>)
+    : opstate_link(&callback_impl),
+      r(std::move(r)),
+      shared_state(std::move(shared_state))
+    {}
+
+    explicit opstate(const std::shared_ptr<shared_opstate<Sender>>& shared_state, Receiver&& r)
+    noexcept(std::is_nothrow_move_assignable_v<Receiver>)
+    : opstate_link(&callback_impl),
+      r(std::move(r)),
+      shared_state(shared_state)
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
+      self.shared_state->ensure_started();
+
+      // Attach last: `self' may destroy this opstate upon completion, and that would
+      // invalidate `self.shared_state'.
+      self.shared_state->attach(self);
+    }
+
+    private:
+    static auto callback_impl(opstate_link& self_link) noexcept -> void {
+      opstate& self = static_cast<opstate&>(self_link);
+      self.shared_state->apply(std::move(self.r));
+    }
+
+    Receiver r;
+    std::shared_ptr<shared_opstate<Sender>> shared_state;
+  };
+
+  // Implementation of the sender.
+  template<typed_sender Sender>
+  class sender_impl {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = typename sender_traits<Sender>::template value_types<Tuple, Variant>;
+
+    template<template<typename...> class Variant>
+    using error_types = typename sender_traits<Sender>::template error_types<_type_appender<std::exception_ptr>::template append>::template type<Variant>;
+
+    static inline constexpr bool sends_done = sender_traits<Sender>::sends_done;
+
+    explicit constexpr sender_impl(Sender&& s) noexcept(std::is_nothrow_move_constructible_v<Sender>)
+    : shared_state(std::make_shared<shared_opstate<Sender>>(std::move(s)))
+    {}
+
+    explicit constexpr sender_impl(const Sender& s) noexcept(std::is_nothrow_copy_constructible_v<Sender>)
+    : shared_state(std::make_shared<shared_opstate<Sender>>(s))
+    {}
+
+    // Connect to a receiver.
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(std::is_nothrow_constructible_v<opstate<Sender, std::remove_cvref_t<Receiver>>, std::shared_ptr<shared_opstate<Sender>>, Receiver>)
+    -> opstate<Sender, std::remove_cvref_t<Receiver>> {
+      return opstate<Sender, std::remove_cvref_t<Receiver>>(std::move(self.shared_state), std::forward<Receiver>(r));
+    }
+
+    // Connect to a receiver.
+    // This connect takes `sender_impl' as by const-reference, permitting re-use.
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, const sender_impl& self, Receiver&& r)
+    noexcept(std::is_nothrow_constructible_v<opstate<Sender, std::remove_cvref_t<Receiver>>, std::shared_ptr<shared_opstate<Sender>>, Receiver>)
+    -> opstate<Sender, std::remove_cvref_t<Receiver>> {
+      return opstate<Sender, std::remove_cvref_t<Receiver>>(self.shared_state, std::forward<Receiver>(r));
+    }
+
+    private:
+    std::shared_ptr<shared_opstate<Sender>> shared_state;
+  };
+
+  template<typed_sender Sender>
+  constexpr auto default_impl(Sender&& s) const
+  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<Sender>>, Sender>)
+  -> sender_impl<std::remove_cvref_t<Sender>> {
+    return sender_impl<std::remove_cvref_t<Sender>>(std::forward<Sender>(s));
+  }
+};
+inline constexpr lazy_split_t lazy_split{};
+
+
+// Split a sender, allowing for multiple chains to be attached, all sharing the same
+// chain leading up to the split.
+struct split_t {
+  template<typename> friend struct _generic_operand_base_t;
+
+  template<typed_sender Sender>
+  constexpr auto operator()(Sender&& s) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<split_t>(), std::declval<Sender>())))
+  -> typed_sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
+  }
+
+  private:
+  template<typed_sender Sender>
+  constexpr auto default_impl(Sender&& s) const
+  noexcept(noexcept(lazy_split(std::forward<Sender>(s))))
+  -> typed_sender decltype(auto) {
+    return lazy_split(std::forward<Sender>(s));
+  }
+};
+inline constexpr split_t split{};
 
 
 } /* namespace earnest::execution */

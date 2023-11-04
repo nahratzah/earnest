@@ -434,6 +434,40 @@ TEST(when_all) {
   CHECK_EQUAL(19, z);
 }
 
+TEST(split) {
+  using split_traits = sender_traits<decltype(split(just(1)))>;
+  static_assert(std::copyable<decltype(split(just(1)))>);
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<int>>,
+      split_traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      split_traits::error_types<std::variant>>);
+  static_assert(split_traits::sends_done == false);
+
+  int calls = 0;
+  auto split_chain = split(
+      just(1)
+      | lazy_then(
+          [&calls](int i) {
+            ++calls;
+            return i;
+          }));
+  CHECK_EQUAL(0, calls);
+
+  split_chain | then([](int i) { return i; });
+  static_assert(typed_sender<decltype(split_chain | then([](int i) { return i; }))>);
+  auto [x] = sync_wait(split_chain | then([](int i) { return i; })).value();
+  CHECK_EQUAL(1, x);
+  CHECK_EQUAL(1, calls);
+
+  auto [y] = sync_wait(split_chain).value();
+#if 0
+  CHECK_EQUAL(1, y);
+  CHECK_EQUAL(1, calls);
+#endif
+}
+
 TEST(adapters_are_chainable) {
   // We want to verify that an adapter-chain can be late-bound.
   // In order to allow check this, we create an adapter chain with
