@@ -459,6 +459,78 @@ struct lazy_repeat_t {
     Fn fn;
   };
 
+  // Helper type, that figure out sender type of the function, for given arguments.
+  template<typename Fn>
+  struct sender_type_from_fn {
+    template<typename... Args>
+    using optional_type = std::remove_cvref_t<std::invoke_result_t<Fn&, std::size_t, std::remove_cvref_t<Args>&...>>;
+
+    template<typename... Args>
+    using type = typename optional_type<Args...>::value_type;
+
+    template<typename... Args>
+    using traits = sender_traits<type<Args...>>;
+  };
+  // Translate the `sends_done' constant into std::true_type or std::false_type.
+  template<typename Traits>
+  using sends_done_as_integral_constant = std::integral_constant<bool, Traits::sends_done>;
+  // Translate the sender-traits into a collection of errors.
+  template<typename Traits>
+  using all_error_types_for_sender = typename Traits::template error_types<_type_appender>;
+
+  // Forward-declaration of sender_impl, because we need to know this for `sender_types_for_impl'.
+  template<sender Sender, typename Fn> class sender_impl;
+
+  // Wrapper around the generic sender wrapper, which overrides sender_traits.
+  // The default implementation overrides nothing, since the underlying sender is incomplete.
+  template<sender Sender, typename Fn>
+  struct sender_types_for_impl
+  : public _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
+  {
+    // Inherit all constructors.
+    using _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>::_generic_sender_wrapper;
+  };
+  // Specialization for sender_types_for_impl.
+  // This one has a typed_sender, and thus can compute updated traits.
+  // It overrides the error_types (to be the union of all the errors)
+  // and the sends_done value.
+  template<typed_sender Sender, typename Fn>
+  struct sender_types_for_impl<Sender, Fn>
+  : public _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
+  {
+    private:
+    // Figure out all the sender types.
+    // `_type_appender<sender_traits<Sender1>, sender_traits<Sender2>, ...>'
+    using _all_sender_types_from_fn_ = typename sender_traits<Sender>::template value_types<sender_type_from_fn<Fn>::template traits, _type_appender>;
+
+    public:
+    // Figure out the error-types.
+    template<template<typename...> class Variant>
+    using error_types =
+        typename _type_appender<>::merge<                                          // The union of
+            typename sender_traits<Sender>::template error_types<_type_appender>,  // the error-types of our sender,
+            typename _all_sender_types_from_fn_::                                  // from any of the sender from the function
+                template transform<all_error_types_for_sender>::                   // take all the errors
+                                                                                   // (`_type_appender<_type_appender<E1, E2, ...>, ...>')
+                template type<_type_appender<>::template merge>                    // and flatten the collection
+        >::                                                                        //
+        template type<Variant>;                                                    // And pass them all to the variant.
+
+    // Figure out if we send the done-signal.
+    static inline constexpr bool sends_done =
+        _type_appender<>::merge<                                                              // Collect the union of
+            _type_appender<sender_traits<Sender>>,                                            // sender_traits for our sender,
+            _all_sender_types_from_fn_                                                        // sender_traits for any of the senders from
+                                                                                              // the function
+        >::                                                                                   //
+        template transform<sends_done_as_integral_constant>::                                 // Transform them all into an integral-constant
+                                                                                              // based on the sends_done value.
+        template type<std::disjunction>::value;                                               // And then we take the logic-OR of this.
+
+    // Inherit all constructors.
+    using _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>::_generic_sender_wrapper;
+  };
+
   // We use a single sender.
   //
   // When the sender is connected to a receiver,
@@ -466,30 +538,32 @@ struct lazy_repeat_t {
   // It'll create the opstate if there is a get_receiver(receiver) function.
   template<sender Sender, typename Fn>
   class sender_impl
-  : public _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>
+  : public sender_types_for_impl<Sender, Fn>
   {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
     public:
     explicit sender_impl(Sender&& s, Fn&& fn)
     noexcept(std::is_nothrow_move_constructible_v<Sender> && std::is_nothrow_move_constructible_v<Fn>)
-    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(std::move(s)),
+    : sender_types_for_impl<Sender, Fn>(std::move(s)),
       fn(std::move(fn))
     {}
 
     explicit sender_impl(Sender&& s, const Fn& fn)
     noexcept(std::is_nothrow_move_constructible_v<Sender> && std::is_nothrow_copy_constructible_v<Fn>)
-    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(std::move(s)),
+    : sender_types_for_impl<Sender, Fn>(std::move(s)),
       fn(fn)
     {}
 
     explicit sender_impl(const Sender& s, Fn&& fn)
     noexcept(std::is_nothrow_copy_constructible_v<Sender> && std::is_nothrow_move_constructible_v<Fn>)
-    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(s),
+    : sender_types_for_impl<Sender, Fn>(s),
       fn(std::move(fn))
     {}
 
     explicit sender_impl(const Sender& s, const Fn& fn)
     noexcept(std::is_nothrow_copy_constructible_v<Sender> && std::is_nothrow_copy_constructible_v<Fn>)
-    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(s),
+    : sender_types_for_impl<Sender, Fn>(s),
       fn(fn)
     {}
 
@@ -503,6 +577,20 @@ struct lazy_repeat_t {
     }
 
     private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Fn>, OtherSender, Fn>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Fn> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
+    }
+
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) const &
+    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Fn>, OtherSender, const Fn&>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Fn> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Fn>(std::forward<OtherSender>(other_sender), fn);
+    }
+
     [[no_unique_address]] Fn fn;
   };
 
