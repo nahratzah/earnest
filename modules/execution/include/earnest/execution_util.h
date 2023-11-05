@@ -314,9 +314,9 @@ struct lazy_repeat_t {
       if (opt_fn_sender.has_value()) {
         // We start the sub-task in detached mode.
         // The local-sender will create a local-receiver which will intercept all the signals.
-        // We use `on(get_scheduler(r))' so that we won't recurse on the stack.
+        // We use `lazy_on(get_scheduler(r))' so that we won't recurse on the stack.
         execution::start_detached(
-            execution::on(
+            execution::lazy_on(
                 execution::get_scheduler(r),
                 local_sender<FnSender, ValuesContainer>(*this, container, *std::move(opt_fn_sender))));
       } else {
