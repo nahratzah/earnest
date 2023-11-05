@@ -2383,28 +2383,25 @@ struct sync_wait_t {
     template<operation_state OpState>
     class operation_state {
       public:
-      explicit operation_state(execution_context& ex_ctx, OpState&& op_state)
+      template<sender Sender, receiver Receiver>
+      explicit operation_state(execution_context& ex_ctx, Sender&& s, Receiver&& r)
       noexcept(std::is_nothrow_move_constructible_v<OpState>)
       : ex_ctx(ex_ctx),
-        op_state(std::move(op_state))
+        op_state(execution::connect(std::forward<Sender>(s), std::forward<Receiver>(r)))
       {}
 
-      explicit operation_state(execution_context& ex_ctx, const OpState& op_state)
-      noexcept(std::is_nothrow_copy_constructible_v<OpState>)
-      : ex_ctx(ex_ctx),
-        op_state(op_state)
-      {}
-
-      friend auto tag_invoke([[maybe_unused]] const start_t&, operation_state&& o) -> void {
+      friend auto tag_invoke([[maybe_unused]] const start_t&, operation_state&& o) noexcept -> void {
+        // XXX this can actually throw.
         o.ex_ctx.push(
             [op_state=std::move(o.op_state)]() mutable noexcept {
               start(op_state);
             });
       }
 
-      friend auto tag_invoke([[maybe_unused]] const start_t&, operation_state& o) -> void {
+      friend auto tag_invoke([[maybe_unused]] const start_t&, operation_state& o) noexcept -> void {
+        // XXX this can actually throw.
         o.ex_ctx.push(
-            [op_state=o.op_state]() mutable noexcept {
+            [op_state=std::move(o.op_state)]() mutable noexcept {
               start(op_state);
             });
       }
@@ -2416,18 +2413,18 @@ struct sync_wait_t {
 
     // Create an operation state, wrapping the given operation state.
     // The returned operation state will execute on the execution-context.
-    template<::earnest::execution::operation_state OpState>
-    static auto make_operation_state(execution_context& ex_ctx, OpState&& op_state)
-    noexcept(std::is_nothrow_constructible_v<operation_state<std::remove_cvref_t<OpState>>, OpState>)
-    -> operation_state<std::remove_cvref_t<OpState>> {
-      return operation_state<std::remove_cvref_t<OpState>>(ex_ctx, std::forward<OpState>(op_state));
+    template<sender Sender, receiver Receiver>
+    static auto make_operation_state(execution_context& ex_ctx, Sender&& s, Receiver&& r)
+    noexcept(std::is_nothrow_constructible_v<operation_state<std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>>, Sender, Receiver>)
+    -> operation_state<std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>> {
+      return operation_state<std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>>(ex_ctx, std::forward<Sender>(s), std::forward<Receiver>(r));
     }
 
     // A sender for this execution context.
     class sender {
       public:
       template<template<typename...> class Tuple, template<typename...> class Variant>
-      using value_types = Variant<>;
+      using value_types = Variant<Tuple<>>;
 
       template<template<typename...> class Variant>
       using error_types = Variant<std::exception_ptr>;
@@ -2437,13 +2434,13 @@ struct sync_wait_t {
       template<receiver Receiver>
       friend auto tag_invoke([[maybe_unused]] connect_t, const sender& self, Receiver&& r)
       -> auto {
-        return make_operation_state(self.ex_ctx, just() | std::forward<Receiver>(r));
+        return make_operation_state(self.ex_ctx, just(), std::forward<Receiver>(r));
       }
 
       template<receiver Receiver>
       friend auto tag_invoke([[maybe_unused]] connect_t, sender&& self, Receiver&& r)
       -> auto {
-        return make_operation_state(self.ex_ctx, just() | std::forward<Receiver>(r));
+        return make_operation_state(self.ex_ctx, just(), std::forward<Receiver>(r));
       }
 
       friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_value_t>, const sender& self) noexcept -> auto {
@@ -2481,8 +2478,7 @@ struct sync_wait_t {
         self.ctx->push(std::forward<Fn>());
       }
 
-      template<std::invocable<> Fn>
-      friend auto tag_invoke([[maybe_unused]] schedule_t, const scheduler& self, Fn&& fn) noexcept -> sender {
+      friend auto tag_invoke([[maybe_unused]] schedule_t, const scheduler& self) noexcept -> sender {
         return sender(*self.ctx);
       }
 
@@ -2547,7 +2543,7 @@ struct sync_wait_t {
     template<std::invocable<> Fn>
     auto push(Fn&& fn) -> void {
       std::lock_guard lck{mtx};
-      tasks.emplace(std::forward<Fn>()); // May throw.
+      tasks.emplace(std::forward<Fn>(fn)); // May throw.
       cnd.notify_one();
     }
 

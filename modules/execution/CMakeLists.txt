@@ -12,5 +12,8 @@ target_compile_features(execution INTERFACE cxx_std_17)
 
 add_executable(execution_test)
 target_link_libraries(execution_test PUBLIC execution UnitTest++)
-target_sources(execution_test PRIVATE tests/execution.cc)
+target_sources(execution_test PRIVATE
+	tests/execution.cc
+	tests/execution_util.cc
+	tests/main.cc)
 add_test(NAME execution COMMAND execution_test)
