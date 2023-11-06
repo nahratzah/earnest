@@ -44,7 +44,7 @@
 
 #include <unistd.h>
 
-namespace earnest::execution {
+namespace earnest::execution::io {
 
 
 // Adapter that, when the chain completes with an error-signal holding a std::error_code,
@@ -52,7 +52,7 @@ namespace earnest::execution {
 //
 // Anything else passes through unaltered.
 struct ec_to_exception_t {
-  template<typename> friend struct _generic_operand_base_t;
+  template<typename> friend struct ::earnest::execution::_generic_operand_base_t;
 
   template<sender Sender>
   auto operator()(Sender&& s) const
@@ -734,4 +734,108 @@ struct lazy_write_t {
 inline constexpr lazy_write_t lazy_write{};
 
 
-} /* namespace earnest::execution */
+struct read_ec_t {
+  template<typename FD>
+  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<read_ec_t, FD, std::span<std::byte>, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    else
+      return lazy_read_ec(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+  }
+};
+inline constexpr read_ec_t read_ec{};
+
+
+struct write_ec_t {
+  template<typename FD>
+  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<write_ec_t, FD, std::span<const std::byte>, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    else
+      return lazy_write_ec(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+  }
+};
+inline constexpr write_ec_t write_ec{};
+
+
+struct read_t {
+  template<typename FD>
+  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<read_t, FD, std::span<std::byte>, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    else
+      return lazy_read(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+  }
+};
+inline constexpr read_t read{};
+
+
+struct write_t {
+  template<typename FD>
+  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<write_t, FD, std::span<const std::byte>, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    else
+      return lazy_write(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+  }
+};
+inline constexpr write_t write{};
+
+
+struct read_some_ec_t {
+  template<typename FD>
+  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<read_some_ec_t, FD, std::span<std::byte>, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    else
+      return lazy_read_some_ec(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+  }
+};
+inline constexpr read_some_ec_t read_some_ec{};
+
+
+struct write_some_ec_t {
+  template<typename FD>
+  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<write_some_ec_t, FD, std::span<const std::byte>, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    else
+      return lazy_some_write_ec(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+  }
+};
+inline constexpr write_some_ec_t write_some_ec{};
+
+
+struct read_some_t {
+  template<typename FD>
+  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<read_some_t, FD, std::span<std::byte>, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    else
+      return lazy_read_some(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+  }
+};
+inline constexpr read_some_t read_some{};
+
+
+struct write_some_t {
+  template<typename FD>
+  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<write_some_t, FD, std::span<const std::byte>, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    else
+      return lazy_write_some(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+  }
+};
+inline constexpr write_some_t write_some{};
+
+
+} /* namespace earnest::execution::io */
