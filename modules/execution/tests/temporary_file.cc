@@ -13,7 +13,10 @@ temporary_file::temporary_file()
 }
 
 temporary_file::~temporary_file() {
-  if (fd != -1) ::unlink(filename.data());
+  if (fd != -1) {
+    ::unlink(filename.data());
+    ::close(fd);
+  }
 }
 
 auto temporary_file::get_contents() const -> std::string {
