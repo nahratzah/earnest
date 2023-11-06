@@ -568,31 +568,43 @@ struct lazy_read_ec_t {
     if constexpr(tag_invocable<lazy_read_ec_t, FD, std::span<std::byte>, std::optional<std::size_t>>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
     } else {
-      return just(std::forward<FD>(fd), std::move(buf), minbytes.value_or(buf.size()), std::size_t(0), false)
+      struct state {
+        std::remove_cvref_t<FD> fd;
+        std::span<std::byte> buf;
+        std::size_t minbytes;
+        std::size_t read_count = 0;
+        bool eof = false;
+      };
+
+      return just(
+          state{
+            .fd=std::forward<FD>(fd),
+            .buf=buf,
+            .minbytes=minbytes.value_or(buf.size())
+          })
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, std::remove_cvref_t<FD>& fd, std::span<std::byte>& buf, std::size_t& minbytes, std::size_t& read_count, bool& eof) {
+          []([[maybe_unused]] std::size_t idx, state& st) {
             auto generator = [&]() {
               return std::make_optional(
-                  lazy_read_some_ec(fd, buf)
+                  lazy_read_some_ec(st.fd, st.buf)
                   | lazy_then(
-                      [&buf, &minbytes, &read_count, &eof](std::size_t rlen, bool at_eof) noexcept {
-                        buf = buf.subspan(rlen);
-                        minbytes -= std::min(minbytes, rlen);
-                        read_count += rlen;
-                        eof = at_eof;
+                      [&st](std::size_t rlen, bool eof) {
+                        st.buf = st.buf.subspan(rlen);
+                        st.minbytes -= std::min(st.minbytes, rlen);
+                        st.read_count += rlen;
+                        st.eof = eof;
                       }));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
-            if (buf.empty() || minbytes <= 0 || eof)
+            if (st.buf.empty() || st.minbytes <= 0 || st.eof)
               return opt_sender(std::nullopt);
             else
               return generator();
           })
       | lazy_then(
-          []([[maybe_unused]] std::remove_cvref_t<FD> fd, [[maybe_unused]] std::span<std::byte> buf,
-              [[maybe_unused]] std::size_t minbytes, std::size_t read_count, bool eof) noexcept {
-            return std::make_tuple(read_count, eof);
+          [](state st) noexcept {
+            return std::make_tuple(st.read_count, st.eof);
           })
       | lazy_explode_tuple();
     }
@@ -615,30 +627,41 @@ struct lazy_write_ec_t {
     if constexpr(tag_invocable<lazy_write_ec_t, FD, std::span<const std::byte>, std::optional<std::size_t>>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
     } else {
-      return just(std::forward<FD>(fd), std::move(buf), minbytes.value_or(buf.size()), std::size_t(0))
+      struct state {
+        std::remove_cvref_t<FD> fd;
+        std::span<const std::byte> buf;
+        std::size_t minbytes;
+        std::size_t write_count = 0;
+      };
+
+      return just(
+          state{
+            .fd=std::forward<FD>(fd),
+            .buf=buf,
+            .minbytes=minbytes.value_or(buf.size())
+          })
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, std::remove_cvref_t<FD>& fd, std::span<const std::byte>& buf, std::size_t& minbytes, std::size_t& written) {
+          []([[maybe_unused]] std::size_t idx, state& st) {
             auto generator = [&]() {
               return std::make_optional(
-                  lazy_write_some_ec(fd, buf)
+                  lazy_write_some_ec(st.fd, st.buf)
                   | lazy_then(
-                      [&buf, &minbytes, &written](std::size_t wlen) noexcept {
-                        buf = buf.subspan(wlen);
-                        minbytes -= std::min(minbytes, wlen);
-                        written += wlen;
+                      [&st](std::size_t wlen) noexcept {
+                        st.buf = st.buf.subspan(wlen);
+                        st.minbytes -= std::min(st.minbytes, wlen);
+                        st.write_count += wlen;
                       }));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
-            if (buf.empty() || minbytes <= 0)
+            if (st.buf.empty() || st.minbytes <= 0)
               return opt_sender(std::nullopt);
             else
               return generator();
           })
       | lazy_then(
-          []([[maybe_unused]] std::remove_cvref_t<FD> fd, [[maybe_unused]] std::span<const std::byte> buf,
-              [[maybe_unused]] std::size_t minbytes, std::size_t written) noexcept {
-            return written;
+          [](state st) noexcept {
+            return st.write_count;
           });
     }
   }
@@ -660,33 +683,45 @@ struct lazy_read_t {
     if constexpr(tag_invocable<lazy_read_t, FD, std::span<std::byte>, std::optional<std::size_t>>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
     } else {
-      return just(std::forward<FD>(fd), std::move(buf), minbytes.value_or(buf.size()), std::size_t(0), false)
+      struct state {
+        std::remove_cvref_t<FD> fd;
+        std::span<std::byte> buf;
+        std::size_t minbytes;
+        std::size_t read_count = 0;
+        bool eof = false;
+      };
+
+      return just(
+          state{
+            .fd=std::forward<FD>(fd),
+            .buf=buf,
+            .minbytes=minbytes.value_or(buf.size())
+          })
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, std::remove_cvref_t<FD>& fd, std::span<std::byte>& buf, std::size_t& minbytes, std::size_t& read_count, bool& eof) {
+          []([[maybe_unused]] std::size_t idx, state& st) {
             auto generator = [&]() {
               return std::make_optional(
-                  lazy_read_some(fd, buf)
+                  lazy_read_some(st.fd, st.buf)
                   | lazy_then(
-                      [&buf, &minbytes, &read_count, &eof](std::size_t wlen, bool at_eof) noexcept {
-                        buf = buf.subspan(wlen);
-                        minbytes -= std::min(minbytes, wlen);
-                        read_count += wlen;
-                        eof = at_eof;
+                      [&st](std::size_t rlen, bool eof) {
+                        st.buf = st.buf.subspan(rlen);
+                        st.minbytes -= std::min(st.minbytes, rlen);
+                        st.read_count += rlen;
+                        st.eof = eof;
                       }));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
-            if (buf.empty() || minbytes <= 0 || eof)
+            if (st.buf.empty() || st.minbytes <= 0 || st.eof)
               return opt_sender(std::nullopt);
             else
               return generator();
           })
       | lazy_then(
-          []([[maybe_unused]] std::remove_cvref_t<FD> fd, [[maybe_unused]] std::span<std::byte> buf,
-              [[maybe_unused]] std::size_t minbytes, std::size_t read_count, bool eof) noexcept {
-            return std::make_tuple(read_count, eof);
+          [](state st) noexcept {
+            return std::make_tuple(st.read_count, st.eof);
           })
-      | explode_tuple();
+      | lazy_explode_tuple();
     }
   }
 };
@@ -707,30 +742,41 @@ struct lazy_write_t {
     if constexpr(tag_invocable<lazy_write_t, FD, std::span<const std::byte>, std::optional<std::size_t>>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
     } else {
-      return just(std::forward<FD>(fd), std::move(buf), minbytes.value_or(buf.size()), std::size_t(0))
+      struct state {
+        std::remove_cvref_t<FD> fd;
+        std::span<const std::byte> buf;
+        std::size_t minbytes;
+        std::size_t write_count = 0;
+      };
+
+      return just(
+          state{
+            .fd=std::forward<FD>(fd),
+            .buf=buf,
+            .minbytes=minbytes.value_or(buf.size())
+          })
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, std::remove_cvref_t<FD>& fd, std::span<const std::byte>& buf, std::size_t& minbytes, std::size_t& written) {
+          []([[maybe_unused]] std::size_t idx, state& st) {
             auto generator = [&]() {
               return std::make_optional(
-                  lazy_write_some(fd, buf)
+                  lazy_write_some(st.fd, st.buf)
                   | lazy_then(
-                      [&buf, &minbytes, &written](std::size_t wlen) noexcept {
-                        buf = buf.subspan(wlen);
-                        minbytes -= std::min(minbytes, wlen);
-                        written += wlen;
+                      [&st](std::size_t wlen) noexcept {
+                        st.buf = st.buf.subspan(wlen);
+                        st.minbytes -= std::min(st.minbytes, wlen);
+                        st.write_count += wlen;
                       }));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
-            if (buf.empty() || minbytes <= 0)
+            if (st.buf.empty() || st.minbytes <= 0)
               return opt_sender(std::nullopt);
             else
               return generator();
           })
       | lazy_then(
-          []([[maybe_unused]] std::remove_cvref_t<FD> fd, [[maybe_unused]] std::span<const std::byte> buf,
-              [[maybe_unused]] std::size_t minbytes, std::size_t written) noexcept {
-            return written;
+          [](state st) noexcept {
+            return st.write_count;
           });
     }
   }
