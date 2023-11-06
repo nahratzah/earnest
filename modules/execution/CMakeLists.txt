@@ -15,5 +15,7 @@ target_link_libraries(execution_test PUBLIC execution UnitTest++)
 target_sources(execution_test PRIVATE
 	tests/execution.cc
 	tests/execution_util.cc
+	tests/execution_io.cc
+	tests/temporary_file.cc
 	tests/main.cc)
 add_test(NAME execution COMMAND execution_test)

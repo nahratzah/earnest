@@ -347,6 +347,21 @@ struct _deduplicate {
 };
 
 
+// Forward declaration of _type_appender.
+template<typename...> struct _type_appender;
+
+template<typename, typename...> struct _merge;
+template<typename... InitialTypes>
+struct _merge<_type_appender<InitialTypes...>> {
+  using type = _type_appender<InitialTypes...>;
+};
+template<typename... InitialTypes, typename... ExtraTypes, typename... TypeAppenders>
+struct _merge<_type_appender<InitialTypes...>, _type_appender<ExtraTypes...>, TypeAppenders...>
+: _merge<_type_appender<InitialTypes..., ExtraTypes...>, TypeAppenders...>
+{};
+template<typename... TypeAppenders>
+using _empty_merge = _merge<_type_appender<>, TypeAppenders...>;
+
 // This type gathers types.
 // Use the nested `append`-type to add more types.
 // Finally, use the `type`-type to resolve the type_appender into the variant.
@@ -362,25 +377,33 @@ struct _type_appender {
   template<typename... ExtraTypes>
   using append = _type_appender<InitialTypes..., ExtraTypes...>;
 
-  private:
-  template<typename...> struct _merge;
-  template<>
-  struct _merge<> {
-    using type = _type_appender;
-  };
-  template<typename... ExtraTypes, typename... TypeAppenders>
-  struct _merge<_type_appender<ExtraTypes...>, TypeAppenders...>
-  : append<ExtraTypes...>::template _merge<TypeAppenders...>
-  {};
-
-  public:
   // Merge multiple type-appenders into this type-appender.
   template<typename... TypeAppenders>
-  using merge = typename _merge<TypeAppenders...>::type;
+  using merge = typename _merge<_type_appender, TypeAppenders...>::type;
 
   // Apply a type-transformation on all types in this type-appender.
   template<template<typename...> class Transformation>
   using transform = _type_appender<Transformation<InitialTypes>...>;
+
+  private:
+  // Transformation for filtering.
+  // Turns any element `T' into either `_type_appender<T>' or `_type_appender'.
+  template<template<typename> class Predicate>
+  struct retain_transformation_ {
+    template<typename T>
+    using type = std::conditional_t<Predicate<T>::value, _type_appender<T>, _type_appender<>>;
+  };
+
+  public:
+  // Filter elements, only retaining elements for which the predicate is true.
+  //
+  // Works by converting the types into zero-element or single-element collections
+  // (based on the Predicate) and then squashing that all into a single collection.
+  template<template<typename> class Predicate>
+  using retain =
+      typename transform<retain_transformation_<Predicate>::template type>:: // Turn this into a collection of zero-element or one-element _type_appenders
+                                                                             // `_type_appender<_type_appender<>, _type_appender<T>, ...>'
+      template type<_empty_merge>::type;                                     // and then merge them all together
 };
 
 
@@ -2197,7 +2220,7 @@ class _just_sender {
 
   template<typename... T_>
   explicit constexpr _just_sender(T_&&... v)
-  noexcept(std::conjunction_v<std::is_nothrow_constructible<T, T_>...>)
+  noexcept(std::conjunction_v<std::is_nothrow_constructible<std::tuple<T...>>, T_...>)
   : values(std::forward<T_>(v)...)
   {}
 
@@ -2634,7 +2657,7 @@ struct sync_wait_t {
         r.var.template emplace<2>(std::forward<Ex>(ex)); // Never throws.
         r.ex_ctx.notify();
       } else {
-        set_error(r, std::make_exception_ptr(std::forward<Ex>(ex))); // Invokes this function, but the other branch. Never throws.
+        set_error(std::move(r), std::make_exception_ptr(std::forward<Ex>(ex))); // Invokes this function, but the other branch. Never throws.
       }
     }
 

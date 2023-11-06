@@ -635,5 +635,166 @@ struct repeat_t {
 inline constexpr repeat_t repeat{};
 
 
+// Given a tuple-return, convert it to a multi-argument return.
+struct lazy_explode_tuple_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S>
+  constexpr auto operator()(S&& s) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const lazy_explode_tuple_t&>(), std::declval<S>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s));
+  }
+
+  constexpr auto operator()() const
+  noexcept(noexcept(_generic_adapter(std::declval<lazy_explode_tuple_t>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this);
+  }
+
+  private:
+  // Forward-declaration.
+  template<sender Sender> class sender_impl;
+
+  template<sender Sender>
+  struct sender_types_for_impl
+  : _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>
+  {
+    // Inherit constructors.
+    using _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>::_generic_sender_wrapper;
+  };
+
+  // Unpack a type-appender containing a tuple, into a type-appender containing all the values in that tuple.
+  template<typename TypeAppenderOfTuple> struct unpack_tuple_;
+  template<typename... T>
+  struct unpack_tuple_<_type_appender<std::tuple<T...>>> {
+    using type = _type_appender<T...>;
+  };
+  template<typename TypeAppenderOfTuple>
+  using unpack_tuple = typename unpack_tuple_<TypeAppenderOfTuple>::type;
+
+  // Convert _type_appender<T...> into Tuple<T...>.
+  template<template<typename...> class Tuple>
+  struct apply_tuple {
+    template<typename TypeAppender>
+    using type = typename TypeAppender::template type<Tuple>;
+  };
+
+  template<typed_sender Sender>
+  struct sender_types_for_impl<Sender>
+  : _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>
+  {
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types =
+        typename sender_traits<Sender>::                        // From the sender
+        template value_types<_type_appender, _type_appender>::  // take all the value-types `_type_appender<_type_appender<std::tuple<T...>>, ...>'
+        template transform<unpack_tuple>::                      // and extract the types from that tuple: `_type_appender<_type_appender<T...>, ...>'
+        template transform<apply_tuple<Tuple>::template type>:: // then transform the inner type-appender to the requested Tuple type
+                                                                // `_type_appender<Tuple<T...>, ...>'
+        template type<Variant>;                                 // and finally wrap the whole thing in the Variant.
+
+    // Inherit constructors.
+    using _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>::_generic_sender_wrapper;
+  };
+
+  template<receiver Receiver>
+  class receiver_impl
+  : public _generic_receiver_wrapper<Receiver, set_value_t>
+  {
+    public:
+    explicit receiver_impl(Receiver&& r)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r))
+    {}
+
+    template<typename Tpl>
+    friend auto tag_invoke([[maybe_unused]] set_value_t, receiver_impl&& self, Tpl&& tpl)
+    -> void {
+      std::apply(
+          [&]<typename... Args>(Args&&... args) {
+            execution::set_value(std::move(self.r), std::forward<Args>(args)...);
+          },
+          std::forward<Tpl>(tpl));
+    }
+  };
+
+  template<sender Sender>
+  class sender_impl
+  : public sender_types_for_impl<Sender>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    explicit sender_impl(Sender&& s)
+    noexcept(std::is_nothrow_move_constructible_v<Sender>)
+    : sender_types_for_impl<Sender>(std::move(s))
+    {}
+
+    explicit sender_impl(const Sender& s)
+    noexcept(std::is_nothrow_copy_constructible_v<Sender>)
+    : sender_types_for_impl<Sender>(s)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(noexcept(execution::connect(std::declval<Sender>(), receiver_impl<std::remove_cvref_t<Receiver>>(std::declval<Receiver>()))))
+    -> decltype(auto) {
+      return execution::connect(std::move(self.s), receiver_impl<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>>, OtherSender>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>> {
+      return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
+    }
+
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) const &
+    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>>, OtherSender>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>> {
+      return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
+    }
+  };
+
+  template<sender S>
+  auto default_impl(S&& s) const
+  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<S>>, S>)
+  -> sender_impl<std::remove_cvref_t<S>> {
+    return sender_impl<std::remove_cvref_t<S>>(std::forward<S>(s));
+  }
+};
+inline constexpr lazy_explode_tuple_t lazy_explode_tuple{};
+
+
+// Given a tuple-return, convert it to a multi-argument return.
+struct explode_tuple_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S>
+  constexpr auto operator()(S&& s) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const explode_tuple_t&>(), std::declval<S>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s));
+  }
+
+  constexpr auto operator()() const
+  noexcept(noexcept(_generic_adapter(std::declval<explode_tuple_t>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this);
+  }
+
+  private:
+  template<sender S>
+  auto default_impl(S&& s) const
+  noexcept(noexcept(lazy_explode_tuple(std::forward<S>(s))))
+  -> sender decltype(auto) {
+    return lazy_explode_tuple(std::forward<S>(s));
+  }
+};
+inline constexpr explode_tuple_t explode_tuple{};
+
+
 } /* inline namespace extensions */
 } /* namespace earnest::execution */
