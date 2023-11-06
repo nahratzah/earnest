@@ -233,3 +233,76 @@ TEST(read) {
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
   }
 }
+
+
+TEST(lazy_truncate_ec) {
+  using traits = sender_traits<decltype(io::lazy_truncate_ec(std::declval<int>(), std::declval<io::offset_type>()))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<>>,
+      traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr, std::error_code>,
+      traits::error_types<std::variant>>);
+  static_assert(!traits::sends_done);
+
+  temporary_file tmp;
+  tmp.set_contents("abcdefg");
+
+  auto x = sync_wait(io::lazy_truncate_ec(tmp.fd, 4)).value();
+  CHECK(x == std::tuple<>{});
+  CHECK_EQUAL("abcd", tmp.get_contents());
+}
+
+TEST(lazy_truncate) {
+  using traits = sender_traits<decltype(io::lazy_truncate(std::declval<int>(), std::declval<io::offset_type>()))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<>>,
+      traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      traits::error_types<std::variant>>);
+  static_assert(!traits::sends_done);
+
+  temporary_file tmp;
+  tmp.set_contents("abcdefg");
+
+  auto x = sync_wait(io::lazy_truncate(tmp.fd, 4)).value();
+  CHECK(x == std::tuple<>{});
+  CHECK_EQUAL("abcd", tmp.get_contents());
+}
+
+TEST(truncate_ec) {
+  using traits = sender_traits<decltype(io::truncate_ec(std::declval<int>(), std::declval<io::offset_type>()))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<>>,
+      traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr, std::error_code>,
+      traits::error_types<std::variant>>);
+  static_assert(!traits::sends_done);
+
+  temporary_file tmp;
+  tmp.set_contents("abcdefg");
+
+  auto x = sync_wait(io::truncate_ec(tmp.fd, 4)).value();
+  CHECK(x == std::tuple<>{});
+  CHECK_EQUAL("abcd", tmp.get_contents());
+}
+
+TEST(truncate) {
+  using traits = sender_traits<decltype(io::truncate(std::declval<int>(), std::declval<io::offset_type>()))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<>>,
+      traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      traits::error_types<std::variant>>);
+  static_assert(!traits::sends_done);
+
+  temporary_file tmp;
+  tmp.set_contents("abcdefg");
+
+  auto x = sync_wait(io::truncate(tmp.fd, 4)).value();
+  CHECK(x == std::tuple<>{});
+  CHECK_EQUAL("abcd", tmp.get_contents());
+}

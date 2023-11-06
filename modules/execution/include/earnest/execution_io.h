@@ -47,6 +47,10 @@
 namespace earnest::execution::io {
 
 
+// Type used for file offsets.
+using offset_type = std::uint64_t;
+
+
 // Adapter that, when the chain completes with an error-signal holding a std::error_code,
 // converts it into a std::system_error.
 //
@@ -836,6 +840,122 @@ struct write_some_t {
   }
 };
 inline constexpr write_some_t write_some{};
+
+
+struct lazy_truncate_ec_t {
+  template<typename FD>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd, offset_type len) const
+  -> typed_sender decltype(auto) {
+    return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(len));
+  }
+
+  private:
+  template<receiver_of<> Receiver>
+  class opstate {
+    public:
+    explicit opstate(int fd, offset_type len, Receiver&& r)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : fd(fd),
+      len(len),
+      r(std::move(r))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
+      if (::ftruncate(self.fd, self.len) == -1) {
+        execution::set_error(std::move(self.r), std::error_code(errno, std::generic_category()));
+      } else {
+        try {
+          execution::set_value(std::move(self.r));
+        } catch (...) {
+          execution::set_error(std::move(self.r), std::current_exception());
+        }
+      }
+    }
+
+    private:
+    int fd;
+    offset_type len;
+    Receiver r;
+  };
+
+  class sender_impl {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<>>;
+
+    template<template<typename...> class Variant>
+    using error_types = Variant<std::exception_ptr, std::error_code>;
+
+    static inline constexpr bool sends_done = false;
+
+    explicit sender_impl(int fd, offset_type len) noexcept
+    : fd(fd),
+      len(len)
+    {}
+
+    template<receiver_of<> Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(std::is_nothrow_constructible_v<
+        opstate<std::remove_cvref_t<Receiver>>,
+        int, offset_type, Receiver>)
+    -> opstate<std::remove_cvref_t<Receiver>> {
+      return opstate<std::remove_cvref_t<Receiver>>(self.fd, self.len, std::forward<Receiver>(r));
+    }
+
+    private:
+    int fd;
+    offset_type len;
+  };
+
+  public:
+  auto operator()(int fd, offset_type len) const
+  -> sender_impl {
+    return sender_impl(fd, len);
+  }
+};
+inline constexpr lazy_truncate_ec_t lazy_truncate_ec{};
+
+
+struct lazy_truncate_t {
+  template<typename FD>
+  auto operator()(FD&& fd, offset_type len) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_truncate_t, FD, offset_type>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(len));
+    } else {
+      return lazy_truncate_ec(std::forward<FD>(fd), std::move(len))
+      | ec_to_exception();
+    }
+  }
+};
+inline constexpr lazy_truncate_t lazy_truncate{};
+
+
+struct truncate_ec_t {
+  template<typename FD>
+  auto operator()(FD&& fd, offset_type len) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<truncate_ec_t, FD, offset_type>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(len));
+    else
+      return lazy_truncate_ec(std::forward<FD>(fd), std::move(len));
+  }
+};
+inline constexpr truncate_ec_t truncate_ec{};
+
+
+struct truncate_t {
+  template<typename FD>
+  auto operator()(FD&& fd, offset_type len) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<truncate_t, FD, offset_type>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(len));
+    else
+      return lazy_truncate(std::forward<FD>(fd), std::move(len));
+  }
+};
+inline constexpr truncate_t truncate{};
 
 
 } /* namespace earnest::execution::io */
