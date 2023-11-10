@@ -1037,6 +1037,61 @@ class operation_block<IsConst, 0, std::tuple<>, std::tuple<>, std::tuple<>> {
 };
 
 
+struct uint8_t {
+  template<std::unsigned_integral T>
+  auto read(T& v) const {
+    return operation_block<false>{}
+        .buffer<4>(
+            post_buffer_invocation(
+                [&v](std::span<const std::byte> tmpbuf) {
+                  assert(tmpbuf.size() == 4);
+                  if (tmpbuf[0] != std::byte{0} ||
+                      tmpbuf[1] != std::byte{0} ||
+                      tmpbuf[2] != std::byte{0})
+                    throw xdr_error("integer overflow for 8-bit value");
+                  v = static_cast<std::uint8_t>(tmpbuf[3]);
+                }));
+  }
+
+  template<std::unsigned_integral T>
+  auto write(const T& v) const {
+    if (v > std::numeric_limits<std::uint8_t>::max())
+      throw xdr_error("integer overflow for 8-bit value");
+
+    std::array<std::byte, 4> data{ std::byte{}, std::byte{}, std::byte{}, static_cast<std::byte>(static_cast<std::uint8_t>(v)) };
+    return operation_block<true>{}
+        .buffer(std::span<const std::byte, 4>(data));
+  }
+};
+
+
+struct uint16_t {
+  template<std::unsigned_integral T>
+  auto read(T& v) const {
+    return operation_block<false>{}
+        .buffer<4>(
+            post_buffer_invocation(
+                [&v](std::span<const std::byte> tmpbuf) {
+                  assert(tmpbuf.size() == 4);
+                  if (tmpbuf[0] != std::byte{0} ||
+                      tmpbuf[1] != std::byte{0})
+                    throw xdr_error("integer overflow for 16-bit value");
+                  v = 0x100u * static_cast<std::uint8_t>(tmpbuf[2]) + static_cast<std::uint8_t>(tmpbuf[3]);
+                }));
+  }
+
+  template<std::unsigned_integral T>
+  auto write(T& v) const {
+    if (v > std::numeric_limits<std::uint16_t>::max())
+      throw xdr_error("integer overflow for 16-bit value");
+
+    std::array<std::byte, 4> data{ std::byte{}, std::byte{}, static_cast<std::byte>(static_cast<std::uint8_t>(v >> 8 & 0xffu)), static_cast<std::byte>(static_cast<std::uint8_t>(v & 0xffu)) };
+    return operation_block<true>{}
+        .buffer(std::span<const std::byte, 4>(data));
+  }
+};
+
+
 struct uint32_t {
   template<std::unsigned_integral T>
   requires (sizeof(T) == 4)
@@ -1173,10 +1228,173 @@ struct uint32_t {
 };
 
 
+struct uint64_t {
+  template<std::unsigned_integral T>
+  requires (sizeof(T) == 8)
+  auto read(T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    if constexpr(std::endian::native == std::endian::big) {
+      return operation_block<false>{}
+          .append(span_reference<false, 8>(std::as_writable_bytes(std::span<T, 1>(&v, 1))));
+    } else {
+      return operation_block<false>{}
+          .append(span_reference<false, 8>(std::as_writable_bytes(std::span<T, 1>(&v, 1))))
+          .append(
+              post_invocation(
+                  [&v]() noexcept {
+                    v = (v & 0xff00000000000000ull) >> 56
+                      | (v & 0x00ff000000000000ull) >> 40
+                      | (v & 0x0000ff0000000000ull) >> 24
+                      | (v & 0x000000ff00000000ull) >>  8
+                      | (v & 0x00000000ff000000ull) <<  8
+                      | (v & 0x0000000000ff0000ull) << 24
+                      | (v & 0x000000000000ff00ull) << 40
+                      | (v & 0x00000000000000ffull) << 56;
+                  }));
+    }
+  }
+
+  template<std::unsigned_integral T>
+  requires (sizeof(T) == 8)
+  auto write(const T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    if constexpr(std::endian::native == std::endian::big) {
+      return operation_block<true>{}
+          .append(span_reference<true, 8>(std::as_bytes(std::span<T, 1>(&v, 1))));
+    } else if constexpr(std::endian::native == std::endian::little) {
+      const std::uint64_t x = (v & 0xff00000000000000ull) >> 56
+                            | (v & 0x00ff000000000000ull) >> 40
+                            | (v & 0x0000ff0000000000ull) >> 24
+                            | (v & 0x000000ff00000000ull) >>  8
+                            | (v & 0x00000000ff000000ull) <<  8
+                            | (v & 0x0000000000ff0000ull) << 24
+                            | (v & 0x000000000000ff00ull) << 40
+                            | (v & 0x00000000000000ffull) << 56;
+      return operation_block<true>{}
+          .buffer(std::as_bytes(std::span<const std::uint64_t, 1>(&x, 1)));
+    }
+  }
+
+  template<std::unsigned_integral T>
+  requires (sizeof(T) < 8)
+  auto read(T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    return operation_block<false>{}
+        .template buffer<8>(
+            post_buffer_invocation(
+                [&v](std::span<const std::byte> tmpbuf) {
+                  std::uint64_t v64;
+
+                  const auto src = std::span<const std::byte, 8>(tmpbuf);
+                  const auto dst = std::as_writable_bytes(std::span<std::uint64_t, 1>(&v64, 1));
+                  assert(src.size() == dst.size());
+                  std::copy(src.begin(), src.end(), dst.begin());
+                  if constexpr(std::endian::native == std::endian::little) {
+                    v64 = (v64 & 0xff00000000000000ull) >> 56
+                        | (v64 & 0x00ff000000000000ull) >> 40
+                        | (v64 & 0x0000ff0000000000ull) >> 24
+                        | (v64 & 0x000000ff00000000ull) >>  8
+                        | (v64 & 0x00000000ff000000ull) <<  8
+                        | (v64 & 0x0000000000ff0000ull) << 24
+                        | (v64 & 0x000000000000ff00ull) << 40
+                        | (v64 & 0x00000000000000ffull) << 56;
+                  }
+                  if (v64 > std::numeric_limits<T>::max())
+                    throw xdr_error("integer value too big to read");
+                  v = v64;
+                }));
+  }
+
+  template<std::unsigned_integral T>
+  requires (sizeof(T) < 8)
+  auto write(const T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    std::uint64_t v64 = v;
+    if constexpr(std::endian::native == std::endian::little) {
+      v64 = (v64 & 0xff00000000000000ull) >> 56
+          | (v64 & 0x00ff000000000000ull) >> 40
+          | (v64 & 0x0000ff0000000000ull) >> 24
+          | (v64 & 0x000000ff00000000ull) >>  8
+          | (v64 & 0x00000000ff000000ull) <<  8
+          | (v64 & 0x0000000000ff0000ull) << 24
+          | (v64 & 0x000000000000ff00ull) << 40
+          | (v64 & 0x00000000000000ffull) << 56;
+    }
+    return operation_block<true>{}
+        .buffer(std::as_bytes(std::span<std::uint64_t, 1>(&v64, 1)));
+  }
+
+  template<std::unsigned_integral T>
+  requires (sizeof(T) > 8)
+  auto read(T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    return operation_block<false>{}
+        .template buffer<8>(
+            post_buffer_invocation(
+                [&v](std::span<const std::byte> tmpbuf) {
+                  std::uint64_t v64;
+
+                  const auto src = std::span<const std::byte, 8>(tmpbuf);
+                  const auto dst = std::as_writable_bytes(std::span<std::uint64_t, 1>(&v64, 1));
+                  assert(src.size() == dst.size());
+                  std::copy(src.begin(), src.end(), dst.begin());
+                  if constexpr(std::endian::native == std::endian::little) {
+                    v64 = (v64 & 0xff00000000000000ull) >> 56
+                        | (v64 & 0x00ff000000000000ull) >> 40
+                        | (v64 & 0x0000ff0000000000ull) >> 24
+                        | (v64 & 0x000000ff00000000ull) >>  8
+                        | (v64 & 0x00000000ff000000ull) <<  8
+                        | (v64 & 0x0000000000ff0000ull) << 24
+                        | (v64 & 0x000000000000ff00ull) << 40
+                        | (v64 & 0x00000000000000ffull) << 56;
+                  }
+                  v = v64;
+                }));
+  }
+
+  template<std::unsigned_integral T>
+  requires (sizeof(T) > 8)
+  auto write(const T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    if (v > std::numeric_limits<std::uint64_t>::max())
+      throw xdr_error("integer value too big to write");
+
+    std::uint64_t v64 = v;
+    if constexpr(std::endian::native == std::endian::little) {
+      v64 = (v64 & 0xff00000000000000ull) >> 56
+          | (v64 & 0x00ff000000000000ull) >> 40
+          | (v64 & 0x0000ff0000000000ull) >> 24
+          | (v64 & 0x000000ff00000000ull) >>  8
+          | (v64 & 0x00000000ff000000ull) <<  8
+          | (v64 & 0x0000000000ff0000ull) << 24
+          | (v64 & 0x000000000000ff00ull) << 40
+          | (v64 & 0x00000000000000ffull) << 56;
+    }
+    return operation_block<true>{}
+        .buffer(std::as_bytes(std::span<std::uint64_t, 1>(&v64, 1)));
+  }
+};
+
+
 } /* namespace operation */
 
 
+inline constexpr operation::uint8_t  uint8{};
+inline constexpr operation::uint16_t uint16{};
 inline constexpr operation::uint32_t uint32{};
+inline constexpr operation::uint64_t uint64{};
 
 
 } /* namespace earnest::xdr */
