@@ -1062,6 +1062,52 @@ struct uint8_t {
     return operation_block<true>{}
         .buffer(std::span<const std::byte, 4>(data));
   }
+
+  template<std::signed_integral T>
+  auto read(T& v) const {
+    return operation_block<false>{}
+        .template buffer<4>(
+            post_buffer_invocation(
+                [&v](std::span<const std::byte> tmpbuf) {
+                  std::uint32_t v32;
+
+                  const auto src = std::span<const std::byte, 4>(tmpbuf);
+                  const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                  assert(src.size() == dst.size());
+                  std::copy(src.begin(), src.end(), dst.begin());
+                  if constexpr(std::endian::native == std::endian::little) {
+                    v32 = (v32 & 0xff000000u) >> 24
+                        | (v32 & 0x00ff0000u) >>  8
+                        | (v32 & 0x0000ff00u) <<  8
+                        | (v32 & 0x000000ffu) << 24;
+                  }
+
+                  if (v32 > std::numeric_limits<std::uint8_t>::max() || v32 > std::numeric_limits<T>::max())
+                    throw xdr_error("integer value too big to read");
+                  v = v32;
+                }));
+  }
+
+  template<std::signed_integral T>
+  auto write(const T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    if (v < 0)
+      throw xdr_error("integer value too small to write");
+    if (v > std::numeric_limits<std::uint8_t>::max())
+      throw xdr_error("integer value too big to write");
+
+    std::uint32_t v32 = v;
+    if constexpr(std::endian::native == std::endian::little) {
+      v32 = (v32 & 0xff000000u) >> 24
+          | (v32 & 0x00ff0000u) >>  8
+          | (v32 & 0x0000ff00u) <<  8
+          | (v32 & 0x000000ffu) << 24;
+    }
+    return operation_block<true>{}
+        .buffer(std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1)));
+  }
 };
 
 
@@ -1088,6 +1134,52 @@ struct uint16_t {
     std::array<std::byte, 4> data{ std::byte{}, std::byte{}, static_cast<std::byte>(static_cast<std::uint8_t>(v >> 8 & 0xffu)), static_cast<std::byte>(static_cast<std::uint8_t>(v & 0xffu)) };
     return operation_block<true>{}
         .buffer(std::span<const std::byte, 4>(data));
+  }
+
+  template<std::signed_integral T>
+  auto read(T& v) const {
+    return operation_block<false>{}
+        .template buffer<4>(
+            post_buffer_invocation(
+                [&v](std::span<const std::byte> tmpbuf) {
+                  std::uint32_t v32;
+
+                  const auto src = std::span<const std::byte, 4>(tmpbuf);
+                  const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                  assert(src.size() == dst.size());
+                  std::copy(src.begin(), src.end(), dst.begin());
+                  if constexpr(std::endian::native == std::endian::little) {
+                    v32 = (v32 & 0xff000000u) >> 24
+                        | (v32 & 0x00ff0000u) >>  8
+                        | (v32 & 0x0000ff00u) <<  8
+                        | (v32 & 0x000000ffu) << 24;
+                  }
+
+                  if (v32 > std::numeric_limits<std::uint16_t>::max() || v32 > std::numeric_limits<T>::max())
+                    throw xdr_error("integer value too big to read");
+                  v = v32;
+                }));
+  }
+
+  template<std::signed_integral T>
+  auto write(const T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    if (v < 0)
+      throw xdr_error("integer value too small to write");
+    if (v > std::numeric_limits<std::uint16_t>::max())
+      throw xdr_error("integer value too big to write");
+
+    std::uint32_t v32 = v;
+    if constexpr(std::endian::native == std::endian::little) {
+      v32 = (v32 & 0xff000000u) >> 24
+          | (v32 & 0x00ff0000u) >>  8
+          | (v32 & 0x0000ff00u) <<  8
+          | (v32 & 0x000000ffu) << 24;
+    }
+    return operation_block<true>{}
+        .buffer(std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1)));
   }
 };
 
@@ -1212,6 +1304,52 @@ struct uint32_t {
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
+    if (v > std::numeric_limits<std::uint32_t>::max())
+      throw xdr_error("integer value too big to write");
+
+    std::uint32_t v32 = v;
+    if constexpr(std::endian::native == std::endian::little) {
+      v32 = (v32 & 0xff000000u) >> 24
+          | (v32 & 0x00ff0000u) >>  8
+          | (v32 & 0x0000ff00u) <<  8
+          | (v32 & 0x000000ffu) << 24;
+    }
+    return operation_block<true>{}
+        .buffer(std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1)));
+  }
+
+  template<std::signed_integral T>
+  auto read(T& v) const {
+    return operation_block<false>{}
+        .template buffer<4>(
+            post_buffer_invocation(
+                [&v](std::span<const std::byte> tmpbuf) {
+                  std::uint32_t v32;
+
+                  const auto src = std::span<const std::byte, 4>(tmpbuf);
+                  const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                  assert(src.size() == dst.size());
+                  std::copy(src.begin(), src.end(), dst.begin());
+                  if constexpr(std::endian::native == std::endian::little) {
+                    v32 = (v32 & 0xff000000u) >> 24
+                        | (v32 & 0x00ff0000u) >>  8
+                        | (v32 & 0x0000ff00u) <<  8
+                        | (v32 & 0x000000ffu) << 24;
+                  }
+
+                  if (v32 > std::numeric_limits<T>::max())
+                    throw xdr_error("integer value too big to read");
+                  v = v32;
+                }));
+  }
+
+  template<std::signed_integral T>
+  auto write(const T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    if (v < 0)
+      throw xdr_error("integer value too small to write");
     if (v > std::numeric_limits<std::uint32_t>::max())
       throw xdr_error("integer value too big to write");
 
@@ -1368,6 +1506,60 @@ struct uint64_t {
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
+    if (v > std::numeric_limits<std::uint64_t>::max())
+      throw xdr_error("integer value too big to write");
+
+    std::uint64_t v64 = v;
+    if constexpr(std::endian::native == std::endian::little) {
+      v64 = (v64 & 0xff00000000000000ull) >> 56
+          | (v64 & 0x00ff000000000000ull) >> 40
+          | (v64 & 0x0000ff0000000000ull) >> 24
+          | (v64 & 0x000000ff00000000ull) >>  8
+          | (v64 & 0x00000000ff000000ull) <<  8
+          | (v64 & 0x0000000000ff0000ull) << 24
+          | (v64 & 0x000000000000ff00ull) << 40
+          | (v64 & 0x00000000000000ffull) << 56;
+    }
+    return operation_block<true>{}
+        .buffer(std::as_bytes(std::span<std::uint64_t, 1>(&v64, 1)));
+  }
+
+  template<std::signed_integral T>
+  auto read(T& v) const {
+    return operation_block<false>{}
+        .template buffer<8>(
+            post_buffer_invocation(
+                [&v](std::span<const std::byte> tmpbuf) {
+                  std::uint64_t v64;
+
+                  const auto src = std::span<const std::byte, 8>(tmpbuf);
+                  const auto dst = std::as_writable_bytes(std::span<std::uint64_t, 1>(&v64, 1));
+                  assert(src.size() == dst.size());
+                  std::copy(src.begin(), src.end(), dst.begin());
+                  if constexpr(std::endian::native == std::endian::little) {
+                    v64 = (v64 & 0xff00000000000000ull) >> 56
+                        | (v64 & 0x00ff000000000000ull) >> 40
+                        | (v64 & 0x0000ff0000000000ull) >> 24
+                        | (v64 & 0x000000ff00000000ull) >>  8
+                        | (v64 & 0x00000000ff000000ull) <<  8
+                        | (v64 & 0x0000000000ff0000ull) << 24
+                        | (v64 & 0x000000000000ff00ull) << 40
+                        | (v64 & 0x00000000000000ffull) << 56;
+                  }
+
+                  if (v64 > std::numeric_limits<T>::max())
+                    throw xdr_error("integer value too big to read");
+                  v = v64;
+                }));
+  }
+
+  template<std::signed_integral T>
+  auto write(const T& v) const {
+    static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
+        "implementation only knows little and big endian");
+
+    if (v < 0)
+      throw xdr_error("integer value too small to write");
     if (v > std::numeric_limits<std::uint64_t>::max())
       throw xdr_error("integer value too big to write");
 
