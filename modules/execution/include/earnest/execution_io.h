@@ -140,14 +140,11 @@ struct ec_to_exception_t {
     template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
 
     public:
-    explicit sender_impl(Sender&& s)
-    noexcept(std::is_nothrow_move_constructible_v<Sender>)
-    : sender_types_for_impl<Sender>(std::move(s))
-    {}
-
-    explicit sender_impl(const Sender& s)
-    noexcept(std::is_nothrow_copy_constructible_v<Sender>)
-    : sender_types_for_impl<Sender>(s)
+    template<typename Sender_>
+    requires std::constructible_from<Sender, Sender_>
+    explicit sender_impl(Sender_&& s)
+    noexcept(std::is_nothrow_constructible_v<Sender, Sender_>)
+    : sender_types_for_impl<Sender>(std::forward<Sender_>(s))
     {}
 
     template<receiver Receiver>
@@ -161,13 +158,6 @@ struct ec_to_exception_t {
     private:
     template<sender OtherSender>
     auto rebind(OtherSender&& other_sender) &&
-    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>>, OtherSender>)
-    -> sender_impl<std::remove_cvref_t<OtherSender>> {
-      return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
-    }
-
-    template<sender OtherSender>
-    auto rebind(OtherSender&& other_sender) const &
     noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>>, OtherSender>)
     -> sender_impl<std::remove_cvref_t<OtherSender>> {
       return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
@@ -948,7 +938,7 @@ struct lazy_read_at_ec_t {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
     } else {
       struct state {
-        std::remove_cvref_t<FD> fd;
+        FD fd;
         offset_type offset;
         std::span<std::byte> buf;
         std::size_t minbytes;
@@ -1010,7 +1000,7 @@ struct lazy_read_ec_t {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
     } else {
       struct state {
-        std::remove_cvref_t<FD> fd;
+        FD fd;
         std::span<std::byte> buf;
         std::size_t minbytes;
         std::size_t read_count = 0;
@@ -1069,7 +1059,7 @@ struct lazy_write_at_ec_t {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
     } else {
       struct state {
-        std::remove_cvref_t<FD> fd;
+        FD fd;
         offset_type offset;
         std::span<const std::byte> buf;
         std::size_t minbytes;
@@ -1128,7 +1118,7 @@ struct lazy_write_ec_t {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
     } else {
       struct state {
-        std::remove_cvref_t<FD> fd;
+        FD fd;
         std::span<const std::byte> buf;
         std::size_t minbytes;
         std::size_t write_count = 0;
@@ -1184,7 +1174,7 @@ struct lazy_read_at_t {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
     } else {
       struct state {
-        std::remove_cvref_t<FD> fd;
+        FD fd;
         offset_type offset;
         std::span<std::byte> buf;
         std::size_t minbytes;
@@ -1246,7 +1236,7 @@ struct lazy_read_t {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
     } else {
       struct state {
-        std::remove_cvref_t<FD> fd;
+        FD fd;
         std::span<std::byte> buf;
         std::size_t minbytes;
         std::size_t read_count = 0;
@@ -1305,7 +1295,7 @@ struct lazy_write_at_t {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
     } else {
       struct state {
-        std::remove_cvref_t<FD> fd;
+        FD fd;
         offset_type offset;
         std::span<const std::byte> buf;
         std::size_t minbytes;
@@ -1364,7 +1354,7 @@ struct lazy_write_t {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
     } else {
       struct state {
-        std::remove_cvref_t<FD> fd;
+        FD fd;
         std::span<const std::byte> buf;
         std::size_t minbytes;
         std::size_t write_count = 0;
@@ -1664,6 +1654,10 @@ struct lazy_truncate_ec_t {
     : fd(fd),
       len(len)
     {}
+
+    // Only permit move operations.
+    sender_impl(sender_impl&&) = default;
+    sender_impl(const sender_impl&) = delete;
 
     template<receiver_of<> Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)

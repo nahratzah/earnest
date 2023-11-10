@@ -749,13 +749,6 @@ struct lazy_explode_tuple_t {
     -> sender_impl<std::remove_cvref_t<OtherSender>> {
       return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
     }
-
-    template<sender OtherSender>
-    auto rebind(OtherSender&& other_sender) const &
-    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>>, OtherSender>)
-    -> sender_impl<std::remove_cvref_t<OtherSender>> {
-      return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
-    }
   };
 
   template<sender S>
@@ -794,6 +787,21 @@ struct explode_tuple_t {
   }
 };
 inline constexpr explode_tuple_t explode_tuple{};
+
+
+struct noop_t {
+  template<sender S>
+  constexpr auto operator()(S&& s) const noexcept -> S&& {
+    return std::forward<S>(s);
+  }
+
+  constexpr auto operator()() const
+  noexcept(noexcept(_generic_adapter(std::declval<noop_t>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this);
+  }
+};
+inline constexpr noop_t noop;
 
 
 } /* inline namespace extensions */

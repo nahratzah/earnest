@@ -14,6 +14,7 @@ add_subdirectory(spdlog)
 add_subdirectory(opentelemetry-cpp)
 
 add_subdirectory(execution)
+add_subdirectory(xdr_v2)
 add_subdirectory(cycle_ptr)
 add_subdirectory(libhoard)
 add_subdirectory(util)
