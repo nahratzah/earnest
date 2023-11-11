@@ -257,6 +257,9 @@ class temporary_buffer_reference {
     off += increase;
   }
 
+  auto get_off() const noexcept -> std::size_t { return off; }
+  auto get_len() const noexcept -> std::size_t { return Extent; }
+
   private:
   std::size_t off;
 };
@@ -282,6 +285,9 @@ class temporary_buffer_reference<IsConst, std::dynamic_extent> {
     off += increase;
   }
 
+  auto get_off() const noexcept -> std::size_t { return off; }
+  auto get_len() const noexcept -> std::size_t { return len; }
+
   private:
   std::size_t off, len;
 };
@@ -304,6 +310,56 @@ class span_reference {
   private:
   std::span<std::conditional_t<IsConst, const std::byte, std::byte>, Extent> data;
 };
+
+
+struct buffer_operation_appender_ {
+  template<typename... T, typename Op>
+  auto operator()(std::tuple<T...>&& list, Op&& op) {
+    return std::apply(
+        []<typename... X>(X&&... x) {
+          return std::make_tuple(std::forward<X>(x)...);
+        },
+        std::tuple_cat(
+            all_but_last(std::move(list)),
+            maybe_squash(only_last(std::move(list)), std::forward<Op>(op))));
+  }
+
+  private:
+  template<typename... T>
+  auto all_but_last(std::tuple<T...>&& list) {
+    return all_buf_last_(std::make_index_sequence<sizeof...(T) - 1u>(), std::move(list));
+  }
+
+  template<std::size_t... Idx, typename... T>
+  auto all_but_last_([[maybe_unused]] std::index_sequence<Idx...>, std::tuple<T...>&& list) {
+    return std::forward_as_tuple(std::get<Idx>(std::move(list))...);
+  }
+
+  template<typename... T>
+  auto only_last(std::tuple<T...>&& list) -> decltype(auto) {
+    return std::get<sizeof...(T) - 1u>(std::move(list));
+  }
+
+  template<bool IsConst, std::size_t Extent, typename Op>
+  auto maybe_squash(span_reference<IsConst, Extent>&& s, Op&& op) {
+    return std::forward_as_tuple(std::move(s), std::forward<Op>(op));
+  }
+
+  template<bool IsConst, std::size_t Extent1, std::size_t Extent2>
+  auto maybe_squash(temporary_buffer_reference<IsConst, Extent1>&& s, span_reference<IsConst, Extent2>&& op) {
+    return std::forward_as_tuple(std::move(s), std::move(op));
+  }
+
+  template<bool IsConst, std::size_t Extent1, std::size_t Extent2>
+  auto maybe_squash(temporary_buffer_reference<IsConst, Extent1>&& s, temporary_buffer_reference<IsConst, Extent2>&& op) {
+    if constexpr(Extent1 == std::dynamic_extent || Extent2 == std::dynamic_extent) {
+      return std::make_tuple(temporary_buffer_reference<IsConst, std::dynamic_extent>(s.off, s.len + op.len));
+    } else {
+      return std::make_tuple(temporary_buffer_reference<IsConst, Extent1 + Extent2>(s.off, s.len + op.len));
+    }
+  }
+};
+inline constexpr buffer_operation_appender_ buffer_operation_appender{};
 
 
 template<bool IsConst, std::size_t Extent = 0>
@@ -618,18 +674,18 @@ struct make_read_write_op_ {
   static inline constexpr bool for_writing = IsConst;
   static inline constexpr bool for_reading = !IsConst;
 
-  template<typename Buffer>
-  auto operator()(Buffer&& buffer) const {
+  template<typename... Buffer>
+  auto operator()(Buffer&&... buffer) const {
     return execution::lazy_let_value(
-        [buffer=std::forward<Buffer>(buffer)](auto st) -> execution::typed_sender auto {
+        [...buffer=std::forward<Buffer>(buffer)](auto st) -> execution::typed_sender auto {
           if constexpr(for_writing) {
-            return execution::io::lazy_write_ec(st.fd, buffer.get_buffer(st.shared_buf))
+            return execution::io::lazy_write_ec(st.fd, maybe_wrap_in_array_for_writing(buffer.get_buffer(st.shared_buf)...))
             | execution::lazy_then(
                 [st]([[maybe_unused]] std::size_t wlen) {
                   return st;
                 });
           } else {
-            return execution::io::lazy_read_ec(st.fd, buffer.get_buffer(st.shared_buf))
+            return execution::io::lazy_read_ec(st.fd, maybe_wrap_in_array_for_reading(buffer.get_buffer(st.shared_buf)...))
             | execution::lazy_then(
                 [st]([[maybe_unused]] std::size_t rlen, bool eof) {
                   if (eof) throw xdr_error("eof while reading");
@@ -637,6 +693,25 @@ struct make_read_write_op_ {
                 });
           }
         });
+  }
+
+  private:
+  template<typename... Spans>
+  static auto maybe_wrap_in_array_for_reading(Spans&&... s) {
+    if constexpr(sizeof...(s) == 1) {
+      return std::span<std::byte>(std::forward<Spans>(s)...);
+    } else {
+      return std::array<std::span<std::byte>, sizeof...(s)>{ std::forward<Spans>(s)... };
+    }
+  }
+
+  template<typename... Spans>
+  static auto maybe_wrap_in_array_for_writing(Spans&&... s) {
+    if constexpr(sizeof...(s) == 1) {
+      return std::span<const std::byte>(std::forward<Spans>(s)...);
+    } else {
+      return std::array<std::span<const std::byte>, sizeof...(s)>{ std::forward<Spans>(s)... };
+    }
   }
 };
 
@@ -701,7 +776,7 @@ class operation_sequence<
           if constexpr(sizeof...(x) == 0) {
             return execution::noop();
           } else {
-            return (execution::noop() |...| make_read_write_op_<IsConst>{}(std::move(x)));
+            return make_read_write_op_<IsConst>{}(std::move(x)...);
           }
         },
         std::move(buffers))
@@ -809,11 +884,11 @@ class operation_sequence<
     using result_type = operation_sequence<
         IsConst,
         std::tuple<PreInvocationOperations...>,
-        std::tuple<BufferOperations..., temporary_buffer_reference<IsConst, Extent>>,
+        decltype(buffer_operation_appender(std::move(buffers), std::move(op))),
         std::tuple<PostInvocationOperations...>>;
     return result_type(
         std::move(pre_invocations),
-        std::tuple_cat(std::move(buffers), std::forward_as_tuple(std::move(op))),
+        buffer_operation_appender(std::move(buffers), std::move(op)),
         std::move(post_invocations));
   }
 
@@ -822,11 +897,11 @@ class operation_sequence<
     using result_type = operation_sequence<
         IsConst,
         std::tuple<PreInvocationOperations...>,
-        std::tuple<BufferOperations..., span_reference<IsConst, Extent>>,
+        decltype(buffer_operation_appender(std::move(buffers), std::move(op))),
         std::tuple<PostInvocationOperations...>>;
     return result_type(
         std::move(pre_invocations),
-        std::tuple_cat(std::move(buffers), std::forward_as_tuple(std::move(op))),
+        buffer_operation_appender(std::move(buffers), std::move(op)),
         std::move(post_invocations));
   }
 
