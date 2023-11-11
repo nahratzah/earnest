@@ -169,6 +169,9 @@ inline auto vectorize_const_buffers(Buffers&& buf, TransformFn&& transform_fn)
 }
 
 
+// The buffer aspect of a readwrite-state.
+//
+// This version uses a std::span.
 template<typename Byte>
 requires (std::is_same_v<std::remove_const_t<Byte>, std::byte>)
 struct readwrite_state_span_ {
@@ -189,6 +192,9 @@ struct readwrite_state_span_ {
   }
 };
 
+// The buffer aspect of a readwrite-state.
+//
+// This version uses a vector of std::span.
 template<typename Byte>
 requires (std::is_same_v<std::remove_const_t<Byte>, std::byte>)
 struct readwrite_state_vectored_ {
@@ -230,6 +236,7 @@ struct readwrite_state_vectored_ {
   }
 };
 
+// Readwrite-state aspect for the presence/absence of an offset.
 template<bool EnableOffset> struct readwrite_state_offset_;
 
 template<>
@@ -252,6 +259,7 @@ struct readwrite_state_offset_<false> {
   inline auto update_offset_([[maybe_unused]] std::size_t len) -> void {}
 };
 
+// Readwrite-state aspect for the presence/absence of an eof flag.
 template<bool ForReading> struct readwrite_state_eof_;
 
 template<>
@@ -275,6 +283,9 @@ struct readwrite_state_eof_<false> {
   inline auto done_eof_() const noexcept -> bool { return false; }
 };
 
+// A readwrite_state.
+//
+// We use this during reads and writes, to ensure we write the minimum-requested bytes.
 template<typename FD, bool ForReading, bool Vectored, bool EnableOffset>
 class readwrite_state_
 : public readwrite_state_offset_<EnableOffset>,
@@ -328,6 +339,7 @@ class readwrite_state_
   }
 };
 
+// Make a new readwrite-state.
 template<bool ForReading, typename FD, typename Buffers>
 auto make_readwrite_state_(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes) {
   if constexpr(std::convertible_to<Buffers, std::span<std::byte>> || std::convertible_to<Buffers, std::span<const std::byte>>) {
@@ -337,6 +349,7 @@ auto make_readwrite_state_(FD&& fd, offset_type offset, Buffers&& buf, std::opti
   }
 }
 
+// Make a new readwrite-state.
 template<bool ForReading, typename FD, typename Buffers>
 auto make_readwrite_state_(FD&& fd, Buffers&& buf, std::optional<std::size_t> minbytes) {
   if constexpr(std::convertible_to<Buffers, std::span<std::byte>> || std::convertible_to<Buffers, std::span<const std::byte>>) {
