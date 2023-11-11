@@ -656,8 +656,8 @@ struct _operation_block_size_ {
 // Specialization for the size attribute.
 // This attribute exists if we can compute the total size, and exposes that total size.
 template<typename... BufferOperations>
-struct _operation_block_size_<std::tuple<BufferOperations...>, std::enable_if_t<((BufferOperations::size != std::dynamic_extent) &&...&& true)>> {
-  static inline constexpr std::size_t size = (BufferOperations::size +...+ 0u);
+struct _operation_block_size_<std::tuple<BufferOperations...>, std::enable_if_t<((BufferOperations::extent != std::dynamic_extent) &&...&& true)>> {
+  static inline constexpr std::size_t extent = (BufferOperations::extent +...+ 0u);
 
   protected:
   _operation_block_size_() = default;
@@ -1039,7 +1039,7 @@ class operation_block
 template<bool IsConst>
 class operation_block<IsConst, 0, std::tuple<>, std::tuple<>, std::tuple<>> {
   public:
-  static inline constexpr std::size_t size = 0;
+  static inline constexpr std::size_t extent = 0;
 
   operation_block() = default;
 

@@ -12,6 +12,7 @@ SUITE(uint8) {
 
 TEST(write_uint64) {
   std::uint64_t value_64 = 0x00000004u;
+  static_assert(decltype(uint8.write(value_64))::extent == 4);
   auto [result_64] = sync_wait(
       just(buffer())
       | uint8.write(value_64).sender_chain()).value();
@@ -22,6 +23,7 @@ TEST(write_uint64) {
 
 TEST(write_uint32) {
   std::uint32_t value_32 = 0x00000004u;
+  static_assert(decltype(uint8.write(value_32))::extent == 4);
   auto [result_32] = sync_wait(
       just(buffer())
       | uint8.write(value_32).sender_chain()).value();
@@ -32,6 +34,7 @@ TEST(write_uint32) {
 
 TEST(write_uint16) {
   std::uint16_t value_16 = 0x0002u;
+  static_assert(decltype(uint8.write(value_16))::extent == 4);
   auto [result_16] = sync_wait(
       just(buffer())
       | uint8.write(value_16).sender_chain()).value();
@@ -42,6 +45,7 @@ TEST(write_uint16) {
 
 TEST(write_uint8) {
   std::uint8_t value_8 = 0x01u;
+  static_assert(decltype(uint8.write(value_8))::extent == 4);
   auto [result_8] = sync_wait(
       just(buffer())
       | uint8.write(value_8).sender_chain()).value();
@@ -52,6 +56,7 @@ TEST(write_uint8) {
 
 TEST(write_int64) {
   std::int64_t value_64 = 0x00000004u;
+  static_assert(decltype(uint8.write(value_64))::extent == 4);
   auto [result_64] = sync_wait(
       just(buffer())
       | uint8.write(value_64).sender_chain()).value();
@@ -62,6 +67,7 @@ TEST(write_int64) {
 
 TEST(write_int32) {
   std::int32_t value_32 = 0x00000004u;
+  static_assert(decltype(uint8.write(value_32))::extent == 4);
   auto [result_32] = sync_wait(
       just(buffer())
       | uint8.write(value_32).sender_chain()).value();
@@ -72,6 +78,7 @@ TEST(write_int32) {
 
 TEST(write_int16) {
   std::int16_t value_16 = 0x0002u;
+  static_assert(decltype(uint8.write(value_16))::extent == 4);
   auto [result_16] = sync_wait(
       just(buffer())
       | uint8.write(value_16).sender_chain()).value();
@@ -82,6 +89,7 @@ TEST(write_int16) {
 
 TEST(write_int8) {
   std::int8_t value_8 = 0x01u;
+  static_assert(decltype(uint8.write(value_8))::extent == 4);
   auto [result_8] = sync_wait(
       just(buffer())
       | uint8.write(value_8).sender_chain()).value();
@@ -142,6 +150,7 @@ TEST(write_int8_throws_if_negative) {
 
 TEST(read_uint64) {
   std::uint64_t value_64 = 0;
+  static_assert(decltype(uint8.read(value_64))::extent == 4);
   auto [result_64] = sync_wait(
       just(buffer({ 0x00, 0x00, 0x00, 0x01, 'x', 'x', 'x', 'x' }))
       | uint8.read(value_64).sender_chain()).value();
@@ -153,6 +162,7 @@ TEST(read_uint64) {
 
 TEST(read_uint32) {
   std::uint32_t value_32 = 0;
+  static_assert(decltype(uint8.read(value_32))::extent == 4);
   auto [result_32] = sync_wait(
       just(buffer({ 0x00, 0x00, 0x00, 0x02, 'x', 'x', 'x', 'x' }))
       | uint8.read(value_32).sender_chain()).value();
@@ -164,6 +174,7 @@ TEST(read_uint32) {
 
 TEST(read_uint16) {
   std::uint16_t value_16 = 0;
+  static_assert(decltype(uint8.read(value_16))::extent == 4);
   auto [result_16] = sync_wait(
       just(buffer({ 0x00, 0x00, 0x00, 0x03, 'x', 'x', 'x', 'x' }))
       | uint8.read(value_16).sender_chain()).value();
@@ -175,6 +186,7 @@ TEST(read_uint16) {
 
 TEST(read_uint8) {
   std::uint8_t value_8 = 0;
+  static_assert(decltype(uint8.read(value_8))::extent == 4);
   auto [result_8] = sync_wait(
       just(buffer({ 0x00, 0x00, 0x00, 0x04, 'x', 'x', 'x', 'x' }))
       | uint8.read(value_8).sender_chain()).value();
@@ -186,6 +198,7 @@ TEST(read_uint8) {
 
 TEST(read_int64) {
   std::int64_t value_64 = 0;
+  static_assert(decltype(uint8.read(value_64))::extent == 4);
   auto [result_64] = sync_wait(
       just(buffer({ 0x00, 0x00, 0x00, 0x01, 'x', 'x', 'x', 'x' }))
       | uint8.read(value_64).sender_chain()).value();
@@ -197,6 +210,7 @@ TEST(read_int64) {
 
 TEST(read_int32) {
   std::int32_t value_32 = 0;
+  static_assert(decltype(uint8.read(value_32))::extent == 4);
   auto [result_32] = sync_wait(
       just(buffer({ 0x00, 0x00, 0x00, 0x02, 'x', 'x', 'x', 'x' }))
       | uint8.read(value_32).sender_chain()).value();
@@ -208,6 +222,7 @@ TEST(read_int32) {
 
 TEST(read_int16) {
   std::int16_t value_16 = 0;
+  static_assert(decltype(uint8.read(value_16))::extent == 4);
   auto [result_16] = sync_wait(
       just(buffer({ 0x00, 0x00, 0x00, 0x03, 'x', 'x', 'x', 'x' }))
       | uint8.read(value_16).sender_chain()).value();
@@ -219,6 +234,7 @@ TEST(read_int16) {
 
 TEST(read_int8) {
   std::int8_t value_8 = 0;
+  static_assert(decltype(uint8.read(value_8))::extent == 4);
   auto [result_8] = sync_wait(
       just(buffer({ 0x00, 0x00, 0x00, 0x04, 'x', 'x', 'x', 'x' }))
       | uint8.read(value_8).sender_chain()).value();
