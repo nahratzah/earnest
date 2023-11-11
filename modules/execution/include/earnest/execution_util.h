@@ -61,9 +61,18 @@ struct lazy_repeat_t {
   }
 
   private:
-  template<typename... T>
+  template<typename Fn, template<typename> class Receiver, typename... T>
   requires (!std::is_reference_v<T> &&...) && (!std::is_const_v<T> &&...)
   class values_container {
+    private:
+    using scheduler_type = decltype(execution::get_scheduler(std::declval<const Receiver<values_container>&>()));
+    using fn_sender_optional = std::invoke_result_t<Fn&, std::size_t, T&...>;
+    using fn_sender = typename fn_sender_optional::value_type;
+    using opstate_type = decltype(
+        execution::connect(
+            execution::lazy_on(std::declval<scheduler_type>(), std::declval<fn_sender>()),
+            std::declval<Receiver<values_container>>()));
+
     public:
     template<typename... T_>
     explicit values_container(T_&&... v)
@@ -71,25 +80,44 @@ struct lazy_repeat_t {
     : values(std::forward<T_>(v)...)
     {}
 
-    template<std::invocable<T&...> Fn>
-    auto apply(Fn&& fn) & -> decltype(auto) {
-      return std::apply(std::forward<Fn>(fn), values);
+    template<typename ParentState>
+    auto build_opstate(Fn& fn, std::size_t idx, ParentState& parent_state) -> opstate_type* {
+      state.reset();
+      auto opt_fn_sender = std::apply(
+          [&](auto&... args) -> decltype(auto) {
+            return std::invoke(fn, idx, args...);
+          },
+          values);
+      if (!opt_fn_sender.has_value()) return nullptr;
+
+      auto receiver = Receiver<values_container>(parent_state, *this);
+      auto scheduler = execution::get_scheduler(std::as_const(receiver));
+      return &state.emplace(
+          execution::connect(
+              execution::lazy_on(std::move(scheduler), *std::move(opt_fn_sender)),
+              Receiver<values_container>(parent_state, *this)));
     }
 
-    template<std::invocable<T&&...> Fn>
-    auto apply(Fn&& fn) && -> decltype(auto) {
-      return std::apply(std::forward<Fn>(fn), std::move(values));
+    template<std::invocable<T&&...> Fn_>
+    auto apply(Fn_&& fn) && -> decltype(auto) {
+      return std::apply(std::forward<Fn_>(fn), std::move(values));
     }
 
     private:
     std::tuple<T...> values;
+    std::optional<opstate_type> state;
   };
 
-  template<typename TypeAppender>
-  using type_appender_to_values_container =
-      typename TypeAppender::
-      template transform<std::remove_cvref_t>::
-      template type<values_container>;
+  template<typename Fn, template<typename> class Receiver>
+  struct type_appender_to_values_container {
+    private:
+    template<typename... T>
+    using type_ = values_container<Fn, Receiver, T...>;
+
+    public:
+    template<typename TypeAppender>
+    using type = typename TypeAppender::template transform<std::remove_cvref_t>::template type<type_>;
+  };
 
   // Determine if a receiver has an associated scheduler.
   template<receiver Receiver, typename = void>
@@ -105,27 +133,6 @@ struct lazy_repeat_t {
   template<sender Sender, receiver Receiver, typename Fn>
   class opstate {
     private:
-    // Compute all the container types.
-    // `_type_appender<values_container<...>, values_container<...>, ...>'
-    using all_container_types = typename sender_traits<Sender>::template value_types<_type_appender, _type_appender>::
-        template transform<type_appender_to_values_container>;
-
-    // Compute the variant type.
-    //
-    // The computed variant has a `std::monostate' as the first type, so that it'll initialize to that.
-    // The monostate indicates that no values have been assigned.
-    using variant_type =
-        typename _type_appender<>::merge<                                                                        // The union of
-            _type_appender<std::monostate>,                                                                      // monostate (indicating there is
-                                                                                                                 // as yet no values present)
-            all_container_types                                                                                  // each of the possible value-types
-                                                                                                                 // `_type_appender<
-                                                                                                                 //     values_container<...>,
-                                                                                                                 //     values_container<...>,
-                                                                                                                 //     ...>'
-        >::                                                                                                      //
-        template type<std::variant>;                                                                             // All placed into a std::variant.
-
     // Local-receiver accepts the result of the fn-sender.
     // It wraps a receiver (the one we get from `start_detached')
     // and holds a reference to both the state and the container-values.
@@ -134,22 +141,12 @@ struct lazy_repeat_t {
     // - invokes the state.apply function, if the value-signal was received.
     // - otherwise passes the signal down the operation-chain.
     // In all cases, it'll complete the wrapped-receiver (using the done-signal).
-    template<receiver NestedReceiver, typename ValuesContainer>
-    class local_receiver
-    : public _generic_receiver_wrapper<NestedReceiver, set_value_t, set_error_t, set_done_t>
-    {
+    template<typename ValuesContainer>
+    class local_receiver {
       public:
-      explicit local_receiver(opstate& state, ValuesContainer& container, NestedReceiver&& r)
-      noexcept(std::is_nothrow_move_constructible_v<NestedReceiver>)
-      : _generic_receiver_wrapper<NestedReceiver, set_value_t, set_error_t, set_done_t>(std::move(r)),
-        state(state),
+      explicit local_receiver(opstate& state, ValuesContainer& container) noexcept
+      : state(state),
         container(container)
-      {}
-
-      explicit local_receiver(opstate& state, const NestedReceiver& r)
-      noexcept(std::is_nothrow_copy_constructible_v<NestedReceiver>)
-      : _generic_receiver_wrapper<NestedReceiver, set_value_t, set_error_t, set_done_t>(r),
-        state(state)
       {}
 
       template<typename... Args>
@@ -159,70 +156,60 @@ struct lazy_repeat_t {
         } catch (...) {
           ::earnest::execution::set_error(std::move(self.state.r), std::current_exception());
         }
-
-        self.complete();
       }
 
-      template<typename Error>
-      friend auto tag_invoke([[maybe_unused]] set_error_t, local_receiver&& self, Error&& error) noexcept -> void {
-        ::earnest::execution::set_error(std::move(self.state.r), std::forward<Error>(error));
-        self.complete();
+      template<typename Tag, typename... Args,
+          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
+          typename = std::enable_if_t<!std::same_as<Tag, set_value_t>>>
+      friend auto tag_invoke([[maybe_unused]] Tag tag, const local_receiver& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, const Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, const Receiver&, Args...> {
+        return execution::tag_invoke(std::move(tag), std::as_const(self.state.r), std::forward<Args>(args)...);
       }
 
-      friend auto tag_invoke([[maybe_unused]] set_done_t, local_receiver&& self) noexcept -> void {
-        ::earnest::execution::set_done(std::move(self.state.r));
-        self.complete();
+      template<typename Tag, typename... Args,
+          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
+          typename = std::enable_if_t<!std::same_as<Tag, set_value_t>>>
+      friend auto tag_invoke([[maybe_unused]] Tag tag, local_receiver& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver&, Args...> {
+        return execution::tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
+      }
+
+      template<typename Tag, typename... Args,
+          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
+          typename = std::enable_if_t<!std::same_as<Tag, set_value_t>>>
+      friend auto tag_invoke([[maybe_unused]] Tag tag, local_receiver&& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver, Args...> {
+        return execution::tag_invoke(std::move(tag), std::move(self.state.r), std::forward<Args>(args)...);
       }
 
       private:
-      auto complete() noexcept -> void {
-        execution::set_done(std::move(this->r));
-      }
-
       opstate& state;
       ValuesContainer& container;
     };
 
-    // Local-sender wraps the sender from the function.
+    // Compute all the container types.
+    // `_type_appender<values_container<...>, values_container<...>, ...>'
+    using all_container_types = typename sender_traits<Sender>::template value_types<_type_appender, _type_appender>::
+        template transform<type_appender_to_values_container<Fn, local_receiver>::template type>;
+
+    // Compute the variant type.
     //
-    // When connected, it'll wrap the receiver in local-receiver.
-    // That receiver will handle propagation into opstate.
-    template<typed_sender FnSender, typename ValuesContainer>
-    class local_sender
-    : public _generic_sender_wrapper<local_sender<FnSender, ValuesContainer>, FnSender, connect_t>
-    {
-      public:
-      template<template<typename...> class Tuple, template<typename...> class Variant>
-      using value_types = Variant<Tuple<>>;
-
-      static inline constexpr bool sends_done = true;
-
-      explicit local_sender(opstate& state, ValuesContainer& container, FnSender&& fn_sender)
-      noexcept(std::is_nothrow_move_constructible_v<FnSender>)
-      : _generic_sender_wrapper<local_sender<FnSender, ValuesContainer>, FnSender, connect_t>(std::move(fn_sender)),
-        state(state),
-        container(container)
-      {}
-
-      explicit local_sender(opstate& state, ValuesContainer& container, const FnSender& fn_sender)
-      noexcept(std::is_nothrow_copy_constructible_v<FnSender>)
-      : _generic_sender_wrapper<local_sender<FnSender, ValuesContainer>, FnSender, connect_t>(fn_sender),
-        state(state),
-        container(container)
-      {}
-
-      template<receiver NestedReceiver>
-      friend auto tag_invoke([[maybe_unused]] connect_t, local_sender&& self, NestedReceiver&& r)
-      -> decltype(auto) {
-        return execution::connect(
-            std::move(self.s),
-            local_receiver<std::remove_cvref_t<NestedReceiver>, ValuesContainer>(self.state, self.container, std::forward<NestedReceiver>(r)));
-      }
-
-      private:
-      opstate& state;
-      ValuesContainer& container;
-    };
+    // The computed variant has a `std::monostate' as the first type, so that it'll initialize to that.
+    // The monostate indicates that no values have been assigned.
+    using variant_type =
+        typename _type_appender<>::merge<   // The union of
+            _type_appender<std::monostate>, // monostate (indicating there is
+                                            // as yet no values present)
+            all_container_types             // each of the possible value-types
+                                            // `_type_appender<
+                                            //     values_container<...>,
+                                            //     values_container<...>,
+                                            //     ...>'
+        >::                                 //
+        template type<std::variant>;        // All placed into a std::variant.
 
     // Receiver that delegates to this opstate.
     class accepting_receiver {
@@ -294,36 +281,21 @@ struct lazy_repeat_t {
     private:
     template<typename... Args>
     auto start(Args&&... args) -> void {
-      using container_type = values_container<std::remove_cvref_t<Args>...>;
+      using container_type = values_container<Fn, local_receiver, std::remove_cvref_t<Args>...>;
       container_type& container = values.template emplace<container_type>(std::forward<Args>(args)...);
       apply(container);
     }
 
     template<typename ValuesContainer>
     auto apply(ValuesContainer& container) -> void {
-      apply(
-          container,
-          container.apply(
-              [this](auto&... args) {
-                return std::invoke(this->fn, this->idx++, args...);
-              }));
-    }
-
-    template<typename ValuesContainer, sender FnSender>
-    auto apply(ValuesContainer& container, std::optional<FnSender> opt_fn_sender) -> void {
-      if (opt_fn_sender.has_value()) {
-        // We start the sub-task in detached mode.
-        // The local-sender will create a local-receiver which will intercept all the signals.
-        // We use `lazy_on(get_scheduler(r))' so that we won't recurse on the stack.
-        execution::start_detached(
-            execution::lazy_on(
-                execution::get_scheduler(r),
-                local_sender<FnSender, ValuesContainer>(*this, container, *std::move(opt_fn_sender))));
-      } else {
+      auto repeated_opstate_ptr = container.build_opstate(fn, idx++, *this);
+      if (repeated_opstate_ptr == nullptr) {
         std::move(container).apply(
             [this]<typename... Args>(Args&&... args) {
               ::earnest::execution::set_value(std::move(this->r), std::forward<Args>(args)...);
             });
+      } else {
+        execution::start(*repeated_opstate_ptr);
       }
     }
 
