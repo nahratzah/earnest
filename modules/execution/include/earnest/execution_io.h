@@ -32,16 +32,21 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cerrno>
+#include <concepts>
 #include <cstddef>
+#include <exception>
+#include <numeric>
 #include <optional>
+#include <ranges>
 #include <span>
 #include <system_error>
-#include <exception>
 
 #include "execution.h"
 #include "execution_util.h"
 
+#include <sys/uio.h>
 #include <unistd.h>
 
 namespace earnest::execution::io {
@@ -49,6 +54,297 @@ namespace earnest::execution::io {
 
 // Type used for file offsets.
 using offset_type = std::uint64_t;
+
+
+// Multiple spans describing a buffer.
+// This is used for vectored writes.
+template<typename T>
+concept const_buffer_sequence = std::ranges::forward_range<T> && std::convertible_to<std::ranges::range_value_t<T>, std::span<const std::byte>>;
+
+// Multiple spans describing a buffer.
+// This is used for vectored reads.
+//
+// (Note that any mutable_buffer_sequence also satisfies the const_buffer_sequence concept,
+// so it's best not to use them as a discriminant for overloading.)
+template<typename T>
+concept mutable_buffer_sequence = std::ranges::forward_range<T> && std::convertible_to<std::ranges::range_value_t<T>, std::span<std::byte>>;
+
+// Single-span or buffer-sequence buffer.
+template<typename T>
+concept const_buffers = std::convertible_to<std::remove_cvref_t<T>, std::span<const std::byte>> || const_buffer_sequence<T>;
+
+// Single-span or buffer-sequence buffer.
+template<typename T>
+concept mutable_buffers = std::convertible_to<std::remove_cvref_t<T>, std::span<std::byte>> || mutable_buffer_sequence<T>;
+
+
+// Convert a buffer-sequence into a vector of spans.
+template<mutable_buffer_sequence Buffers>
+inline auto vectorize_mutable_buffers(Buffers&& buf) -> std::vector<std::span<std::byte>> {
+#if __cpp_lib_ranges_to_container >= 202202L
+  return std::forward<Buffers>(buf)
+  | std::ranges::to<std::vector<std::span<std::byte>>>();
+#else
+  std::vector<std::span<std::byte>> result;
+  // Using a raw iterator, so we can play nice with the sentinel.
+  // (Ranges can have differently-typed begin and end iterators,
+  // whereas <algorithms> always wants the same type for those iterators.)
+  for (auto iter = std::ranges::begin(buf);
+      iter != std::ranges::end(buf);
+      ++iter) {
+    result.emplace_back(*iter);
+  }
+  return result;
+#endif
+}
+
+// Convert a buffer-sequence into a vector of spans.
+template<const_buffer_sequence Buffers>
+inline auto vectorize_const_buffers(Buffers&& buf) -> std::vector<std::span<const std::byte>> {
+#if __cpp_lib_ranges_to_container >= 202202L
+  return std::forward<Buffers>(buf)
+  | std::ranges::to<std::vector<std::span<const std::byte>>>();
+#else
+  std::vector<std::span<const std::byte>> result;
+  // Using a raw iterator, so we can play nice with the sentinel.
+  // (Ranges can have differently-typed begin and end iterators,
+  // whereas <algorithms> always wants the same type for those iterators.)
+  for (auto iter = std::ranges::begin(buf);
+      iter != std::ranges::end(buf);
+      ++iter) {
+    result.emplace_back(*iter);
+  }
+  return result;
+#endif
+}
+
+// Convert a buffer-sequence into a vector, using some transformation.
+template<mutable_buffer_sequence Buffers, std::invocable<std::span<std::byte>> TransformFn>
+inline auto vectorize_mutable_buffers(Buffers&& buf, TransformFn&& transform_fn)
+-> auto {
+  using result_value_type = std::invoke_result_t<std::add_lvalue_reference_t<TransformFn>, std::span<std::byte>>;
+  using result_type = std::vector<result_value_type>;
+
+#if __cpp_lib_ranges_to_container >= 202202L
+  return std::forward<Buffers>(buf)
+  | std::ranges::views::transform(std::forward<TransformFn>(transform_fn))
+  | std::ranges::to<std::vector<>();
+#else
+  result_type result;
+  // Using a raw iterator, so we can play nice with the sentinel.
+  // (Ranges can have differently-typed begin and end iterators,
+  // whereas <algorithms> always wants the same type for those iterators.)
+  for (auto iter = std::ranges::begin(buf);
+      iter != std::ranges::end(buf);
+      ++iter) {
+    result.emplace_back(std::invoke(transform_fn, *iter));
+  }
+  return result;
+#endif
+}
+
+// Convert a buffer-sequence into a vector, using some transformation.
+template<const_buffer_sequence Buffers, std::invocable<std::span<std::byte>> TransformFn>
+inline auto vectorize_const_buffers(Buffers&& buf, TransformFn&& transform_fn)
+-> auto {
+  using result_value_type = std::invoke_result_t<std::add_lvalue_reference_t<TransformFn>, std::span<const std::byte>>;
+  using result_type = std::vector<result_value_type>;
+
+#if __cpp_lib_ranges_to_container >= 202202L
+  return std::forward<Buffers>(buf)
+  | std::ranges::views::transform(std::forward<TransformFn>(transform_fn))
+  | std::ranges::to<std::vector<>();
+#else
+  result_type result;
+  // Using a raw iterator, so we can play nice with the sentinel.
+  // (Ranges can have differently-typed begin and end iterators,
+  // whereas <algorithms> always wants the same type for those iterators.)
+  for (auto iter = std::ranges::begin(buf);
+      iter != std::ranges::end(buf);
+      ++iter) {
+    result.emplace_back(std::invoke(transform_fn, *iter));
+  }
+  return result;
+#endif
+}
+
+
+template<typename Byte>
+requires (std::is_same_v<std::remove_const_t<Byte>, std::byte>)
+struct readwrite_state_span_ {
+  std::span<Byte> buf;
+
+  explicit readwrite_state_span_(std::span<Byte> buf) noexcept
+  : buf(buf)
+  {}
+
+  protected:
+  inline auto update_buf_(std::size_t len) -> void {
+    assert(buf.size() >= len);
+    buf = buf.subspan(len);
+  }
+
+  inline auto size() const noexcept -> std::size_t {
+    return buf.size();
+  }
+};
+
+template<typename Byte>
+requires (std::is_same_v<std::remove_const_t<Byte>, std::byte>)
+struct readwrite_state_vectored_ {
+  std::vector<std::span<Byte>> buf;
+
+  template<typename Buffers>
+  explicit readwrite_state_vectored_(Buffers&& buf)
+  : buf(convert_to_buffer_(std::forward<Buffers>(buf)))
+  {}
+
+  protected:
+  inline auto update_buf_(std::size_t len) -> void {
+    auto iter = buf.begin();
+    while (iter != buf.end() && iter->size() <= len) {
+      len -= iter->size();
+      ++iter;
+    }
+    assert(iter != buf.end() || len == 0); // If this trips, we read/wrote more than we had buffers for.
+    if (len != 0) *iter = iter->subspan(len);
+
+    buf.erase(buf.begin(), iter);
+  }
+
+  inline auto size() const noexcept -> std::size_t {
+    return std::accumulate(buf.begin(), buf.end(), std::size_t(0),
+        [](std::size_t partial_sum, std::span<Byte> s) -> std::size_t {
+          return partial_sum + s.size();
+        });
+  }
+
+  private:
+  template<typename Buffers>
+  inline auto convert_to_buffer_(Buffers&& buf) -> decltype(auto) {
+    if constexpr(std::is_const_v<Byte>) {
+      return vectorize_const_buffers(std::forward<Buffers>(buf));
+    } else {
+      return vectorize_mutable_buffers(std::forward<Buffers>(buf));
+    }
+  }
+};
+
+template<bool EnableOffset> struct readwrite_state_offset_;
+
+template<>
+struct readwrite_state_offset_<true> {
+  offset_type offset;
+
+  explicit readwrite_state_offset_(offset_type offset) noexcept
+  : offset(offset)
+  {}
+
+  protected:
+  inline auto update_offset_(std::size_t len) -> void {
+    offset += len;
+  }
+};
+
+template<>
+struct readwrite_state_offset_<false> {
+  protected:
+  inline auto update_offset_([[maybe_unused]] std::size_t len) -> void {}
+};
+
+template<bool ForReading> struct readwrite_state_eof_;
+
+template<>
+struct readwrite_state_eof_<true> {
+  bool eof = false;
+
+  protected:
+  inline auto update_eof_(bool eof) noexcept -> void {
+    this->eof = eof;
+  }
+
+  inline auto done_eof_() const noexcept -> bool {
+    return eof;
+  }
+};
+
+template<>
+struct readwrite_state_eof_<false> {
+  protected:
+  inline auto update_eof_() noexcept -> void {}
+  inline auto done_eof_() const noexcept -> bool { return false; }
+};
+
+template<typename FD, bool ForReading, bool Vectored, bool EnableOffset>
+class readwrite_state_
+: public readwrite_state_offset_<EnableOffset>,
+  public std::conditional_t<
+      Vectored,
+      readwrite_state_vectored_<std::conditional_t<ForReading, std::byte, const std::byte>>,
+      readwrite_state_span_<std::conditional_t<ForReading, std::byte, const std::byte>>>,
+  public readwrite_state_eof_<ForReading>
+{
+  public:
+  FD fd;
+  std::size_t minbytes;
+  std::size_t operation_count = 0;
+
+  template<typename FD_, typename Buffers>
+  readwrite_state_(FD_&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes)
+  : readwrite_state_offset_<EnableOffset>(offset),
+    std::conditional_t<
+        Vectored,
+        readwrite_state_vectored_<std::conditional_t<ForReading, std::byte, const std::byte>>,
+        readwrite_state_span_<std::conditional_t<ForReading, std::byte, const std::byte>>>(std::forward<Buffers>(buf)),
+    fd(std::forward<FD_>(fd)),
+    minbytes(minbytes.value_or(this->size()))
+  {
+    if (this->minbytes > this->size())
+      throw std::logic_error("buffer is too short for requested minimum read/write");
+  }
+
+  template<typename FD_, typename Buffers>
+  readwrite_state_(FD_&& fd, Buffers&& buf, std::optional<std::size_t> minbytes)
+  : std::conditional_t<
+        Vectored,
+        readwrite_state_vectored_<std::conditional_t<ForReading, std::byte, const std::byte>>,
+        readwrite_state_span_<std::conditional_t<ForReading, std::byte, const std::byte>>>(std::forward<Buffers>(buf)),
+    fd(std::forward<FD_>(fd)),
+    minbytes(minbytes.value_or(this->size()))
+  {
+    if (this->minbytes > this->size())
+      throw std::logic_error("buffer is too short for requested minimum read/write");
+  }
+
+  auto make_updater() & {
+    return [this]<typename... Eof>(std::size_t rlen, Eof&&... eof) {
+      assert(this->size() >= rlen);
+      this->update_buf_(rlen);
+      this->update_offset_(rlen);
+      this->update_eof_(std::forward<Eof>(eof)...);
+      this->minbytes -= rlen;
+      this->operation_count += rlen;
+    };
+  }
+};
+
+template<bool ForReading, typename FD, typename Buffers>
+auto make_readwrite_state_(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes) {
+  if constexpr(std::convertible_to<Buffers, std::span<std::byte>> || std::convertible_to<Buffers, std::span<const std::byte>>) {
+    return readwrite_state_<FD, ForReading, false, true>(std::forward<FD>(fd), offset, std::forward<Buffers>(buf), minbytes);
+  } else {
+    return readwrite_state_<FD, ForReading, true, true>(std::forward<FD>(fd), offset, std::forward<Buffers>(buf), minbytes);
+  }
+}
+
+template<bool ForReading, typename FD, typename Buffers>
+auto make_readwrite_state_(FD&& fd, Buffers&& buf, std::optional<std::size_t> minbytes) {
+  if constexpr(std::convertible_to<Buffers, std::span<std::byte>> || std::convertible_to<Buffers, std::span<const std::byte>>) {
+    return readwrite_state_<FD, ForReading, false, false>(std::forward<FD>(fd), std::forward<Buffers>(buf), minbytes);
+  } else {
+    return readwrite_state_<FD, ForReading, true, false>(std::forward<FD>(fd), std::forward<Buffers>(buf), minbytes);
+  }
+}
 
 
 // Adapter that, when the chain completes with an error-signal holding a std::error_code,
@@ -193,6 +489,23 @@ struct lazy_read_some_at_ec_t {
     return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf));
   }
 
+  template<typename FD, mutable_buffer_sequence Buffers>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf) const
+  noexcept(
+      tag_invocable<lazy_read_some_at_ec_t, FD, offset_type, Buffers> ?
+      nothrow_tag_invocable<lazy_read_some_at_ec_t, FD, offset_type, Buffers> :
+      std::is_nothrow_invocable_v<lazy_read_some_at_ec_t, FD, offset_type, std::span<std::byte>>)
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_read_some_at_ec_t, FD, offset_type, Buffers>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
+    } else {
+      std::span<std::byte> s;
+      if (!std::ranges::empty(buf)) s = *std::ranges::begin(buf);
+      return (*this)(std::forward<FD>(fd), std::move(offset), std::move(s));
+    }
+  }
+
   private:
   template<receiver_of<std::size_t, bool> Receiver>
   class opstate {
@@ -232,6 +545,55 @@ struct lazy_read_some_at_ec_t {
     int fd;
     offset_type offset;
     std::span<std::byte> buf;
+  };
+
+  template<receiver_of<std::size_t, bool> Receiver>
+  class vectored_opstate {
+    public:
+    template<mutable_buffer_sequence Buffers>
+    explicit vectored_opstate(Receiver&& r, int fd, offset_type offset, Buffers&& buf)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : r(std::move(r)),
+      fd(fd),
+      offset(offset),
+      iov(vectorize_mutable_buffers(
+              std::forward<Buffers>(buf),
+              [](std::span<std::byte> s) {
+                using iovec = struct ::iovec;
+                return iovec{
+                  .iov_base=s.data(),
+                  .iov_len=s.size()
+                };
+              }))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, vectored_opstate& self) noexcept -> void {
+      auto rlen = ::preadv(self.fd, self.iov.data(), self.iov.size(), self.offset);
+      bool eof = true;
+      if (rlen == -1) {
+        auto ec = std::error_code(errno, std::generic_category());
+        if (ec == std::make_error_code(std::errc::interrupted)) {
+          rlen = 0;
+          eof = false;
+        } else {
+          execution::set_error(std::move(self.r), std::move(ec));
+          return;
+        }
+      }
+      if (rlen != 0) eof = false;
+
+      try {
+        execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen), std::move(eof));
+      } catch (...) {
+        execution::set_error(std::move(self.r), std::current_exception());
+      }
+    }
+
+    private:
+    Receiver r;
+    int fd;
+    offset_type offset;
+    std::vector<struct ::iovec> iov;
   };
 
   // Figure out if a given receiver has a scheduler.
@@ -289,6 +651,56 @@ struct lazy_read_some_at_ec_t {
     std::span<std::byte> buf;
   };
 
+  class vectored_sender_impl {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<std::size_t, bool>>;
+
+    template<template<typename...> class Variant>
+    using error_types = Variant<std::exception_ptr, std::error_code>;
+
+    static inline constexpr bool sends_done = false;
+
+    template<mutable_buffer_sequence Buffers>
+    explicit vectored_sender_impl(int fd, offset_type offset, Buffers&& buf) noexcept
+    : fd(fd),
+      offset(offset),
+      buf(vectorize_mutable_buffers(std::forward<Buffers>(buf)))
+    {}
+
+    // Only permit move operations.
+    vectored_sender_impl(vectored_sender_impl&&) = default;
+    vectored_sender_impl(const vectored_sender_impl&) = delete;
+
+    // Connect this sender with a receiver.
+    //
+    // If the receiver has a scheduler, we'll try to forward to an implementation of lazy_write_ec,
+    // that is specific for the scheduler.
+    // But if there isn't one, then we'll use our own implementation (which uses a block write).
+    template<receiver_of<std::size_t, bool> Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, vectored_sender_impl&& self, Receiver&& r)
+    -> operation_state decltype(auto) {
+      if constexpr(has_scheduler<std::remove_cvref_t<Receiver>>) {
+        if constexpr(tag_invocable<lazy_read_some_at_ec_t, decltype(execution::get_scheduler(r)), int, offset_type, std::vector<std::span<std::byte>>>) {
+          return execution::connect(
+              execution::tag_invoke(execution::get_scheduler(r), self.fd, self.offset, std::move(self.buf)),
+              std::forward<Receiver>(r));
+        } else {
+          // XXX we have a scheduler, and no specialized implementation
+          // we should create a global-configurable implementation
+          return vectored_opstate<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r), self.fd, self.offset, std::move(self.buf));
+        }
+      } else {
+        return vectored_opstate<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r), self.fd, self.offset, std::move(self.buf));
+      }
+    }
+
+    private:
+    int fd;
+    offset_type offset;
+    std::vector<std::span<std::byte>> buf;
+  };
+
   public:
   auto operator()(int fd, offset_type offset, std::span<std::byte> buf) const
   noexcept
@@ -296,17 +708,24 @@ struct lazy_read_some_at_ec_t {
     return sender_impl(fd, offset, buf);
   }
 
-  template<scheduler Scheduler, typename FD>
-  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, std::span<std::byte> buf) const
+  template<mutable_buffer_sequence Buffers>
+  auto operator()(int fd, offset_type offset, Buffers&& buf) const
+  noexcept
+  -> vectored_sender_impl {
+    return vectored_sender_impl(fd, offset, std::forward<Buffers>(buf));
+  }
+
+  template<scheduler Scheduler, typename FD, mutable_buffers Buffers>
+  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, Buffers&& buf) const
   noexcept(
-      tag_invocable<lazy_read_some_at_ec_t, Scheduler, FD, offset_type, std::span<std::byte>> ?
-      nothrow_tag_invocable<lazy_read_some_at_ec_t, Scheduler, FD, offset_type, std::span<std::byte>> :
-      std::is_nothrow_invocable_v<lazy_read_some_at_ec_t, FD, offset_type, std::span<std::byte>>)
+      tag_invocable<lazy_read_some_at_ec_t, Scheduler, FD, offset_type, Buffers> ?
+      nothrow_tag_invocable<lazy_read_some_at_ec_t, Scheduler, FD, offset_type, Buffers> :
+      std::is_nothrow_invocable_v<lazy_read_some_at_ec_t, FD, offset_type, Buffers>)
   -> decltype(auto) {
-    if constexpr(tag_invocable<lazy_read_some_at_ec_t, Scheduler, FD, offset_type, std::span<std::byte>>)
-      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::move(buf));
+    if constexpr(tag_invocable<lazy_read_some_at_ec_t, Scheduler, FD, offset_type, Buffers>)
+      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
     else
-      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(offset), std::move(buf)));
+      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(offset), std::forward<Buffers>(buf)));
   }
 };
 inline constexpr lazy_read_some_at_ec_t lazy_read_some_at_ec{};
@@ -330,6 +749,23 @@ struct lazy_read_some_ec_t {
   noexcept(nothrow_tag_invocable<lazy_read_some_ec_t, FD, std::span<std::byte>>)
   -> typed_sender decltype(auto) {
     return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
+  }
+
+  template<typename FD, mutable_buffer_sequence Buffers>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd, Buffers&& buf) const
+  noexcept(
+      tag_invocable<lazy_read_some_ec_t, FD, Buffers> ?
+      nothrow_tag_invocable<lazy_read_some_ec_t, FD, Buffers> :
+      std::is_nothrow_invocable_v<lazy_read_some_ec_t, FD, std::span<std::byte>>)
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_read_some_ec_t, FD, Buffers>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf));
+    } else {
+      std::span<std::byte> s;
+      if (!std::ranges::empty(buf)) s = *std::ranges::begin(buf);
+      return (*this)(std::forward<FD>(fd), std::move(s));
+    }
   }
 
   private:
@@ -369,6 +805,53 @@ struct lazy_read_some_ec_t {
     Receiver r;
     int fd;
     std::span<std::byte> buf;
+  };
+
+  template<receiver_of<std::size_t, bool> Receiver>
+  class vectored_opstate {
+    public:
+    template<mutable_buffer_sequence Buffers>
+    explicit vectored_opstate(Receiver&& r, int fd, Buffers&& buf)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : r(std::move(r)),
+      fd(fd),
+      iov(vectorize_mutable_buffers(
+              std::forward<Buffers>(buf),
+              [](std::span<std::byte> s) {
+                using iovec = struct ::iovec;
+                return iovec{
+                  .iov_base=s.data(),
+                  .iov_len=s.size()
+                };
+              }))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, vectored_opstate& self) noexcept -> void {
+      auto rlen = ::readv(self.fd, self.iov.data(), self.iov.size());
+      bool eof = true;
+      if (rlen == -1) {
+        auto ec = std::error_code(errno, std::generic_category());
+        if (ec == std::make_error_code(std::errc::interrupted)) {
+          rlen = 0;
+          eof = false;
+        } else {
+          execution::set_error(std::move(self.r), std::move(ec));
+          return;
+        }
+      }
+      if (rlen != 0) eof = false;
+
+      try {
+        execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen), std::move(eof));
+      } catch (...) {
+        execution::set_error(std::move(self.r), std::current_exception());
+      }
+    }
+
+    private:
+    Receiver r;
+    int fd;
+    std::vector<struct ::iovec> iov;
   };
 
   // Figure out if a given receiver has a scheduler.
@@ -424,6 +907,54 @@ struct lazy_read_some_ec_t {
     std::span<std::byte> buf;
   };
 
+  class vectored_sender_impl {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<std::size_t, bool>>;
+
+    template<template<typename...> class Variant>
+    using error_types = Variant<std::exception_ptr, std::error_code>;
+
+    static inline constexpr bool sends_done = false;
+
+    template<mutable_buffer_sequence Buffers>
+    explicit vectored_sender_impl(int fd, Buffers&& buf) noexcept
+    : fd(fd),
+      buf(vectorize_mutable_buffers(std::forward<Buffers>(buf)))
+    {}
+
+    // Only permit move operations.
+    vectored_sender_impl(vectored_sender_impl&&) = default;
+    vectored_sender_impl(const vectored_sender_impl&) = delete;
+
+    // Connect this sender with a receiver.
+    //
+    // If the receiver has a scheduler, we'll try to forward to an implementation of lazy_write_ec,
+    // that is specific for the scheduler.
+    // But if there isn't one, then we'll use our own implementation (which uses a block write).
+    template<receiver_of<std::size_t, bool> Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, vectored_sender_impl&& self, Receiver&& r)
+    -> operation_state decltype(auto) {
+      if constexpr(has_scheduler<std::remove_cvref_t<Receiver>>) {
+        if constexpr(tag_invocable<lazy_read_some_ec_t, decltype(execution::get_scheduler(r)), int, std::vector<std::span<std::byte>>>) {
+          return execution::connect(
+              execution::tag_invoke(execution::get_scheduler(r), self.fd, std::move(self.buf)),
+              std::forward<Receiver>(r));
+        } else {
+          // XXX we have a scheduler, and no specialized implementation
+          // we should create a global-configurable implementation
+          return vectored_opstate<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r), self.fd, std::move(self.buf));
+        }
+      } else {
+        return vectored_opstate<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r), self.fd, std::move(self.buf));
+      }
+    }
+
+    private:
+    int fd;
+    std::vector<std::span<std::byte>> buf;
+  };
+
   public:
   auto operator()(int fd, std::span<std::byte> buf) const
   noexcept
@@ -431,17 +962,24 @@ struct lazy_read_some_ec_t {
     return sender_impl(fd, buf);
   }
 
-  template<scheduler Scheduler, typename FD>
-  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, std::span<std::byte> buf) const
+  template<mutable_buffers Buffers>
+  auto operator()(int fd, Buffers&& buf) const
+  noexcept
+  -> vectored_sender_impl {
+    return vectored_sender_impl(fd, std::forward<Buffers>(buf));
+  }
+
+  template<scheduler Scheduler, typename FD, mutable_buffers Buffers>
+  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, Buffers&& buf) const
   noexcept(
-      tag_invocable<lazy_read_some_ec_t, Scheduler, FD, std::span<std::byte>> ?
-      nothrow_tag_invocable<lazy_read_some_ec_t, Scheduler, FD, std::span<std::byte>> :
-      std::is_nothrow_invocable_v<lazy_read_some_ec_t, FD, std::span<std::byte>>)
+      tag_invocable<lazy_read_some_ec_t, Scheduler, FD, Buffers> ?
+      nothrow_tag_invocable<lazy_read_some_ec_t, Scheduler, FD, Buffers> :
+      std::is_nothrow_invocable_v<lazy_read_some_ec_t, FD, Buffers>)
   -> decltype(auto) {
-    if constexpr(tag_invocable<lazy_read_some_ec_t, Scheduler, FD, std::span<std::byte>>)
-      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(buf));
+    if constexpr(tag_invocable<lazy_read_some_ec_t, Scheduler, FD, Buffers>)
+      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::forward<Buffers>(buf));
     else
-      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(buf)));
+      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::forward<Buffers>(buf)));
   }
 };
 inline constexpr lazy_read_some_ec_t lazy_read_some_ec{};
@@ -463,6 +1001,23 @@ struct lazy_write_some_at_ec_t {
   noexcept(nothrow_tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
   -> typed_sender decltype(auto) {
     return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
+  }
+
+  template<typename FD, const_buffer_sequence Buffers>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf) const
+  noexcept(
+      tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, Buffers> ?
+      nothrow_tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, Buffers> :
+      std::is_nothrow_invocable_v<lazy_write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, Buffers>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
+    } else {
+      std::span<const std::byte> s;
+      if (!std::ranges::empty(buf)) s = *std::ranges::begin(buf);
+      return (*this)(std::forward<FD>(fd), offset, std::move(s));
+    }
   }
 
   private:
@@ -501,6 +1056,52 @@ struct lazy_write_some_at_ec_t {
     int fd;
     offset_type offset;
     std::span<const std::byte> buf;
+  };
+
+  template<receiver_of<std::size_t> Receiver>
+  class vectored_opstate {
+    public:
+    template<const_buffer_sequence Buffers>
+    explicit vectored_opstate(Receiver&& r, int fd, offset_type offset, Buffers&& buf)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : r(std::move(r)),
+      fd(fd),
+      offset(offset),
+      iov(vectorize_const_buffers(
+              std::forward<Buffers>(buf),
+              [](std::span<const std::byte> s) {
+                using iovec = struct ::iovec;
+                return iovec{
+                  .iov_base=const_cast<std::byte*>(s.data()),
+                  .iov_len=s.size()
+                };
+              }))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, vectored_opstate& self) noexcept -> void {
+      auto wlen = ::pwritev(self.fd, self.iov.data(), self.iov.size(), self.offset);
+      if (wlen == -1) {
+        auto ec = std::error_code(errno, std::generic_category());
+        if (ec == std::make_error_code(std::errc::interrupted)) {
+          wlen = 0;
+        } else {
+          execution::set_error(std::move(self.r), std::move(ec));
+          return;
+        }
+      }
+
+      try {
+        execution::set_value(std::move(self.r), static_cast<std::size_t>(wlen));
+      } catch (...) {
+        execution::set_error(std::move(self.r), std::current_exception());
+      }
+    }
+
+    private:
+    Receiver r;
+    int fd;
+    offset_type offset;
+    std::vector<struct ::iovec> iov;
   };
 
   // Figure out if a given receiver has a scheduler.
@@ -558,6 +1159,56 @@ struct lazy_write_some_at_ec_t {
     std::span<const std::byte> buf;
   };
 
+  class vectored_sender_impl {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<std::size_t>>;
+
+    template<template<typename...> class Variant>
+    using error_types = Variant<std::exception_ptr, std::error_code>;
+
+    static inline constexpr bool sends_done = false;
+
+    template<const_buffer_sequence Buffers>
+    explicit vectored_sender_impl(int fd, offset_type offset, Buffers&& buf) noexcept
+    : fd(fd),
+      offset(offset),
+      buf(vectorize_const_buffers(std::forward<Buffers>(buf)))
+    {}
+
+    // Only permit move operations.
+    vectored_sender_impl(vectored_sender_impl&&) = default;
+    vectored_sender_impl(const vectored_sender_impl&) = delete;
+
+    // Connect this sender with a receiver.
+    //
+    // If the receiver has a scheduler, we'll try to forward to an implementation of lazy_write_ec,
+    // that is specific for the scheduler.
+    // But if there isn't one, then we'll use our own implementation (which uses a block write).
+    template<receiver_of<std::size_t> Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, vectored_sender_impl&& self, Receiver&& r)
+    -> operation_state decltype(auto) {
+      if constexpr(has_scheduler<std::remove_cvref_t<Receiver>>) {
+        if constexpr(tag_invocable<lazy_write_some_at_ec_t, decltype(execution::get_scheduler(r)), int, offset_type, std::vector<std::span<const std::byte>>>) {
+          return execution::connect(
+              execution::tag_invoke(execution::get_scheduler(r), self.fd, self.offset, std::move(self.buf)),
+              std::forward<Receiver>(r));
+        } else {
+          // XXX we have a scheduler, and no specialized implementation
+          // we should create a global-configurable implementation
+          return vectored_opstate<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r), self.fd, self.offset, std::move(self.buf));
+        }
+      } else {
+        return vectored_opstate<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r), self.fd, self.offset, std::move(self.buf));
+      }
+    }
+
+    private:
+    int fd;
+    offset_type offset;
+    std::vector<std::span<const std::byte>> buf;
+  };
+
   public:
   auto operator()(int fd, offset_type offset, std::span<const std::byte> buf) const
   noexcept
@@ -565,17 +1216,24 @@ struct lazy_write_some_at_ec_t {
     return sender_impl(fd, offset, buf);
   }
 
-  template<scheduler Scheduler, typename FD>
-  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, std::span<const std::byte> buf) const
+  template<const_buffer_sequence Buffers>
+  auto operator()(int fd, offset_type offset, Buffers&& buf) const
+  noexcept
+  -> vectored_sender_impl {
+    return vectored_sender_impl(fd, offset, std::forward<Buffers>(buf));
+  }
+
+  template<scheduler Scheduler, typename FD, const_buffers Buffers>
+  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, Buffers&& buf) const
   noexcept(
-      tag_invocable<lazy_write_some_at_ec_t, Scheduler, FD, offset_type, std::span<const std::byte>> ?
-      nothrow_tag_invocable<lazy_write_some_at_ec_t, Scheduler, FD, offset_type, std::span<const std::byte>> :
-      std::is_nothrow_invocable_v<lazy_write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
+      tag_invocable<lazy_write_some_at_ec_t, Scheduler, FD, offset_type, Buffers> ?
+      nothrow_tag_invocable<lazy_write_some_at_ec_t, Scheduler, FD, offset_type, Buffers> :
+      std::is_nothrow_invocable_v<lazy_write_some_at_ec_t, FD, offset_type, Buffers>)
   -> decltype(auto) {
-    if constexpr(tag_invocable<lazy_write_some_at_ec_t, Scheduler, FD, offset_type, std::span<const std::byte>>)
-      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::move(buf));
+    if constexpr(tag_invocable<lazy_write_some_at_ec_t, Scheduler, FD, offset_type, Buffers>)
+      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
     else
-      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(offset), std::move(buf)));
+      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(offset), std::forward<Buffers>(buf)));
   }
 };
 inline constexpr lazy_write_some_at_ec_t lazy_write_some_at_ec{};
@@ -597,6 +1255,23 @@ struct lazy_write_some_ec_t {
   noexcept(nothrow_tag_invocable<lazy_write_some_ec_t, FD, std::span<const std::byte>>)
   -> typed_sender decltype(auto) {
     return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
+  }
+
+  template<typename FD, const_buffer_sequence Buffers>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd, Buffers&& buf) const
+  noexcept(
+      tag_invocable<lazy_write_some_ec_t, FD, Buffers> ?
+      nothrow_tag_invocable<lazy_write_some_ec_t, FD, Buffers> :
+      std::is_nothrow_invocable_v<lazy_write_some_ec_t, FD, std::span<std::byte>>)
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_write_some_ec_t, FD, Buffers>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf));
+    } else {
+      std::span<const std::byte> s;
+      if (!std::ranges::empty(buf)) s = *std::ranges::begin(buf);
+      return (*this)(std::forward<FD>(fd), std::move(s));
+    }
   }
 
   private:
@@ -633,6 +1308,50 @@ struct lazy_write_some_ec_t {
     Receiver r;
     int fd;
     std::span<const std::byte> buf;
+  };
+
+  template<receiver_of<std::size_t> Receiver>
+  class vectored_opstate {
+    public:
+    template<const_buffer_sequence Buffers>
+    explicit vectored_opstate(Receiver&& r, int fd, Buffers&& buf)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : r(std::move(r)),
+      fd(fd),
+      iov(vectorize_const_buffers(
+              std::forward<Buffers>(buf),
+              [](std::span<const std::byte> s) {
+                using iovec = struct ::iovec;
+                return iovec{
+                  .iov_base=const_cast<std::byte*>(s.data()),
+                  .iov_len=s.size()
+                };
+              }))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, vectored_opstate& self) noexcept -> void {
+      auto wlen = ::writev(self.fd, self.iov.data(), self.iov.size());
+      if (wlen == -1) {
+        auto ec = std::error_code(errno, std::generic_category());
+        if (ec == std::make_error_code(std::errc::interrupted)) {
+          wlen = 0;
+        } else {
+          execution::set_error(std::move(self.r), std::move(ec));
+          return;
+        }
+      }
+
+      try {
+        execution::set_value(std::move(self.r), static_cast<std::size_t>(wlen));
+      } catch (...) {
+        execution::set_error(std::move(self.r), std::current_exception());
+      }
+    }
+
+    private:
+    Receiver r;
+    int fd;
+    std::vector<struct ::iovec> iov;
   };
 
   // Figure out if a given receiver has a scheduler.
@@ -688,6 +1407,54 @@ struct lazy_write_some_ec_t {
     std::span<const std::byte> buf;
   };
 
+  class vectored_sender_impl {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<std::size_t>>;
+
+    template<template<typename...> class Variant>
+    using error_types = Variant<std::exception_ptr, std::error_code>;
+
+    static inline constexpr bool sends_done = false;
+
+    template<const_buffer_sequence Buffers>
+    explicit vectored_sender_impl(int fd, Buffers&& buf) noexcept
+    : fd(fd),
+      buf(vectorize_const_buffers(std::forward<Buffers>(buf)))
+    {}
+
+    // Only permit move operations.
+    vectored_sender_impl(vectored_sender_impl&&) = default;
+    vectored_sender_impl(const vectored_sender_impl&) = delete;
+
+    // Connect this sender with a receiver.
+    //
+    // If the receiver has a scheduler, we'll try to forward to an implementation of lazy_write_ec,
+    // that is specific for the scheduler.
+    // But if there isn't one, then we'll use our own implementation (which uses a block write).
+    template<receiver_of<std::size_t> Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, vectored_sender_impl&& self, Receiver&& r)
+    -> operation_state decltype(auto) {
+      if constexpr(has_scheduler<std::remove_cvref_t<Receiver>>) {
+        if constexpr(tag_invocable<lazy_write_some_ec_t, decltype(execution::get_scheduler(r)), int, std::vector<std::span<const std::byte>>>) {
+          return execution::connect(
+              execution::tag_invoke(execution::get_scheduler(r), self.fd, std::move(self.buf)),
+              std::forward<Receiver>(r));
+        } else {
+          // XXX we have a scheduler, and no specialized implementation
+          // we should create a global-configurable implementation
+          return vectored_opstate<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r), self.fd, std::move(self.buf));
+        }
+      } else {
+        return vectored_opstate<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r), self.fd, std::move(self.buf));
+      }
+    }
+
+    private:
+    int fd;
+    std::vector<std::span<const std::byte>> buf;
+  };
+
   public:
   auto operator()(int fd, std::span<const std::byte> buf) const
   noexcept
@@ -695,17 +1462,24 @@ struct lazy_write_some_ec_t {
     return sender_impl(fd, buf);
   }
 
-  template<scheduler Scheduler, typename FD>
-  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, std::span<const std::byte> buf) const
+  template<const_buffer_sequence Buffers>
+  auto operator()(int fd, Buffers&& buf) const
+  noexcept
+  -> vectored_sender_impl {
+    return vectored_sender_impl(fd, buf);
+  }
+
+  template<scheduler Scheduler, typename FD, const_buffers Buffers>
+  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, Buffers&& buf) const
   noexcept(
-      tag_invocable<lazy_write_some_ec_t, Scheduler, FD, std::span<const std::byte>> ?
-      nothrow_tag_invocable<lazy_write_some_ec_t, Scheduler, FD, std::span<const std::byte>> :
-      std::is_nothrow_invocable_v<lazy_write_some_ec_t, FD, std::span<const std::byte>>)
+      tag_invocable<lazy_write_some_ec_t, Scheduler, FD, Buffers> ?
+      nothrow_tag_invocable<lazy_write_some_ec_t, Scheduler, FD, Buffers> :
+      std::is_nothrow_invocable_v<lazy_write_some_ec_t, FD, Buffers>)
   -> decltype(auto) {
-    if constexpr(tag_invocable<lazy_write_some_ec_t, Scheduler, FD, std::span<const std::byte>>)
-      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(buf));
+    if constexpr(tag_invocable<lazy_write_some_ec_t, Scheduler, FD, Buffers>)
+      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::forward<Buffers>(buf));
     else
-      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(buf)));
+      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::forward<Buffers>(buf)));
   }
 };
 inline constexpr lazy_write_some_ec_t lazy_write_some_ec{};
@@ -724,12 +1498,6 @@ struct lazy_read_some_at_t {
   template<typename FD>
   requires (!std::same_as<std::remove_cvref_t<FD>, int>)
   auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf) const
-  noexcept(
-      tag_invocable<lazy_read_some_at_t, FD, offset_type, std::span<std::byte>> ?
-      nothrow_tag_invocable<lazy_read_some_at_t, FD, offset_type, std::span<std::byte>> :
-      noexcept(
-          lazy_read_some_at_ec(std::forward<FD>(fd), std::move(offset), std::move(buf))
-          | ec_to_exception()))
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_read_some_at_t, FD, offset_type, std::span<std::byte>>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf));
@@ -739,26 +1507,49 @@ struct lazy_read_some_at_t {
     }
   }
 
-  auto operator()(int fd, offset_type offset, std::span<std::byte> buf) const
-  noexcept(noexcept(
-          lazy_read_some_at_ec(fd, offset, std::move(buf))
+  template<typename FD, mutable_buffer_sequence Buffers>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf) const
+  noexcept(
+      tag_invocable<lazy_read_some_at_t, FD, offset_type, Buffers> ?
+      nothrow_tag_invocable<lazy_read_some_at_t, FD, offset_type, Buffers> :
+      noexcept(
+          lazy_read_some_at_ec(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf))
           | ec_to_exception()))
   -> typed_sender decltype(auto) {
-    return lazy_read_some_at_ec(fd, offset, std::move(buf))
+    if constexpr(tag_invocable<lazy_read_some_at_t, FD, offset_type, Buffers>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
+    } else if constexpr(tag_invocable<lazy_read_some_at_t, FD, offset_type, std::span<std::byte>>) {
+      std::span<std::byte> s;
+      if (!std::ranges::empty(buf)) s = *std::ranges::begin(buf);
+      return (*this)(std::forward<FD>(fd), offset, std::move(s));
+    } else {
+      return lazy_read_some_at_ec(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf))
+      | ec_to_exception();
+    }
+  }
+
+  template<mutable_buffers Buffers>
+  auto operator()(int fd, offset_type offset, Buffers&& buf) const
+  noexcept(noexcept(
+          lazy_read_some_at_ec(fd, offset, std::forward<Buffers>(buf))
+          | ec_to_exception()))
+  -> typed_sender decltype(auto) {
+    return lazy_read_some_at_ec(fd, offset, std::forward<Buffers>(buf))
     | ec_to_exception();
   }
 
-  template<scheduler Scheduler, typename FD>
-  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, std::span<std::byte> buf) const
+  template<scheduler Scheduler, typename FD, mutable_buffers Buffers>
+  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, Buffers&& buf) const
   noexcept(
-      tag_invocable<lazy_read_some_at_t, Scheduler, FD, offset_type, std::span<std::byte>> ?
-      nothrow_tag_invocable<lazy_read_some_at_t, Scheduler, FD, offset_type, std::span<std::byte>> :
-      std::is_nothrow_invocable_v<lazy_read_some_at_t, FD, offset_type, std::span<std::byte>>)
+      tag_invocable<lazy_read_some_at_t, Scheduler, FD, offset_type, Buffers> ?
+      nothrow_tag_invocable<lazy_read_some_at_t, Scheduler, FD, offset_type, Buffers> :
+      std::is_nothrow_invocable_v<lazy_read_some_at_t, FD, offset_type, Buffers>)
   -> decltype(auto) {
-    if constexpr(tag_invocable<lazy_read_some_at_t, Scheduler, FD, offset_type, std::span<std::byte>>)
-      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::move(buf));
+    if constexpr(tag_invocable<lazy_read_some_at_t, Scheduler, FD, offset_type, Buffers>)
+      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
     else
-      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(offset), std::move(buf)));
+      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(offset), std::forward<Buffers>(buf)));
   }
 };
 inline constexpr lazy_read_some_at_t lazy_read_some_at{};
@@ -777,12 +1568,6 @@ struct lazy_read_some_t {
   template<typename FD>
   requires (!std::same_as<std::remove_cvref_t<FD>, int>)
   auto operator()(FD&& fd, std::span<std::byte> buf) const
-  noexcept(
-      tag_invocable<lazy_read_some_t, FD, std::span<std::byte>> ?
-      nothrow_tag_invocable<lazy_read_some_t, FD, std::span<std::byte>> :
-      noexcept(
-          lazy_read_some_ec(std::forward<FD>(fd), std::move(buf))
-          | ec_to_exception()))
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_read_some_t, FD, std::span<std::byte>>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
@@ -792,26 +1577,43 @@ struct lazy_read_some_t {
     }
   }
 
-  auto operator()(int fd, std::span<std::byte> buf) const
+  template<typename FD, mutable_buffer_sequence Buffers>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd, Buffers&& buf) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_read_some_t, FD, Buffers>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf));
+    } else if constexpr(tag_invocable<lazy_read_some_t, FD, std::span<std::byte>>) {
+      std::span<std::byte> s;
+      if (!std::ranges::empty(buf)) s = *std::ranges::begin(buf);
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(s));
+    } else {
+      return lazy_read_some_ec(std::forward<FD>(fd), std::forward<Buffers>(buf))
+      | ec_to_exception();
+    }
+  }
+
+  template<mutable_buffers Buffers>
+  auto operator()(int fd, Buffers&& buf) const
   noexcept(noexcept(
-          lazy_read_some_ec(fd, std::move(buf))
+          lazy_read_some_ec(fd, std::forward<Buffers>(buf))
           | ec_to_exception()))
   -> typed_sender decltype(auto) {
-    return lazy_read_some_ec(fd, std::move(buf))
+    return lazy_read_some_ec(fd, std::forward<Buffers>(buf))
     | ec_to_exception();
   }
 
-  template<scheduler Scheduler, typename FD>
-  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, std::span<std::byte> buf) const
+  template<scheduler Scheduler, typename FD, mutable_buffers Buffers>
+  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, Buffers&& buf) const
   noexcept(
-      tag_invocable<lazy_read_some_t, Scheduler, FD, std::span<std::byte>> ?
-      nothrow_tag_invocable<lazy_read_some_t, Scheduler, FD, std::span<std::byte>> :
-      std::is_nothrow_invocable_v<lazy_read_some_t, FD, std::span<std::byte>>)
+      tag_invocable<lazy_read_some_t, Scheduler, FD, Buffers> ?
+      nothrow_tag_invocable<lazy_read_some_t, Scheduler, FD, Buffers> :
+      std::is_nothrow_invocable_v<lazy_read_some_t, FD, Buffers>)
   -> decltype(auto) {
-    if constexpr(tag_invocable<lazy_read_some_t, Scheduler, FD, std::span<std::byte>>)
-      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(buf));
+    if constexpr(tag_invocable<lazy_read_some_t, Scheduler, FD, Buffers>)
+      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::forward<Buffers>(buf));
     else
-      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(buf)));
+      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::forward<Buffers>(buf)));
   }
 };
 inline constexpr lazy_read_some_t lazy_read_some{};
@@ -830,12 +1632,6 @@ struct lazy_write_some_at_t {
   template<typename FD>
   requires (!std::same_as<std::remove_cvref_t<FD>, int>)
   auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf) const
-  noexcept(
-      tag_invocable<lazy_write_some_at_t, FD, offset_type, std::span<const std::byte>> ?
-      nothrow_tag_invocable<lazy_write_some_at_t, FD, offset_type, std::span<const std::byte>> :
-      noexcept(
-          lazy_write_some_at_ec(std::forward<FD>(fd), offset, std::move(buf))
-          | ec_to_exception()))
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_write_some_at_t, FD, offset_type, std::span<const std::byte>>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), offset, std::move(buf));
@@ -845,26 +1641,43 @@ struct lazy_write_some_at_t {
     }
   }
 
-  auto operator()(int fd, offset_type offset, std::span<const std::byte> buf) const
+  template<typename FD, const_buffer_sequence Buffers>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_write_some_at_t, FD, offset_type, Buffers>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), offset, std::forward<Buffers>(buf));
+    } else if constexpr(tag_invocable<lazy_write_some_at_t, FD, offset_type, std::span<const std::byte>>) {
+      std::span<const std::byte> s;
+      if (!std::ranges::empty(buf)) s = *std::ranges::begin(buf);
+      return (*this)(std::forward<FD>(fd), offset, std::move(s));
+    } else {
+      return lazy_write_some_at_ec(std::forward<FD>(fd), offset, std::forward<Buffers>(buf))
+      | ec_to_exception();
+    }
+  }
+
+  template<const_buffers Buffers>
+  auto operator()(int fd, offset_type offset, Buffers&& buf) const
   noexcept(noexcept(
-          lazy_write_some_at_ec(fd, offset, std::move(buf))
+          lazy_write_some_at_ec(fd, offset, std::forward<Buffers>(buf))
           | ec_to_exception()))
   -> typed_sender decltype(auto) {
-    return lazy_write_some_at_ec(fd, offset, std::move(buf))
+    return lazy_write_some_at_ec(fd, offset, std::forward<Buffers>(buf))
     | ec_to_exception();
   }
 
-  template<scheduler Scheduler, typename FD>
-  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, std::span<const std::byte> buf) const
+  template<scheduler Scheduler, typename FD, const_buffers Buffers>
+  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, Buffers&& buf) const
   noexcept(
-      tag_invocable<lazy_write_some_at_t, Scheduler, FD, offset_type, std::span<const std::byte>> ?
-      nothrow_tag_invocable<lazy_write_some_at_t, Scheduler, FD, offset_type, std::span<const std::byte>> :
-      std::is_nothrow_invocable_v<lazy_write_some_at_t, FD, offset_type, std::span<const std::byte>>)
+      tag_invocable<lazy_write_some_at_t, Scheduler, FD, offset_type, Buffers> ?
+      nothrow_tag_invocable<lazy_write_some_at_t, Scheduler, FD, offset_type, Buffers> :
+      std::is_nothrow_invocable_v<lazy_write_some_at_t, FD, offset_type, Buffers>)
   -> decltype(auto) {
-    if constexpr(tag_invocable<lazy_write_some_at_t, Scheduler, FD, offset_type, std::span<const std::byte>>)
-      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::move(buf));
+    if constexpr(tag_invocable<lazy_write_some_at_t, Scheduler, FD, offset_type, Buffers>)
+      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
     else
-      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(offset), std::move(buf)));
+      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(offset), std::forward<Buffers>(buf)));
   }
 };
 inline constexpr lazy_write_some_at_t lazy_write_some_at{};
@@ -898,26 +1711,43 @@ struct lazy_write_some_t {
     }
   }
 
-  auto operator()(int fd, std::span<const std::byte> buf) const
+  template<typename FD, const_buffer_sequence Buffers>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd, Buffers&& buf) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_write_some_t, FD, Buffers>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
+    } else if constexpr(tag_invocable<lazy_write_some_t, FD, std::span<const std::byte>>) {
+      std::span<const std::byte> s;
+      if (!std::ranges::empty(buf)) s = *std::ranges::begin(buf);
+      return (*this)(std::forward<FD>(fd), std::move(s));
+    } else {
+      return lazy_write_some_ec(std::forward<FD>(fd), std::move(buf))
+      | ec_to_exception();
+    }
+  }
+
+  template<const_buffers Buffers>
+  auto operator()(int fd, Buffers&& buf) const
   noexcept(noexcept(
-          lazy_write_some_ec(fd, std::move(buf))
+          lazy_write_some_ec(fd, std::forward<Buffers>(buf))
           | ec_to_exception()))
   -> typed_sender decltype(auto) {
-    return lazy_write_some_ec(fd, std::move(buf))
+    return lazy_write_some_ec(fd, std::forward<Buffers>(buf))
     | ec_to_exception();
   }
 
-  template<scheduler Scheduler, typename FD>
-  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, std::span<const std::byte> buf) const
+  template<scheduler Scheduler, typename FD, const_buffers Buffers>
+  auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, Buffers&& buf) const
   noexcept(
-      tag_invocable<lazy_write_some_t, Scheduler, FD, std::span<const std::byte>> ?
-      nothrow_tag_invocable<lazy_write_some_t, Scheduler, FD, std::span<const std::byte>> :
-      std::is_nothrow_invocable_v<lazy_write_some_t, FD, std::span<const std::byte>>)
+      tag_invocable<lazy_write_some_t, Scheduler, FD, Buffers> ?
+      nothrow_tag_invocable<lazy_write_some_t, Scheduler, FD, Buffers> :
+      std::is_nothrow_invocable_v<lazy_write_some_t, FD, Buffers>)
   -> decltype(auto) {
-    if constexpr(tag_invocable<lazy_write_some_t, Scheduler, FD, std::span<const std::byte>>)
-      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(buf));
+    if constexpr(tag_invocable<lazy_write_some_t, Scheduler, FD, Buffers>)
+      return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::forward<Buffers>(buf));
     else
-      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::move(buf)));
+      return execution::lazy_on(std::forward<Scheduler>(sch), (*this)(std::move(fd), std::forward<Buffers>(buf)));
   }
 };
 inline constexpr lazy_write_some_t lazy_write_some{};
@@ -931,41 +1761,19 @@ inline constexpr lazy_write_some_t lazy_write_some{};
 //
 // The default implementation repeatedly uses `lazy_read_some_at_ec' until sufficient data has been read.
 struct lazy_read_at_ec_t {
-  template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, mutable_buffers Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<lazy_read_at_ec_t, FD, offset_type, std::span<std::byte>, std::optional<std::size_t>>) {
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<lazy_read_at_ec_t, FD, offset_type, Buffers, std::optional<std::size_t>>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
     } else {
-      struct state {
-        FD fd;
-        offset_type offset;
-        std::span<std::byte> buf;
-        std::size_t minbytes;
-        std::size_t read_count = 0;
-        bool eof = false;
-      };
-
-      return just(
-          state{
-            .fd=std::forward<FD>(fd),
-            .offset=offset,
-            .buf=buf,
-            .minbytes=minbytes.value_or(buf.size())
-          })
+      return just(make_readwrite_state_<true>(std::forward<FD>(fd), offset, std::forward<Buffers>(buf), minbytes))
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, state& st) {
+          []([[maybe_unused]] std::size_t idx, auto& st) {
             auto generator = [&]() {
               return std::make_optional(
                   lazy_read_some_at_ec(st.fd, st.offset, st.buf)
-                  | lazy_then(
-                      [&st](std::size_t rlen, bool eof) {
-                        st.offset += rlen;
-                        st.buf = st.buf.subspan(rlen);
-                        st.minbytes -= std::min(st.minbytes, rlen);
-                        st.read_count += rlen;
-                        st.eof = eof;
-                      }));
+                  | lazy_then(st.make_updater()));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
@@ -975,8 +1783,8 @@ struct lazy_read_at_ec_t {
               return generator();
           })
       | lazy_then(
-          [](state st) noexcept {
-            return std::make_tuple(st.read_count, st.eof);
+          [](auto st) noexcept {
+            return std::make_tuple(st.operation_count, st.eof);
           })
       | lazy_explode_tuple();
     }
@@ -993,38 +1801,19 @@ inline constexpr lazy_read_at_ec_t lazy_read_at_ec{};
 //
 // The default implementation repeatedly uses `lazy_read_some_ec' until sufficient data has been read.
 struct lazy_read_ec_t {
-  template<typename FD>
-  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, mutable_buffers Buffers>
+  auto operator()(FD&& fd, Buffers buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<lazy_read_ec_t, FD, std::span<std::byte>, std::optional<std::size_t>>) {
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<lazy_read_ec_t, FD, Buffers, std::optional<std::size_t>>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
     } else {
-      struct state {
-        FD fd;
-        std::span<std::byte> buf;
-        std::size_t minbytes;
-        std::size_t read_count = 0;
-        bool eof = false;
-      };
-
-      return just(
-          state{
-            .fd=std::forward<FD>(fd),
-            .buf=buf,
-            .minbytes=minbytes.value_or(buf.size())
-          })
+      return just(make_readwrite_state_<true>(std::forward<FD>(fd), std::forward<Buffers>(buf), minbytes))
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, state& st) {
+          []([[maybe_unused]] std::size_t idx, auto& st) {
             auto generator = [&]() {
               return std::make_optional(
                   lazy_read_some_ec(st.fd, st.buf)
-                  | lazy_then(
-                      [&st](std::size_t rlen, bool eof) {
-                        st.buf = st.buf.subspan(rlen);
-                        st.minbytes -= std::min(st.minbytes, rlen);
-                        st.read_count += rlen;
-                        st.eof = eof;
-                      }));
+                  | lazy_then(st.make_updater()));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
@@ -1034,8 +1823,8 @@ struct lazy_read_ec_t {
               return generator();
           })
       | lazy_then(
-          [](state st) noexcept {
-            return std::make_tuple(st.read_count, st.eof);
+          [](auto st) noexcept {
+            return std::make_tuple(st.operation_count, st.eof);
           })
       | lazy_explode_tuple();
     }
@@ -1052,39 +1841,19 @@ inline constexpr lazy_read_ec_t lazy_read_ec{};
 //
 // The default implementation repeatedly uses `lazy_write_some_ec' until sufficient data has been written.
 struct lazy_write_at_ec_t {
-  template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, const_buffers Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<lazy_write_at_ec_t, FD, offset_type, std::span<const std::byte>, std::optional<std::size_t>>) {
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<lazy_write_at_ec_t, FD, offset_type, Buffers, std::optional<std::size_t>>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
     } else {
-      struct state {
-        FD fd;
-        offset_type offset;
-        std::span<const std::byte> buf;
-        std::size_t minbytes;
-        std::size_t write_count = 0;
-      };
-
-      return just(
-          state{
-            .fd=std::forward<FD>(fd),
-            .offset=offset,
-            .buf=buf,
-            .minbytes=minbytes.value_or(buf.size())
-          })
+      return just(make_readwrite_state_<false>(std::forward<FD>(fd), offset, std::forward<Buffers>(buf), minbytes))
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, state& st) {
+          []([[maybe_unused]] std::size_t idx, auto& st) {
             auto generator = [&]() {
               return std::make_optional(
                   lazy_write_some_at_ec(st.fd, st.offset, st.buf)
-                  | lazy_then(
-                      [&st](std::size_t wlen) noexcept {
-                        st.offset += wlen;
-                        st.buf = st.buf.subspan(wlen);
-                        st.minbytes -= std::min(st.minbytes, wlen);
-                        st.write_count += wlen;
-                      }));
+                  | lazy_then(st.make_updater()));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
@@ -1094,8 +1863,8 @@ struct lazy_write_at_ec_t {
               return generator();
           })
       | lazy_then(
-          [](state st) noexcept {
-            return st.write_count;
+          [](auto st) noexcept {
+            return st.operation_count;
           });
     }
   }
@@ -1111,36 +1880,19 @@ inline constexpr lazy_write_at_ec_t lazy_write_at_ec{};
 //
 // The default implementation repeatedly uses `lazy_write_some_ec' until sufficient data has been written.
 struct lazy_write_ec_t {
-  template<typename FD>
-  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, const_buffers Buffers>
+  auto operator()(FD&& fd, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<lazy_write_ec_t, FD, std::span<const std::byte>, std::optional<std::size_t>>) {
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<lazy_write_ec_t, FD, Buffers, std::optional<std::size_t>>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
     } else {
-      struct state {
-        FD fd;
-        std::span<const std::byte> buf;
-        std::size_t minbytes;
-        std::size_t write_count = 0;
-      };
-
-      return just(
-          state{
-            .fd=std::forward<FD>(fd),
-            .buf=buf,
-            .minbytes=minbytes.value_or(buf.size())
-          })
+      return just(make_readwrite_state_<false>(std::forward<FD>(fd), std::forward<Buffers>(buf), minbytes))
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, state& st) {
+          []([[maybe_unused]] std::size_t idx, auto& st) {
             auto generator = [&]() {
               return std::make_optional(
                   lazy_write_some_ec(st.fd, st.buf)
-                  | lazy_then(
-                      [&st](std::size_t wlen) noexcept {
-                        st.buf = st.buf.subspan(wlen);
-                        st.minbytes -= std::min(st.minbytes, wlen);
-                        st.write_count += wlen;
-                      }));
+                  | lazy_then(st.make_updater()));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
@@ -1150,8 +1902,8 @@ struct lazy_write_ec_t {
               return generator();
           })
       | lazy_then(
-          [](state st) noexcept {
-            return st.write_count;
+          [](auto st) noexcept {
+            return st.operation_count;
           });
     }
   }
@@ -1167,41 +1919,19 @@ inline constexpr lazy_write_ec_t lazy_write_ec{};
 //
 // The default implementation repeatedly uses `lazy_read_some_at' until sufficient data has been read.
 struct lazy_read_at_t {
-  template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, mutable_buffers Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<lazy_read_at_t, FD, offset_type, std::span<std::byte>, std::optional<std::size_t>>) {
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<lazy_read_at_t, FD, offset_type, Buffers, std::optional<std::size_t>>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
     } else {
-      struct state {
-        FD fd;
-        offset_type offset;
-        std::span<std::byte> buf;
-        std::size_t minbytes;
-        std::size_t read_count = 0;
-        bool eof = false;
-      };
-
-      return just(
-          state{
-            .fd=std::forward<FD>(fd),
-            .offset=offset,
-            .buf=buf,
-            .minbytes=minbytes.value_or(buf.size())
-          })
+      return just(make_readwrite_state_<true>(std::forward<FD>(fd), offset, std::forward<Buffers>(buf), minbytes))
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, state& st) {
+          []([[maybe_unused]] std::size_t idx, auto& st) {
             auto generator = [&]() {
               return std::make_optional(
                   lazy_read_some_at(st.fd, st.offset, st.buf)
-                  | lazy_then(
-                      [&st](std::size_t rlen, bool eof) {
-                        st.offset += rlen;
-                        st.buf = st.buf.subspan(rlen);
-                        st.minbytes -= std::min(st.minbytes, rlen);
-                        st.read_count += rlen;
-                        st.eof = eof;
-                      }));
+                  | lazy_then(st.make_updater()));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
@@ -1211,8 +1941,8 @@ struct lazy_read_at_t {
               return generator();
           })
       | lazy_then(
-          [](state st) noexcept {
-            return std::make_tuple(st.read_count, st.eof);
+          [](auto st) noexcept {
+            return std::make_tuple(st.operation_count, st.eof);
           })
       | lazy_explode_tuple();
     }
@@ -1229,38 +1959,19 @@ inline constexpr lazy_read_at_t lazy_read_at{};
 //
 // The default implementation repeatedly uses `lazy_read_some' until sufficient data has been read.
 struct lazy_read_t {
-  template<typename FD>
-  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, mutable_buffers Buffers>
+  auto operator()(FD&& fd, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<lazy_read_t, FD, std::span<std::byte>, std::optional<std::size_t>>) {
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<lazy_read_t, FD, Buffers, std::optional<std::size_t>>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
     } else {
-      struct state {
-        FD fd;
-        std::span<std::byte> buf;
-        std::size_t minbytes;
-        std::size_t read_count = 0;
-        bool eof = false;
-      };
-
-      return just(
-          state{
-            .fd=std::forward<FD>(fd),
-            .buf=buf,
-            .minbytes=minbytes.value_or(buf.size())
-          })
+      return just(make_readwrite_state_<true>(std::forward<FD>(fd), std::forward<Buffers>(buf), minbytes))
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, state& st) {
+          []([[maybe_unused]] std::size_t idx, auto& st) {
             auto generator = [&]() {
               return std::make_optional(
                   lazy_read_some(st.fd, st.buf)
-                  | lazy_then(
-                      [&st](std::size_t rlen, bool eof) {
-                        st.buf = st.buf.subspan(rlen);
-                        st.minbytes -= std::min(st.minbytes, rlen);
-                        st.read_count += rlen;
-                        st.eof = eof;
-                      }));
+                  | lazy_then(st.make_updater()));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
@@ -1270,8 +1981,8 @@ struct lazy_read_t {
               return generator();
           })
       | lazy_then(
-          [](state st) noexcept {
-            return std::make_tuple(st.read_count, st.eof);
+          [](auto st) noexcept {
+            return std::make_tuple(st.operation_count, st.eof);
           })
       | lazy_explode_tuple();
     }
@@ -1288,39 +1999,19 @@ inline constexpr lazy_read_t lazy_read{};
 //
 // The default implementation repeatedly uses `lazy_write_some' until sufficient data has been written.
 struct lazy_write_at_t {
-  template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, const_buffers Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<lazy_write_at_t, FD, offset_type, std::span<const std::byte>, std::optional<std::size_t>>) {
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<lazy_write_at_t, FD, offset_type, Buffers, std::optional<std::size_t>>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
     } else {
-      struct state {
-        FD fd;
-        offset_type offset;
-        std::span<const std::byte> buf;
-        std::size_t minbytes;
-        std::size_t write_count = 0;
-      };
-
-      return just(
-          state{
-            .fd=std::forward<FD>(fd),
-            .offset=offset,
-            .buf=buf,
-            .minbytes=minbytes.value_or(buf.size())
-          })
+      return just(make_readwrite_state_<false>(std::forward<FD>(fd), offset, std::forward<Buffers>(buf), minbytes))
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, state& st) {
+          []([[maybe_unused]] std::size_t idx, auto& st) {
             auto generator = [&]() {
               return std::make_optional(
                   lazy_write_some_at(st.fd, st.offset, st.buf)
-                  | lazy_then(
-                      [&st](std::size_t wlen) noexcept {
-                        st.offset += wlen;
-                        st.buf = st.buf.subspan(wlen);
-                        st.minbytes -= std::min(st.minbytes, wlen);
-                        st.write_count += wlen;
-                      }));
+                  | lazy_then(st.make_updater()));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
@@ -1330,8 +2021,8 @@ struct lazy_write_at_t {
               return generator();
           })
       | lazy_then(
-          [](state st) noexcept {
-            return st.write_count;
+          [](auto st) noexcept {
+            return st.operation_count;
           });
     }
   }
@@ -1347,36 +2038,19 @@ inline constexpr lazy_write_at_t lazy_write_at{};
 //
 // The default implementation repeatedly uses `lazy_write_some' until sufficient data has been written.
 struct lazy_write_t {
-  template<typename FD>
-  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, const_buffers Buffers>
+  auto operator()(FD&& fd, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<lazy_write_t, FD, std::span<const std::byte>, std::optional<std::size_t>>) {
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<lazy_write_t, FD, Buffers, std::optional<std::size_t>>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
     } else {
-      struct state {
-        FD fd;
-        std::span<const std::byte> buf;
-        std::size_t minbytes;
-        std::size_t write_count = 0;
-      };
-
-      return just(
-          state{
-            .fd=std::forward<FD>(fd),
-            .buf=buf,
-            .minbytes=minbytes.value_or(buf.size())
-          })
+      return just(make_readwrite_state_<false>(std::forward<FD>(fd), std::forward<Buffers>(buf), minbytes))
       | lazy_repeat(
-          []([[maybe_unused]] std::size_t idx, state& st) {
+          []([[maybe_unused]] std::size_t idx, auto& st) {
             auto generator = [&]() {
               return std::make_optional(
                   lazy_write_some(st.fd, st.buf)
-                  | lazy_then(
-                      [&st](std::size_t wlen) noexcept {
-                        st.buf = st.buf.subspan(wlen);
-                        st.minbytes -= std::min(st.minbytes, wlen);
-                        st.write_count += wlen;
-                      }));
+                  | lazy_then(st.make_updater()));
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
@@ -1386,8 +2060,8 @@ struct lazy_write_t {
               return generator();
           })
       | lazy_then(
-          [](state st) noexcept {
-            return st.write_count;
+          [](auto st) noexcept {
+            return st.operation_count;
           });
     }
   }
@@ -1396,104 +2070,104 @@ inline constexpr lazy_write_t lazy_write{};
 
 
 struct read_at_ec_t {
-  template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, mutable_buffers Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<read_at_ec_t, FD, offset_type, std::span<std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<read_at_ec_t, FD, offset_type, Buffers, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
     else
-      return lazy_read_at_ec(std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+      return lazy_read_at_ec(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
   }
 };
 inline constexpr read_at_ec_t read_at_ec{};
 
 
 struct read_ec_t {
-  template<typename FD>
-  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, mutable_buffers Buffers>
+  auto operator()(FD&& fd, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<read_ec_t, FD, std::span<std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<read_ec_t, FD, Buffers, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
     else
-      return lazy_read_ec(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+      return lazy_read_ec(std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
   }
 };
 inline constexpr read_ec_t read_ec{};
 
 
 struct write_at_ec_t {
-  template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, const_buffers Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<write_at_ec_t, FD, offset_type, std::span<const std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<write_at_ec_t, FD, offset_type, Buffers, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
     else
-      return lazy_write_at_ec(std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+      return lazy_write_at_ec(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
   }
 };
 inline constexpr write_at_ec_t write_at_ec{};
 
 
 struct write_ec_t {
-  template<typename FD>
-  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, const_buffers Buffers>
+  auto operator()(FD&& fd, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<write_ec_t, FD, std::span<const std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<write_ec_t, FD, Buffers, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
     else
-      return lazy_write_ec(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+      return lazy_write_ec(std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
   }
 };
 inline constexpr write_ec_t write_ec{};
 
 
 struct read_at_t {
-  template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, mutable_buffers Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<read_at_t, FD, offset_type, std::span<std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<read_at_t, FD, offset_type, Buffers, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
     else
-      return lazy_read_at(std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+      return lazy_read_at(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
   }
 };
 inline constexpr read_at_t read_at{};
 
 
 struct read_t {
-  template<typename FD>
-  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, mutable_buffers Buffers>
+  auto operator()(FD&& fd, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<read_t, FD, std::span<std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<read_t, FD, Buffers, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
     else
-      return lazy_read(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+      return lazy_read(std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
   }
 };
 inline constexpr read_t read{};
 
 
 struct write_at_t {
-  template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, const_buffers Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<write_at_t, FD, offset_type, std::span<const std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<write_at_t, FD, offset_type, Buffers, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
     else
-      return lazy_write_at(std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+      return lazy_write_at(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf), std::move(minbytes));
   }
 };
 inline constexpr write_at_t write_at{};
 
 
 struct write_t {
-  template<typename FD>
-  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  template<typename FD, const_buffers Buffers>
+  auto operator()(FD&& fd, Buffers&& buf, std::optional<std::size_t> minbytes = std::nullopt) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<write_t, FD, std::span<const std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<write_t, FD, Buffers, std::optional<std::size_t>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
     else
-      return lazy_write(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+      return lazy_write(std::forward<FD>(fd), std::forward<Buffers>(buf), std::move(minbytes));
   }
 };
 inline constexpr write_t write{};
