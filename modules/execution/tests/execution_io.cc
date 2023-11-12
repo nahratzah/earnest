@@ -10,6 +10,48 @@
 using namespace earnest::execution;
 
 
+// Confirm that a sequence fails with an eof error-code.
+//
+// We use a macro, so that error will mention the line-number of the failure.
+#define must_eof()                                                        \
+  lazy_then(                                                              \
+      [](auto&&... args) {                                                \
+        CHECK(false); /* Expected an error signal. */                     \
+      })                                                                  \
+  | lazy_upon_done(                                                       \
+      []() {                                                              \
+        CHECK(false); /* Expected an error signal. */                     \
+      })                                                                  \
+  | lazy_upon_error(                                                      \
+      [](auto err) {                                                      \
+        if constexpr(std::is_same_v<std::error_code, decltype(err)>)      \
+          CHECK_EQUAL(std::error_code(io::errc::eof), err);               \
+        else                                                              \
+          CHECK(false); /* Expected an error signal. */                   \
+      })
+
+// Confirm that a sequence fails with an eof exception.
+//
+// We use a macro, so that error will mention the line-number of the failure.
+#define must_eof_exception()                                              \
+  lazy_then(                                                              \
+      [](auto&&... args) {                                                \
+        CHECK(false); /* Expected an error signal. */                     \
+      })                                                                  \
+  | lazy_upon_done(                                                       \
+      []() {                                                              \
+        CHECK(false); /* Expected an error signal. */                     \
+      })                                                                  \
+  | lazy_upon_error(                                                      \
+      [](std::exception_ptr err) {                                        \
+        try {                                                             \
+          std::rethrow_exception(err);                                    \
+        } catch (const std::system_error& e) {                            \
+          CHECK_EQUAL(std::error_code(io::errc::eof), e.code());          \
+        }                                                                 \
+      })
+
+
 SUITE(lazy_write) {
 
 TEST(ec_single_span) {
@@ -101,7 +143,7 @@ SUITE(lazy_read) {
 TEST(ec_single_span) {
   using traits = sender_traits<decltype(io::lazy_read_ec(std::declval<int>(), std::declval<std::span<std::byte>>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr, std::error_code>,
@@ -114,9 +156,8 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_ec(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -127,12 +168,9 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
-        io::lazy_read_ec(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+    sync_wait(
+        io::lazy_read_ec(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))
+        | must_eof());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -141,9 +179,8 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_ec(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -154,7 +191,7 @@ TEST(ec_vectored) {
   using span_sequence = std::list<std::span<std::byte>>;
   using traits = sender_traits<decltype(io::lazy_read_ec(std::declval<int>(), std::declval<span_sequence>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr, std::error_code>,
@@ -167,13 +204,12 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_ec(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 1))
             }))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -184,16 +220,13 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    sync_wait(
         io::lazy_read_ec(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
-            }))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+            }))
+        | must_eof());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -202,14 +235,13 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_ec(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
             }),
             4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -219,7 +251,7 @@ TEST(ec_vectored) {
 TEST(throwing_single_span) {
   using traits = sender_traits<decltype(io::lazy_read(std::declval<int>(), std::declval<std::span<std::byte>>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr>,
@@ -232,9 +264,8 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -245,12 +276,9 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
-        io::lazy_read(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+    sync_wait(
+        io::lazy_read(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))
+        | must_eof_exception());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -259,9 +287,8 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -272,7 +299,7 @@ TEST(throwing_vectored) {
   using span_sequence = std::list<std::span<std::byte>>;
   using traits = sender_traits<decltype(io::lazy_read(std::declval<int>(), std::declval<span_sequence>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr>,
@@ -285,13 +312,12 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 1))
             }))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -302,16 +328,13 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    sync_wait(
         io::lazy_read(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
-            }))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+            }))
+        | must_eof_exception());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -320,14 +343,13 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
             }),
             4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -431,7 +453,7 @@ SUITE(lazy_read_at) {
 TEST(ec_single_span) {
   using traits = sender_traits<decltype(io::lazy_read_at_ec(std::declval<int>(), std::declval<io::offset_type>(), std::declval<std::span<std::byte>>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr, std::error_code>,
@@ -444,9 +466,8 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_at_ec(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -457,12 +478,9 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
-        io::lazy_read_at_ec(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+    sync_wait(
+        io::lazy_read_at_ec(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))
+        | must_eof());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -471,9 +489,8 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_at_ec(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -484,7 +501,7 @@ TEST(ec_vectored) {
   using span_sequence = std::list<std::span<std::byte>>;
   using traits = sender_traits<decltype(io::lazy_read_at_ec(std::declval<int>(), std::declval<io::offset_type>(), std::declval<span_sequence>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr, std::error_code>,
@@ -497,13 +514,12 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_at_ec(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 1))
             }))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -514,16 +530,13 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    sync_wait(
         io::lazy_read_at_ec(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
-            }))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+            }))
+        | must_eof());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -532,14 +545,13 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_at_ec(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
             }),
             4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -549,7 +561,7 @@ TEST(ec_vectored) {
 TEST(throwing_single_span) {
   using traits = sender_traits<decltype(io::lazy_read_at(std::declval<int>(), std::declval<io::offset_type>(), std::declval<std::span<std::byte>>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr>,
@@ -562,9 +574,8 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_at(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -575,12 +586,9 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
-        io::lazy_read_at(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+    sync_wait(
+        io::lazy_read_at(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))
+        | must_eof_exception());
   }
 
   { // over-sized read of the file, buf with minimum within file size
@@ -589,9 +597,8 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_at(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -602,7 +609,7 @@ TEST(throwing_vectored) {
   using span_sequence = std::list<std::span<std::byte>>;
   using traits = sender_traits<decltype(io::lazy_read_at(std::declval<int>(), std::declval<io::offset_type>(), std::declval<span_sequence>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr>,
@@ -615,13 +622,12 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_at(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 1))
             }))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -632,16 +638,13 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    sync_wait(
         io::lazy_read_at(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
-            }))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+            }))
+        | must_eof_exception());
   }
 
   { // over-sized read of the file, buf with minimum within file size
@@ -650,14 +653,13 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::lazy_read_at(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
             }),
             4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -757,7 +759,7 @@ SUITE(read) {
 TEST(ec_single_span) {
   using traits = sender_traits<decltype(io::read_ec(std::declval<int>(), std::declval<std::span<std::byte>>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr, std::error_code>,
@@ -770,9 +772,8 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_ec(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -783,12 +784,9 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
-        io::read_ec(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+    sync_wait(
+        io::read_ec(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))
+        | must_eof());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -797,9 +795,8 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_ec(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -810,7 +807,7 @@ TEST(ec_vectored) {
   using span_sequence = std::list<std::span<std::byte>>;
   using traits = sender_traits<decltype(io::read_ec(std::declval<int>(), std::declval<span_sequence>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr, std::error_code>,
@@ -823,13 +820,12 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_ec(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 1))
             }))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -840,16 +836,13 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    sync_wait(
         io::read_ec(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
-            }))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+            }))
+        | must_eof());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -858,13 +851,12 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_ec(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
             }), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -874,7 +866,7 @@ TEST(ec_vectored) {
 TEST(throwing_single_span) {
   using traits = sender_traits<decltype(io::read(std::declval<int>(), std::declval<std::span<std::byte>>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr>,
@@ -887,9 +879,8 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -900,12 +891,9 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
-        io::read(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+    sync_wait(
+        io::read(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())))
+        | must_eof_exception());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -914,9 +902,8 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read(tmp.fd, std::as_writable_bytes(std::span(s.data(), s.size())), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -927,7 +914,7 @@ TEST(throwing_vectored) {
   using span_sequence = std::list<std::span<std::byte>>;
   using traits = sender_traits<decltype(io::read(std::declval<int>(), std::declval<span_sequence>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr>,
@@ -940,13 +927,12 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 1))
             }))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -957,16 +943,13 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    sync_wait(
         io::read(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
-            }))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+            }))
+        | must_eof_exception());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -975,13 +958,12 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read(tmp.fd,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
             }), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -1085,7 +1067,7 @@ SUITE(read_at) {
 TEST(ec_single_span) {
   using traits = sender_traits<decltype(io::read_at_ec(std::declval<int>(), std::declval<io::offset_type>(), std::declval<std::span<std::byte>>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr, std::error_code>,
@@ -1098,9 +1080,8 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_at_ec(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -1111,12 +1092,9 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
-        io::read_at_ec(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+    sync_wait(
+        io::read_at_ec(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))
+        | must_eof());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -1125,9 +1103,8 @@ TEST(ec_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_at_ec(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -1138,7 +1115,7 @@ TEST(ec_vectored) {
   using span_sequence = std::list<std::span<std::byte>>;
   using traits = sender_traits<decltype(io::read_at_ec(std::declval<int>(), std::declval<io::offset_type>(), std::declval<span_sequence>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr, std::error_code>,
@@ -1151,13 +1128,12 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_at_ec(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 1))
             }))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -1168,16 +1144,13 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    sync_wait(
         io::read_at_ec(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
-            }))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+            }))
+        | must_eof());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -1186,14 +1159,13 @@ TEST(ec_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_at_ec(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
             }),
             4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -1203,7 +1175,7 @@ TEST(ec_vectored) {
 TEST(throwing_single_span) {
   using traits = sender_traits<decltype(io::read_at(std::declval<int>(), std::declval<io::offset_type>(), std::declval<std::span<std::byte>>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr>,
@@ -1216,9 +1188,8 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_at(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -1229,12 +1200,9 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
-        io::read_at(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+    sync_wait(
+        io::read_at(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())))
+        | must_eof_exception());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -1243,9 +1211,8 @@ TEST(throwing_single_span) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_at(tmp.fd, 2, std::as_writable_bytes(std::span(s.data(), s.size())), 4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
@@ -1256,7 +1223,7 @@ TEST(throwing_vectored) {
   using span_sequence = std::list<std::span<std::byte>>;
   using traits = sender_traits<decltype(io::read_at(std::declval<int>(), std::declval<io::offset_type>(), std::declval<span_sequence>()))>;
   static_assert(std::is_same_v<
-      std::variant<std::tuple<std::size_t, bool>>,
+      std::variant<std::tuple<std::size_t>>,
       traits::value_types<std::tuple, std::variant>>);
   static_assert(std::is_same_v<
       std::variant<std::exception_ptr>,
@@ -1269,13 +1236,12 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(3, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_at(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 1))
             }))).value();
-    CHECK(!eof);
     CHECK_EQUAL(3, rlen);
     CHECK_EQUAL(std::string("abc"), s.substr(0, rlen));
   }
@@ -1286,16 +1252,13 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    sync_wait(
         io::read_at(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
-            }))).value();
-    CHECK(eof);
-    CHECK_EQUAL(4, rlen);
-    CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
-    CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched
+            }))
+        | must_eof_exception());
   }
 
   { // over-sized read of the file, but with minimum within file size
@@ -1304,14 +1267,13 @@ TEST(throwing_vectored) {
 
     std::string s;
     s.resize(10, 'x');
-    auto [rlen, eof] = sync_wait(
+    auto [rlen] = sync_wait(
         io::read_at(tmp.fd, 2,
             span_sequence({
                 std::as_writable_bytes(std::span(s.data(), 2)),
                 std::as_writable_bytes(std::span(s.data() + 2, 8))
             }),
             4)).value();
-    CHECK(!eof);
     CHECK_EQUAL(4, rlen);
     CHECK_EQUAL(std::string("abcd"), s.substr(0, rlen));
     CHECK_EQUAL(std::string("abcdxxxxxx"), s); // rest of the string is untouched

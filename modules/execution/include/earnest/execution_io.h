@@ -52,6 +52,52 @@
 namespace earnest::execution::io {
 
 
+enum class errc {
+  eof
+};
+
+inline auto category() noexcept -> const std::error_category& {
+  class category_impl
+  : public std::error_category
+  {
+    public:
+    auto name() const noexcept -> const char* override {
+      return "earnest::execution::io";
+    }
+
+    auto message(int condition) const -> std::string override {
+      switch (errc{condition}) {
+        default:
+          return "unknown";
+        case errc::eof:
+          return "end_of_file";
+      }
+    }
+  };
+
+  static const category_impl impl;
+  return impl;
+}
+
+inline auto make_error_code(errc e) {
+  return std::error_code(static_cast<int>(e), category());
+}
+
+
+} /* namespace earnest::execution::io */
+
+namespace std {
+
+
+template<>
+struct is_error_code_enum<::earnest::execution::io::errc> : std::true_type {};
+
+
+} /* namespace std */
+
+namespace earnest::execution::io {
+
+
 // Type used for file offsets.
 using offset_type = std::uint64_t;
 
@@ -259,30 +305,6 @@ struct readwrite_state_offset_<false> {
   inline auto update_offset_([[maybe_unused]] std::size_t len) -> void {}
 };
 
-// Readwrite-state aspect for the presence/absence of an eof flag.
-template<bool ForReading> struct readwrite_state_eof_;
-
-template<>
-struct readwrite_state_eof_<true> {
-  bool eof = false;
-
-  protected:
-  inline auto update_eof_(bool eof) noexcept -> void {
-    this->eof = eof;
-  }
-
-  inline auto done_eof_() const noexcept -> bool {
-    return eof;
-  }
-};
-
-template<>
-struct readwrite_state_eof_<false> {
-  protected:
-  inline auto update_eof_() noexcept -> void {}
-  inline auto done_eof_() const noexcept -> bool { return false; }
-};
-
 // A readwrite_state.
 //
 // We use this during reads and writes, to ensure we write the minimum-requested bytes.
@@ -292,8 +314,7 @@ class readwrite_state_
   public std::conditional_t<
       Vectored,
       readwrite_state_vectored_<std::conditional_t<ForReading, std::byte, const std::byte>>,
-      readwrite_state_span_<std::conditional_t<ForReading, std::byte, const std::byte>>>,
-  public readwrite_state_eof_<ForReading>
+      readwrite_state_span_<std::conditional_t<ForReading, std::byte, const std::byte>>>
 {
   public:
   FD fd;
@@ -328,11 +349,10 @@ class readwrite_state_
   }
 
   auto make_updater() & {
-    return [this]<typename... Eof>(std::size_t rlen, Eof&&... eof) {
+    return [this](std::size_t rlen) {
       assert(this->size() >= rlen);
       this->update_buf_(rlen);
       this->update_offset_(rlen);
-      this->update_eof_(std::forward<Eof>(eof)...);
       this->minbytes -= rlen;
       this->operation_count += rlen;
     };
@@ -490,7 +510,7 @@ inline constexpr ec_to_exception_t ec_to_exception{};
 // If the read is interrupted (errno == EINTR), the error will be swallowed
 // and zero-bytes-written will be reported instead.
 //
-// If the read ended because of EOF, the eof-value will be true.
+// If the read ended because of EOF, the eof-error will be emitted.
 //
 // Errors are communicated as std::error_code.
 struct lazy_read_some_at_ec_t {
@@ -520,7 +540,7 @@ struct lazy_read_some_at_ec_t {
   }
 
   private:
-  template<receiver_of<std::size_t, bool> Receiver>
+  template<receiver_of<std::size_t> Receiver>
   class opstate {
     public:
     explicit opstate(Receiver&& r, int fd, offset_type offset, std::span<std::byte> buf)
@@ -547,7 +567,10 @@ struct lazy_read_some_at_ec_t {
       if (rlen != 0) eof = false;
 
       try {
-        execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen), std::move(eof));
+        if (eof)
+          execution::set_error(std::move(self.r), make_error_code(errc::eof));
+        else
+          execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen));
       } catch (...) {
         execution::set_error(std::move(self.r), std::current_exception());
       }
@@ -560,7 +583,7 @@ struct lazy_read_some_at_ec_t {
     std::span<std::byte> buf;
   };
 
-  template<receiver_of<std::size_t, bool> Receiver>
+  template<receiver_of<std::size_t> Receiver>
   class vectored_opstate {
     public:
     template<mutable_buffer_sequence Buffers>
@@ -596,7 +619,10 @@ struct lazy_read_some_at_ec_t {
       if (rlen != 0) eof = false;
 
       try {
-        execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen), std::move(eof));
+        if (eof)
+          execution::set_error(std::move(self.r), make_error_code(errc::eof));
+        else
+          execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen));
       } catch (...) {
         execution::set_error(std::move(self.r), std::current_exception());
       }
@@ -618,7 +644,7 @@ struct lazy_read_some_at_ec_t {
   class sender_impl {
     public:
     template<template<typename...> class Tuple, template<typename...> class Variant>
-    using value_types = Variant<Tuple<std::size_t, bool>>;
+    using value_types = Variant<Tuple<std::size_t>>;
 
     template<template<typename...> class Variant>
     using error_types = Variant<std::exception_ptr, std::error_code>;
@@ -640,7 +666,7 @@ struct lazy_read_some_at_ec_t {
     // If the receiver has a scheduler, we'll try to forward to an implementation of lazy_write_ec,
     // that is specific for the scheduler.
     // But if there isn't one, then we'll use our own implementation (which uses a block write).
-    template<receiver_of<std::size_t, bool> Receiver>
+    template<receiver_of<std::size_t> Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
     -> operation_state decltype(auto) {
       if constexpr(has_scheduler<std::remove_cvref_t<Receiver>>) {
@@ -667,7 +693,7 @@ struct lazy_read_some_at_ec_t {
   class vectored_sender_impl {
     public:
     template<template<typename...> class Tuple, template<typename...> class Variant>
-    using value_types = Variant<Tuple<std::size_t, bool>>;
+    using value_types = Variant<Tuple<std::size_t>>;
 
     template<template<typename...> class Variant>
     using error_types = Variant<std::exception_ptr, std::error_code>;
@@ -690,7 +716,7 @@ struct lazy_read_some_at_ec_t {
     // If the receiver has a scheduler, we'll try to forward to an implementation of lazy_write_ec,
     // that is specific for the scheduler.
     // But if there isn't one, then we'll use our own implementation (which uses a block write).
-    template<receiver_of<std::size_t, bool> Receiver>
+    template<receiver_of<std::size_t> Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, vectored_sender_impl&& self, Receiver&& r)
     -> operation_state decltype(auto) {
       if constexpr(has_scheduler<std::remove_cvref_t<Receiver>>) {
@@ -752,7 +778,7 @@ inline constexpr lazy_read_some_at_ec_t lazy_read_some_at_ec{};
 // If the read is interrupted (errno == EINTR), the error will be swallowed
 // and zero-bytes-written will be reported instead.
 //
-// If the read ended because of EOF, the eof-value will be true.
+// If the read ended because of EOF, the eof-error will be emitted.
 //
 // Errors are communicated as std::error_code.
 struct lazy_read_some_ec_t {
@@ -782,7 +808,7 @@ struct lazy_read_some_ec_t {
   }
 
   private:
-  template<receiver_of<std::size_t, bool> Receiver>
+  template<receiver_of<std::size_t> Receiver>
   class opstate {
     public:
     explicit opstate(Receiver&& r, int fd, std::span<std::byte> buf)
@@ -808,7 +834,10 @@ struct lazy_read_some_ec_t {
       if (rlen != 0) eof = false;
 
       try {
-        execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen), std::move(eof));
+        if (eof)
+          execution::set_error(std::move(self.r), make_error_code(errc::eof));
+        else
+          execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen));
       } catch (...) {
         execution::set_error(std::move(self.r), std::current_exception());
       }
@@ -820,7 +849,7 @@ struct lazy_read_some_ec_t {
     std::span<std::byte> buf;
   };
 
-  template<receiver_of<std::size_t, bool> Receiver>
+  template<receiver_of<std::size_t> Receiver>
   class vectored_opstate {
     public:
     template<mutable_buffer_sequence Buffers>
@@ -855,7 +884,10 @@ struct lazy_read_some_ec_t {
       if (rlen != 0) eof = false;
 
       try {
-        execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen), std::move(eof));
+        if (eof)
+          execution::set_error(std::move(self.r), make_error_code(errc::eof));
+        else
+          execution::set_value(std::move(self.r), static_cast<std::size_t>(rlen));
       } catch (...) {
         execution::set_error(std::move(self.r), std::current_exception());
       }
@@ -876,7 +908,7 @@ struct lazy_read_some_ec_t {
   class sender_impl {
     public:
     template<template<typename...> class Tuple, template<typename...> class Variant>
-    using value_types = Variant<Tuple<std::size_t, bool>>;
+    using value_types = Variant<Tuple<std::size_t>>;
 
     template<template<typename...> class Variant>
     using error_types = Variant<std::exception_ptr, std::error_code>;
@@ -897,7 +929,7 @@ struct lazy_read_some_ec_t {
     // If the receiver has a scheduler, we'll try to forward to an implementation of lazy_write_ec,
     // that is specific for the scheduler.
     // But if there isn't one, then we'll use our own implementation (which uses a block write).
-    template<receiver_of<std::size_t, bool> Receiver>
+    template<receiver_of<std::size_t> Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
     -> operation_state decltype(auto) {
       if constexpr(has_scheduler<std::remove_cvref_t<Receiver>>) {
@@ -923,7 +955,7 @@ struct lazy_read_some_ec_t {
   class vectored_sender_impl {
     public:
     template<template<typename...> class Tuple, template<typename...> class Variant>
-    using value_types = Variant<Tuple<std::size_t, bool>>;
+    using value_types = Variant<Tuple<std::size_t>>;
 
     template<template<typename...> class Variant>
     using error_types = Variant<std::exception_ptr, std::error_code>;
@@ -945,7 +977,7 @@ struct lazy_read_some_ec_t {
     // If the receiver has a scheduler, we'll try to forward to an implementation of lazy_write_ec,
     // that is specific for the scheduler.
     // But if there isn't one, then we'll use our own implementation (which uses a block write).
-    template<receiver_of<std::size_t, bool> Receiver>
+    template<receiver_of<std::size_t> Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, vectored_sender_impl&& self, Receiver&& r)
     -> operation_state decltype(auto) {
       if constexpr(has_scheduler<std::remove_cvref_t<Receiver>>) {
@@ -1790,16 +1822,15 @@ struct lazy_read_at_ec_t {
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
-            if (st.buf.empty() || st.minbytes <= 0 || st.eof)
+            if (st.buf.empty() || st.minbytes <= 0)
               return opt_sender(std::nullopt);
             else
               return generator();
           })
       | lazy_then(
           [](auto st) noexcept {
-            return std::make_tuple(st.operation_count, st.eof);
-          })
-      | lazy_explode_tuple();
+            return st.operation_count;
+          });
     }
   }
 };
@@ -1830,16 +1861,15 @@ struct lazy_read_ec_t {
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
-            if (st.buf.empty() || st.minbytes <= 0 || st.eof)
+            if (st.buf.empty() || st.minbytes <= 0)
               return opt_sender(std::nullopt);
             else
               return generator();
           })
       | lazy_then(
           [](auto st) noexcept {
-            return std::make_tuple(st.operation_count, st.eof);
-          })
-      | lazy_explode_tuple();
+            return st.operation_count;
+          });
     }
   }
 };
@@ -1948,16 +1978,15 @@ struct lazy_read_at_t {
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
-            if (st.buf.empty() || st.minbytes <= 0 || st.eof)
+            if (st.buf.empty() || st.minbytes <= 0)
               return opt_sender(std::nullopt);
             else
               return generator();
           })
       | lazy_then(
           [](auto st) noexcept {
-            return std::make_tuple(st.operation_count, st.eof);
-          })
-      | lazy_explode_tuple();
+            return st.operation_count;
+          });
     }
   }
 };
@@ -1988,16 +2017,15 @@ struct lazy_read_t {
             };
             using opt_sender = std::invoke_result_t<decltype(generator)>;
 
-            if (st.buf.empty() || st.minbytes <= 0 || st.eof)
+            if (st.buf.empty() || st.minbytes <= 0)
               return opt_sender(std::nullopt);
             else
               return generator();
           })
       | lazy_then(
           [](auto st) noexcept {
-            return std::make_tuple(st.operation_count, st.eof);
-          })
-      | lazy_explode_tuple();
+            return st.operation_count;
+          });
     }
   }
 };

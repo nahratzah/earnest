@@ -687,8 +687,7 @@ struct make_read_write_op_ {
           } else {
             return execution::io::lazy_read_ec(st.fd, maybe_wrap_in_array_for_reading(buffer.get_buffer(st.shared_buf)...))
             | execution::lazy_then(
-                [st]([[maybe_unused]] std::size_t rlen, bool eof) {
-                  if (eof) throw xdr_error("eof while reading");
+                [st]([[maybe_unused]] std::size_t rlen) {
                   return st;
                 });
           }

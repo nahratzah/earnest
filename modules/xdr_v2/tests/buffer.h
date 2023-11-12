@@ -50,12 +50,15 @@ class buffer {
     return earnest::execution::just()
     | earnest::execution::lazy_then(
         [&self, buf]() {
+          if (self.data.empty() && buf.size() != 0)
+            throw std::system_error(std::error_code(::earnest::execution::io::errc::eof));
+
           const auto count = std::min(self.data.size(), buf.size());
           std::copy_n(self.data.begin(), count, buf.begin());
           self.data.erase(self.data.begin(), self.data.begin() + count);
-          return std::make_tuple(count, count < buf.size());
+          return count;
         })
-    | earnest::execution::lazy_explode_tuple();
+    | earnest::execution::system_error_to_error_code();
   }
 
   private:
