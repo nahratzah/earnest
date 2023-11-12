@@ -372,6 +372,13 @@ class state_ {
     return std::span<std::conditional_t<IsConst, const std::byte, std::byte>>(buffer.data(), buffer.size());
   }
 
+  template<typename OtherFD>
+  auto rebind(OtherFD&& other_fd) && {
+    return state_<IsConst, std::remove_cvref_t<OtherFD>, Buffer>(
+        std::forward<OtherFD>(other_fd),
+        std::move(buffer));
+  }
+
   FD fd;
 
   private:
@@ -388,6 +395,13 @@ class state_<IsConst, FD, std::array<std::conditional_t<IsConst, const std::byte
 
   auto shared_buf() noexcept {
     return std::span<std::conditional_t<IsConst, const std::byte, std::byte>, N>(buffer.data(), buffer.size());
+  }
+
+  template<typename OtherFD>
+  auto rebind(OtherFD&& other_fd) && {
+    return state_<IsConst, std::remove_cvref_t<OtherFD>, std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N>>(
+        std::forward<OtherFD>(other_fd),
+        std::move(buffer));
   }
 
   FD fd;
@@ -959,21 +973,21 @@ class operation_sequence_tuple
     }
   }
 
-  template<bool IsConst, typename PreInvocationOperations, typename BufferOperations, typename PostInvocationOperations>
-  auto merge(operation_sequence<IsConst, PreInvocationOperations, BufferOperations, PostInvocationOperations>&& other) {
-    if constexpr(last_is_operation_sequence) {
+  template<typename Other>
+  auto merge(Other&& other) {
+    if constexpr(last_is_operation_sequence && is_operation_sequence<std::remove_cvref_t<Other>>) {
       return std::apply(
           []<typename... T>(T&&... v) {
             return operation_sequence_tuple<std::remove_cvref_t<T>...>(std::forward<T>(v)...);
           },
           std::tuple_cat(
               std::move(*this).all_but_last_as_rvalue_tuple(),
-              std::forward_as_tuple(std::get<sizeof...(Sequences) - 1u>(std::move(*this)).merge(std::move(other)))));
+              std::forward_as_tuple(std::get<sizeof...(Sequences) - 1u>(std::move(*this)).merge(std::forward<Other>(other)))));
     } else {
-      return operation_sequence_tuple<Sequences..., operation_sequence<IsConst, PreInvocationOperations, BufferOperations, PostInvocationOperations>>(
+      return operation_sequence_tuple<Sequences..., std::remove_cvref_t<Other>>(
           std::tuple_cat(
               std::move(*this).all_as_rvalue_tuple(),
-              std::forward_as_tuple(std::move(other))));
+              std::forward_as_tuple(std::forward<Other>(other))));
     }
   }
 
@@ -1027,7 +1041,7 @@ auto make_operation_block(
       temporary_buffer<IsConst, Extent>&& tmpbuf,
       operation_sequence_tuple<Sequences...>&& sequences)
 -> operation_block<IsConst, Extent, Sequences...> {
-  return operation_block(std::move(tmpbuf), std::move(sequences));
+  return operation_block<IsConst, Extent, Sequences...>(std::move(tmpbuf), std::move(sequences));
 }
 
 template<bool IsConst, std::size_t Extent, typename... Sequences>
@@ -1063,11 +1077,10 @@ class operation_block {
   }
 
   auto shift(std::size_t increase) -> void {
-    std::apply(
+    sequences.apply(
         [=](auto&... sequence) {
           (sequence.shift(increase), ...);
-        },
-        sequences);
+        });
   }
 
   template<typename Fn>
@@ -1206,11 +1219,13 @@ class operation_block<IsConst, 0> {
         operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(temporary_buffer_reference<false>(0, n), std::forward<Op>(op)...));
   }
 
-  template<std::size_t OtherExtent, typename OtherPreInvocationOperations, typename OtherBufferOperations, typename OtherPostInvocationOperations>
-  auto append(operation_block<IsConst, OtherExtent, OtherPreInvocationOperations, OtherBufferOperations, OtherPostInvocationOperations>&& other) &&
-  -> operation_block<IsConst, OtherExtent, OtherPreInvocationOperations, OtherBufferOperations, OtherPostInvocationOperations>&& {
+  template<typename Other>
+  requires (std::remove_cvref_t<Other>::for_writing == IsConst)
+  auto merge(Other&& other) {
     other.shift(0);
-    return std::move(other);
+    return make_operation_block(
+        temporary_buffer<IsConst>(),
+        operation_sequence_tuple<operation_sequence<IsConst>>().merge(std::forward<Other>(other)));
   }
 };
 
@@ -1758,6 +1773,73 @@ struct uint64_t {
 };
 
 
+struct manual_t {
+  private:
+  template<typename Fn>
+  struct read_implementation {
+    static inline constexpr bool for_writing = false;
+    static inline constexpr bool for_reading = true;
+    static inline constexpr std::size_t extent = std::dynamic_extent;
+
+    auto make_sender_chain() && {
+      return execution::lazy_let_value(
+          [fn=std::move(this->fn)](auto& st) mutable {
+            return std::invoke(std::move(fn), st.fd)
+            | execution::lazy_then(
+                [&st]<typename FD>(FD&& fd) mutable {
+                  return std::move(st).rebind(std::forward<FD>(fd));
+                });
+          });
+    }
+
+    auto shift([[maybe_unused]] std::size_t) noexcept {}
+
+    Fn fn;
+  };
+
+  template<typename Fn>
+  struct write_implementation {
+    static inline constexpr bool for_writing = true;
+    static inline constexpr bool for_reading = false;
+    static inline constexpr std::size_t extent = std::dynamic_extent;
+
+    auto make_sender_chain() && {
+      return execution::lazy_let_value(
+          [fn=std::move(this->fn)](auto& st) mutable {
+            return std::invoke(std::move(fn), st.fd)
+            | execution::lazy_then(
+                [&st]<typename FD>(FD&& fd) mutable {
+                  return std::move(st).rebind(std::forward<FD>(fd));
+                });
+          });
+    }
+
+    auto shift([[maybe_unused]] std::size_t) noexcept {}
+
+    Fn fn;
+  };
+
+  public:
+  template<typename Fn>
+  auto read(Fn&& fn) const {
+    return operation_block<false>{}
+        .merge(
+            read_implementation<std::remove_cvref_t<Fn>>{
+              .fn=std::forward<Fn>(fn)
+            });
+  }
+
+  template<typename Fn>
+  auto write(Fn&& fn) const {
+    return operation_block<true>{}
+        .merge(
+            write_implementation<std::remove_cvref_t<Fn>>{
+              .fn=std::forward<Fn>(fn)
+            });
+  }
+};
+
+
 } /* namespace operation */
 
 
@@ -1765,6 +1847,8 @@ inline constexpr operation::uint8_t  uint8{};
 inline constexpr operation::uint16_t uint16{};
 inline constexpr operation::uint32_t uint32{};
 inline constexpr operation::uint64_t uint64{};
+
+inline constexpr operation::manual_t manual{};
 
 
 } /* namespace earnest::xdr */
