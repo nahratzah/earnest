@@ -88,7 +88,7 @@ namespace operation {
 
 template<bool, typename = std::tuple<>, typename = std::tuple<>, typename = std::tuple<>> class operation_sequence;
 
-template<bool IsConst, std::size_t Extent = 0, typename PreInvocationOperations = std::tuple<>, typename BufferOperations = std::tuple<>, typename PostInvocationOperations = std::tuple<>>
+template<bool IsConst, std::size_t Extent = 0, typename... Sequences>
 class operation_block;
 
 
@@ -112,8 +112,7 @@ noexcept
 
 template<typename Fn>
 class pre_buffer_invocation {
-  template<bool IsConst, std::size_t Extent, typename PreInvocationOperations, typename BufferOperations, typename PostInvocationOperations>
-  friend class operation_block;
+  template<bool, std::size_t, typename...> friend class operation_block;
 
   public:
   explicit pre_buffer_invocation(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
@@ -148,8 +147,7 @@ class pre_buffer_invocation {
 
 template<typename Fn>
 class post_buffer_invocation {
-  template<bool IsConst, std::size_t Extent, typename PreInvocationOperations, typename BufferOperations, typename PostInvocationOperations>
-  friend class operation_block;
+  template<bool, std::size_t, typename...> friend class operation_block;
 
   public:
   explicit post_buffer_invocation(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
@@ -362,6 +360,50 @@ struct buffer_operation_appender_ {
 inline constexpr buffer_operation_appender_ buffer_operation_appender{};
 
 
+template<bool IsConst, typename FD, typename Buffer>
+class state_ {
+  public:
+  state_(FD&& fd, Buffer&& buffer)
+  : fd(std::move(fd)),
+    buffer(std::move(buffer))
+  {}
+
+  auto shared_buf() noexcept {
+    return std::span<std::conditional_t<IsConst, const std::byte, std::byte>>(buffer.data(), buffer.size());
+  }
+
+  FD fd;
+
+  private:
+  Buffer buffer;
+};
+
+template<bool IsConst, typename FD, std::size_t N>
+class state_<IsConst, FD, std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N>> {
+  public:
+  state_(FD&& fd, std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N>&& buffer)
+  : fd(std::move(fd)),
+    buffer(std::move(buffer))
+  {}
+
+  auto shared_buf() noexcept {
+    return std::span<std::conditional_t<IsConst, const std::byte, std::byte>, N>(buffer.data(), buffer.size());
+  }
+
+  FD fd;
+
+  private:
+  std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N> buffer;
+};
+
+template<bool IsConst, typename FD, typename Buffer>
+inline auto make_state_(FD&& fd, Buffer&& buffer) -> state_<IsConst, std::remove_cvref_t<FD>, std::remove_cvref_t<Buffer>> {
+  return state_<IsConst, std::remove_cvref_t<FD>, std::remove_cvref_t<Buffer>>(
+      std::forward<FD>(fd),
+      std::forward<Buffer>(buffer));
+}
+
+
 template<bool IsConst, std::size_t Extent = 0>
 class temporary_buffer;
 
@@ -535,9 +577,8 @@ class operation_sequence<IsConst, std::tuple<>, std::tuple<>, std::tuple<>> {
   operation_sequence(operation_sequence&&) = default;
   operation_sequence(const operation_sequence&) = delete;
 
-  template<typename FD>
-  auto make_sender_chain([[maybe_unused]] FD& fd, [[maybe_unused]] std::span<std::conditional_t<IsConst, const std::byte, std::byte>> shared_buf) && {
-    return execution::just(std::move(fd));
+  auto make_sender_chain() && {
+    return execution::noop();
   }
 
   auto shift(std::size_t increase) noexcept -> void {}
@@ -637,37 +678,6 @@ class operation_sequence<IsConst, std::tuple<>, std::tuple<>, std::tuple<>> {
   }
 };
 
-// Figure out the `static constexpr std::size_t size' attribute for an operation-sequence.
-//
-// The default case is to not have a size attribute (meaning the size is not known at
-// compile time).
-template<typename BufferOperations, typename = void>
-struct _operation_block_size_ {
-  static inline constexpr std::size_t size = std::dynamic_extent;
-
-  protected:
-  _operation_block_size_() = default;
-  _operation_block_size_(const _operation_block_size_&) = default;
-  _operation_block_size_(_operation_block_size_&&) = default;
-  _operation_block_size_& operator=(const _operation_block_size_&) = default;
-  _operation_block_size_& operator=(_operation_block_size_&&) = default;
-  ~_operation_block_size_() = default;
-};
-// Specialization for the size attribute.
-// This attribute exists if we can compute the total size, and exposes that total size.
-template<typename... BufferOperations>
-struct _operation_block_size_<std::tuple<BufferOperations...>, std::enable_if_t<((BufferOperations::extent != std::dynamic_extent) &&...&& true)>> {
-  static inline constexpr std::size_t extent = (BufferOperations::extent +...+ 0u);
-
-  protected:
-  _operation_block_size_() = default;
-  _operation_block_size_(const _operation_block_size_&) = default;
-  _operation_block_size_(_operation_block_size_&&) = default;
-  _operation_block_size_& operator=(const _operation_block_size_&) = default;
-  _operation_block_size_& operator=(_operation_block_size_&&) = default;
-  ~_operation_block_size_() = default;
-};
-
 // Helper type, that takes zero or more buffers, and transforms it into a sender adapter.
 template<bool IsConst>
 struct make_read_write_op_ {
@@ -677,18 +687,19 @@ struct make_read_write_op_ {
   template<typename... Buffer>
   auto operator()(Buffer&&... buffer) const {
     return execution::lazy_let_value(
-        [...buffer=std::forward<Buffer>(buffer)](auto st) -> execution::typed_sender auto {
+        // lazy_let_value will ensure the lifetime of `auto& st' is long enough for us to maintain a reference.
+        [...buffer=std::forward<Buffer>(buffer)](auto& st) -> execution::typed_sender auto {
           if constexpr(for_writing) {
-            return execution::io::lazy_write_ec(st.fd, maybe_wrap_in_array_for_writing(buffer.get_buffer(st.shared_buf)...))
+            return execution::io::lazy_write_ec(st.fd, maybe_wrap_in_array_for_writing(buffer.get_buffer(st.shared_buf())...))
             | execution::lazy_then(
-                [st]([[maybe_unused]] std::size_t wlen) {
-                  return st;
+                [&st]([[maybe_unused]] std::size_t wlen) -> decltype(auto) {
+                  return std::move(st);
                 });
           } else {
-            return execution::io::lazy_read_ec(st.fd, maybe_wrap_in_array_for_reading(buffer.get_buffer(st.shared_buf)...))
+            return execution::io::lazy_read_ec(st.fd, maybe_wrap_in_array_for_reading(buffer.get_buffer(st.shared_buf())...))
             | execution::lazy_then(
-                [st]([[maybe_unused]] std::size_t rlen) {
-                  return st;
+                [&st]([[maybe_unused]] std::size_t rlen) -> decltype(auto) {
+                  return std::move(st);
                 });
           }
         });
@@ -720,13 +731,16 @@ class operation_sequence<
     std::tuple<PreInvocationOperations...>,
     std::tuple<BufferOperations...>,
     std::tuple<PostInvocationOperations...>>
-: public _operation_block_size_<std::tuple<BufferOperations...>>
 {
   template<bool, typename, typename, typename> friend class operation_sequence;
 
   public:
   static inline constexpr bool for_writing = IsConst;
   static inline constexpr bool for_reading = !IsConst;
+  static inline constexpr std::size_t extent =
+      ((BufferOperations::extent == std::dynamic_extent) ||...) ?
+      std::dynamic_extent :
+      (0u +...+ BufferOperations::extent);
 
   private:
   operation_sequence(
@@ -746,25 +760,15 @@ class operation_sequence<
   operation_sequence(operation_sequence&&) = default;
   operation_sequence(const operation_sequence&) = delete;
 
-  template<typename FD>
-  auto make_sender_chain(FD& fd, std::span<std::conditional_t<IsConst, const std::byte, std::byte>> shared_buf) && {
-    struct state {
-      FD& fd;
-      std::span<std::conditional_t<IsConst, const std::byte, std::byte>> shared_buf;
-    };
-
-    return execution::just(state{
-          .fd=fd,
-          .shared_buf=shared_buf
-        })
-    | std::apply(
+  auto make_sender_chain() && {
+    return std::apply(
         [](auto&&... x) {
           if constexpr(sizeof...(x) == 0) {
             return execution::noop();
           } else {
             return execution::lazy_then(
-                [...x=std::move(x)](state& st) mutable {
-                  (std::invoke(std::move(x), std::as_const(st.shared_buf)), ...);
+                [...x=std::move(x)](auto&& st) mutable {
+                  (std::invoke(std::move(x), st.shared_buf()), ...);
                   return st;
                 });
           }
@@ -785,17 +789,13 @@ class operation_sequence<
             return execution::noop();
           } else {
             return execution::lazy_then(
-                [...x=std::move(x)](state st) mutable {
-                  (std::invoke(std::move(x), std::as_const(st.shared_buf)), ...);
+                [...x=std::move(x)](auto st) mutable {
+                  (std::invoke(std::move(x), st.shared_buf()), ...);
                   return st;
                 });
           }
         },
-        std::move(post_invocations))
-    | execution::lazy_then(
-        [](state st) {
-          return std::move(st.fd);
-        });
+        std::move(post_invocations));
   }
 
   auto shift(std::size_t increase) -> void {
@@ -928,63 +928,167 @@ class operation_sequence<
 };
 
 
-template<bool IsConst, std::size_t Extent, typename PreInvocationOperations, typename BufferOperations, typename PostInvocationOperations>
-auto make_operation_block(
-      temporary_buffer<IsConst, Extent>&& tmpbuf,
-      operation_sequence<IsConst, PreInvocationOperations, BufferOperations, PostInvocationOperations>&& sequence)
--> operation_block<IsConst, Extent, PreInvocationOperations, BufferOperations, PostInvocationOperations> {
-  return operation_block(std::move(tmpbuf), std::move(sequence));
-}
-
-template<bool IsConst, std::size_t Extent, typename PreInvocationOperations, typename BufferOperations, typename PostInvocationOperations>
-class operation_block
-: public _operation_block_size_<BufferOperations>
+template<typename... Sequences>
+class operation_sequence_tuple
+: public std::tuple<Sequences...>
 {
   public:
+  using std::tuple<Sequences...>::tuple;
+
+  template<typename Op0, typename... Ops>
+  requires (sizeof...(Ops) > 0)
+  auto append_operation(Op0&& op0, Ops&&... ops) && {
+    return std::move(*this).append_operation(std::forward<Op0>(op0)).append_operation(std::forward<Ops>(ops)...);
+  }
+
+  template<typename Op>
+  auto append_operation(Op&& op) && {
+    if constexpr(last_is_operation_sequence) {
+      return std::apply(
+          []<typename... T>(T&&... v) {
+            return operation_sequence_tuple<std::remove_cvref_t<T>...>(std::forward<T>(v)...);
+          },
+          std::tuple_cat(
+              std::move(*this).all_but_last_as_rvalue_tuple(),
+              std::forward_as_tuple(std::get<sizeof...(Sequences) - 1u>(std::move(*this)).append_operation(std::forward<Op>(op)))));
+    } else {
+      return operation_sequence_tuple<Sequences..., std::remove_cvref_t<Op>>(
+          std::tuple_cat(
+              std::move(*this).all_as_rvalue_tuple(),
+              std::forward_as_tuple(std::forward<Op>(op))));
+    }
+  }
+
+  template<bool IsConst, typename PreInvocationOperations, typename BufferOperations, typename PostInvocationOperations>
+  auto merge(operation_sequence<IsConst, PreInvocationOperations, BufferOperations, PostInvocationOperations>&& other) {
+    if constexpr(last_is_operation_sequence) {
+      return std::apply(
+          []<typename... T>(T&&... v) {
+            return operation_sequence_tuple<std::remove_cvref_t<T>...>(std::forward<T>(v)...);
+          },
+          std::tuple_cat(
+              std::move(*this).all_but_last_as_rvalue_tuple(),
+              std::forward_as_tuple(std::get<sizeof...(Sequences) - 1u>(std::move(*this)).merge(std::move(other)))));
+    } else {
+      return operation_sequence_tuple<Sequences..., operation_sequence<IsConst, PreInvocationOperations, BufferOperations, PostInvocationOperations>>(
+          std::tuple_cat(
+              std::move(*this).all_as_rvalue_tuple(),
+              std::forward_as_tuple(std::move(other))));
+    }
+  }
+
+  template<typename Fn>
+  auto apply(Fn&& fn) && {
+    std::tuple<Sequences...>& self = *this;
+    return std::apply(std::forward<Fn>(fn), std::move(self));
+  }
+
+  template<typename Fn>
+  auto apply(Fn&& fn) & {
+    std::tuple<Sequences...>& self = *this;
+    return std::apply(std::forward<Fn>(fn), self);
+  }
+
+  template<typename Fn>
+  auto apply(Fn&& fn) const & {
+    const std::tuple<Sequences...>& self = *this;
+    return std::apply(std::forward<Fn>(fn), self);
+  }
+
+  private:
+  inline auto all_as_rvalue_tuple() && {
+    return std::move(*this).apply(
+        [](Sequences&&... v) {
+          return std::forward_as_tuple(std::move(v)...);
+        });
+  }
+
+  inline auto all_but_last_as_rvalue_tuple() && {
+    return all_but_last_as_rvalue_tuple_(std::make_index_sequence<sizeof...(Sequences) - 1u>());
+  }
+
+  template<std::size_t... Idx>
+  inline auto all_but_last_as_rvalue_tuple_([[maybe_unused]] std::index_sequence<Idx...>) {
+    return std::forward_as_tuple(std::get<Idx>(std::move(*this))...);
+  }
+
+  template<typename>
+  static inline constexpr bool is_operation_sequence = false;
+
+  template<bool IsConst, typename PreInvocationOperations, typename BufferOperations, typename PostInvocationOperations>
+  static inline constexpr bool is_operation_sequence<operation_sequence<IsConst, PreInvocationOperations, BufferOperations, PostInvocationOperations>> = true;
+
+  static inline constexpr bool last_is_operation_sequence =
+      sizeof...(Sequences) > 0 && is_operation_sequence<std::tuple_element_t<sizeof...(Sequences) - 1u, std::tuple<Sequences...>>>;
+};
+
+template<bool IsConst, std::size_t Extent, typename... Sequences>
+auto make_operation_block(
+      temporary_buffer<IsConst, Extent>&& tmpbuf,
+      operation_sequence_tuple<Sequences...>&& sequences)
+-> operation_block<IsConst, Extent, Sequences...> {
+  return operation_block(std::move(tmpbuf), std::move(sequences));
+}
+
+template<bool IsConst, std::size_t Extent, typename... Sequences>
+class operation_block {
+  static_assert(((Sequences::for_writing == IsConst) &&...));
+
+  public:
+  static inline constexpr std::size_t extent =
+      ((Sequences::extent == std::dynamic_extent) ||...) ?
+      std::dynamic_extent :
+      (0u +...+ Sequences::extent);
+
   operation_block(
       temporary_buffer<IsConst, Extent>&& tmpbuf,
-      operation_sequence<IsConst, PreInvocationOperations, BufferOperations, PostInvocationOperations>&& sequence)
+      operation_sequence_tuple<Sequences...>&& sequences)
   : tmpbuf(std::move(tmpbuf)),
-    sequence(std::move(sequence))
+    sequences(std::move(sequences))
   {}
 
   auto sender_chain() && {
     return execution::then(
         [tmpbuf=std::move(this->tmpbuf)]<typename FD>(FD&& fd) mutable {
-          return std::make_tuple(std::forward<FD>(fd), std::move(tmpbuf).get_data());
+          return make_state_<IsConst>(std::forward<FD>(fd), std::move(tmpbuf).get_data());
         })
-    | execution::explode_tuple()
-    | execution::lazy_let_value(
-        [sequence=std::move(this->sequence)](auto& fd, auto& tmpbuf) mutable {
-          return std::move(sequence).make_sender_chain(
-              fd,
-              std::span<std::conditional_t<IsConst, const std::byte, std::byte>>(tmpbuf.data(), tmpbuf.size()));
+    | std::move(sequences).apply(
+        [](auto&&... sequence) {
+          return (execution::noop() |...| std::move(sequence).make_sender_chain());
+        })
+    | execution::lazy_then(
+        [](auto st) {
+          return std::move(st.fd);
         });
   }
 
   auto shift(std::size_t increase) -> void {
-    sequence.shift(increase);
+    std::apply(
+        [=](auto&... sequence) {
+          (sequence.shift(increase), ...);
+        },
+        sequences);
   }
 
   template<typename Fn>
   auto append(pre_invocation<Fn>&& op) && {
     return make_operation_block(
         std::move(tmpbuf),
-        std::move(sequence).append_operation(std::move(op)));
+        std::move(sequences).append_operation(std::move(op)));
   }
 
   template<typename Fn>
   auto append(post_invocation<Fn>&& op) && {
     return make_operation_block(
         std::move(tmpbuf),
-        std::move(sequence).append_operation(std::move(op)));
+        std::move(sequences).append_operation(std::move(op)));
   }
 
   template<std::size_t N>
   auto append(span_reference<IsConst, N>&& op) && {
     return make_operation_block(
         std::move(tmpbuf),
-        std::move(sequence).append_operation(std::move(op)));
+        std::move(sequences).append_operation(std::move(op)));
   }
 
   template<std::size_t N, typename... Op>
@@ -996,7 +1100,7 @@ class operation_block
     (op.assign(off, len), ...);
     return make_operation_block(
         std::move(tmpbuf).append(std::move(data)),
-        std::move(sequence).append_operation(temporary_buffer_reference<true, N>(off, len), std::forward<Op>(op)...));
+        std::move(sequences).append_operation(temporary_buffer_reference<true, N>(off, len), std::forward<Op>(op)...));
   }
 
   template<std::size_t N, typename... Op>
@@ -1008,7 +1112,7 @@ class operation_block
     (op.assign(tmpbuf.size(), N), ...);
     return make_operation_block(
         std::move(tmpbuf).template append<N>(),
-        std::move(sequence).append_operation(temporary_buffer_reference<false, N>(off, N), std::forward<Op>(op)...));
+        std::move(sequences).append_operation(temporary_buffer_reference<false, N>(off, N), std::forward<Op>(op)...));
   }
 
   template<typename... Op>
@@ -1019,7 +1123,7 @@ class operation_block
     (op.assign(tmpbuf.size(), n), ...);
     return make_operation_block(
         std::move(tmpbuf).append(n),
-        std::move(sequence).append_operation(temporary_buffer_reference<false>(off, n), std::forward<Op>(op)...));
+        std::move(sequences).append_operation(temporary_buffer_reference<false>(off, n), std::forward<Op>(op)...));
   }
 
   template<std::size_t OtherExtent, typename OtherPreInvocationOperations, typename OtherBufferOperations, typename OtherPostInvocationOperations>
@@ -1027,16 +1131,16 @@ class operation_block
     other.shift(tmpbuf.size());
     return make_operation_block(
         std::move(tmpbuf).merge(std::move(other.tmpbuf)),
-        std::move(sequence).merge(std::move(other.sequence)));
+        std::move(sequences).merge(std::move(other.sequence)));
   }
 
   private:
   temporary_buffer<IsConst, Extent> tmpbuf;
-  operation_sequence<IsConst, PreInvocationOperations, BufferOperations, PostInvocationOperations> sequence;
+  operation_sequence_tuple<Sequences...> sequences;
 };
 
 template<bool IsConst>
-class operation_block<IsConst, 0, std::tuple<>, std::tuple<>, std::tuple<>> {
+class operation_block<IsConst, 0> {
   public:
   static inline constexpr std::size_t extent = 0;
 
@@ -1052,21 +1156,21 @@ class operation_block<IsConst, 0, std::tuple<>, std::tuple<>, std::tuple<>> {
   auto append(pre_invocation<Fn>&& op) && {
     return make_operation_block(
         temporary_buffer<IsConst>(),
-        operation_sequence<IsConst>().append_operation(std::move(op)));
+        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(std::move(op)));
   }
 
   template<typename Fn>
   auto append(post_invocation<Fn>&& op) && {
     return make_operation_block(
         temporary_buffer<IsConst>(),
-        operation_sequence<IsConst>().append_operation(std::move(op)));
+        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(std::move(op)));
   }
 
   template<std::size_t N>
   auto append(span_reference<IsConst, N>&& op) && {
     return make_operation_block(
         temporary_buffer<IsConst>(),
-        operation_sequence<IsConst>().append_operation(std::move(op)));
+        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(std::move(op)));
   }
 
   template<std::size_t N, typename... Op>
@@ -1077,7 +1181,7 @@ class operation_block<IsConst, 0, std::tuple<>, std::tuple<>, std::tuple<>> {
     (op.assign(0, len), ...);
     return make_operation_block(
         temporary_buffer<IsConst>().append(std::move(data)),
-        operation_sequence<IsConst>().append_operation(temporary_buffer_reference<true, N>(0, len), std::forward<Op>(op)...));
+        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(temporary_buffer_reference<true, N>(0, len), std::forward<Op>(op)...));
   }
 
   template<std::size_t N, typename... Op>
@@ -1088,7 +1192,7 @@ class operation_block<IsConst, 0, std::tuple<>, std::tuple<>, std::tuple<>> {
     (op.assign(0, N), ...);
     return make_operation_block(
         temporary_buffer<IsConst>().template append<N>(),
-        operation_sequence<IsConst>().append_operation(temporary_buffer_reference<false, N>(0, N), std::forward<Op>(op)...));
+        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(temporary_buffer_reference<false, N>(0, N), std::forward<Op>(op)...));
   }
 
   template<typename... Op>
@@ -1099,7 +1203,7 @@ class operation_block<IsConst, 0, std::tuple<>, std::tuple<>, std::tuple<>> {
     (op.assign(0, n), ...);
     return make_operation_block(
         temporary_buffer<IsConst>().append(n),
-        operation_sequence<IsConst>().append_operation(temporary_buffer_reference<false>(0, n), std::forward<Op>(op)...));
+        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(temporary_buffer_reference<false>(0, n), std::forward<Op>(op)...));
   }
 
   template<std::size_t OtherExtent, typename OtherPreInvocationOperations, typename OtherBufferOperations, typename OtherPostInvocationOperations>
