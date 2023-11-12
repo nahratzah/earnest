@@ -88,7 +88,7 @@ namespace operation {
 
 template<bool, typename = std::tuple<>, typename = std::tuple<>, typename = std::tuple<>> class operation_sequence;
 
-template<bool IsConst, std::size_t Extent = 0, typename... Sequences>
+template<bool IsConst, std::size_t Extent = 0, typename Temporaries = std::tuple<>, typename... Sequences>
 class operation_block;
 
 
@@ -110,9 +110,9 @@ noexcept
 }
 
 
-template<typename Fn>
+template<typename Fn, std::size_t... TemporariesIndices>
 class pre_buffer_invocation {
-  template<bool, std::size_t, typename...> friend class operation_block;
+  template<bool, std::size_t, typename, typename...> friend class operation_block;
 
   public:
   explicit pre_buffer_invocation(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
@@ -123,16 +123,20 @@ class pre_buffer_invocation {
   : fn(fn)
   {}
 
-  template<typename Byte, std::size_t N>
-  requires std::same_as<std::remove_const_t<Byte>, std::byte>
-  auto operator()(std::span<Byte, N> data) && -> void {
-    assert(data.size() >= off + len);
+  template<typename State>
+  auto operator()(State& st) && -> void {
+    assert(st.shared_buf().size() >= off + len);
     assert(len != 0);
-    std::invoke(std::move(fn), data.subspan(off, len));
+    std::invoke(std::move(fn), st.shared_buf().subspan(off, len), st.template get_temporary<TemporariesIndices>()...);
   }
 
-  auto shift(std::size_t increase) noexcept -> void {
+  auto buffer_shift(std::size_t increase) noexcept -> void {
     off += increase;
+  }
+
+  template<std::size_t N>
+  auto temporaries_shift() && {
+    return pre_buffer_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
   }
 
   private:
@@ -145,9 +149,9 @@ class pre_buffer_invocation {
   std::size_t off = 0, len = 0;
 };
 
-template<typename Fn>
+template<typename Fn, std::size_t... TemporariesIndices>
 class post_buffer_invocation {
-  template<bool, std::size_t, typename...> friend class operation_block;
+  template<bool, std::size_t, typename, typename...> friend class operation_block;
 
   public:
   explicit post_buffer_invocation(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
@@ -158,16 +162,20 @@ class post_buffer_invocation {
   : fn(fn)
   {}
 
-  template<typename Byte, std::size_t N>
-  requires std::same_as<std::remove_const_t<Byte>, std::byte>
-  auto operator()(std::span<Byte, N> data) && -> void {
-    assert(data.size() >= off + len);
+  template<typename State>
+  auto operator()(State& st) && -> void {
+    assert(st.shared_buf().size() >= off + len);
     assert(len != 0);
-    std::invoke(std::move(fn), data.subspan(off, len));
+    std::invoke(std::move(fn), st.shared_buf().subspan(off, len), st.template get_temporary<TemporariesIndices>()...);
   }
 
-  auto shift(std::size_t increase) noexcept -> void {
+  auto buffer_shift(std::size_t increase) noexcept -> void {
     off += increase;
+  }
+
+  template<std::size_t N>
+  auto temporaries_shift() && {
+    return post_buffer_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
   }
 
   private:
@@ -180,7 +188,7 @@ class post_buffer_invocation {
   std::size_t off = 0, len = 0;
 };
 
-template<std::invocable Fn>
+template<std::invocable Fn, std::size_t... TemporariesIndices>
 class pre_invocation {
   public:
   explicit pre_invocation(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
@@ -191,19 +199,23 @@ class pre_invocation {
   : fn(fn)
   {}
 
-  template<typename Byte, std::size_t N>
-  requires std::same_as<std::remove_const_t<Byte>, std::byte>
-  auto operator()([[maybe_unused]] std::span<Byte, N>) && -> void {
-    std::invoke(std::move(fn));
+  template<typename State>
+  auto operator()(State& st) && -> void {
+    std::invoke(std::move(fn), st.template get_temporary<TemporariesIndices>()...);
   }
 
-  auto shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
+  auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
+
+  template<std::size_t N>
+  auto temporaries_shift() && -> pre_invocation&& {
+    return pre_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
+  }
 
   private:
   Fn fn;
 };
 
-template<std::invocable Fn>
+template<std::invocable Fn, std::size_t... TemporariesIndices>
 class post_invocation {
   public:
   explicit post_invocation(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
@@ -214,13 +226,17 @@ class post_invocation {
   : fn(fn)
   {}
 
-  template<typename Byte, std::size_t N>
-  requires std::same_as<std::remove_const_t<Byte>, std::byte>
-  auto operator()([[maybe_unused]] std::span<Byte, N>) && -> void {
-    std::invoke(std::move(fn));
+  template<typename State>
+  auto operator()(State& st) && -> void {
+    std::invoke(std::move(fn), st.template get_temporary<TemporariesIndices>()...);
   }
 
-  auto shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
+  auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
+
+  template<std::size_t N>
+  auto temporaries_shift() && -> post_invocation&& {
+    return post_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
+  }
 
   private:
   Fn fn;
@@ -249,10 +265,15 @@ class temporary_buffer_reference {
     return shared_buf.subspan(off, Extent);
   }
 
-  auto shift(std::size_t increase) -> void {
+  auto buffer_shift(std::size_t increase) -> void {
     if (std::numeric_limits<std::size_t>::max() - off - Extent < increase)
       throw std::range_error("xdr buffer shift overflow");
     off += increase;
+  }
+
+  template<std::size_t N>
+  auto temporaries_shift() && -> temporary_buffer_reference&& {
+    return std::move(*this);
   }
 
   auto get_off() const noexcept -> std::size_t { return off; }
@@ -277,10 +298,15 @@ class temporary_buffer_reference<IsConst, std::dynamic_extent> {
     return shared_buf.subspan(off, len);
   }
 
-  auto shift(std::size_t increase) -> void {
+  auto buffer_shift(std::size_t increase) -> void {
     if (std::numeric_limits<std::size_t>::max() - off - len < increase)
       throw std::range_error("xdr buffer shift overflow");
     off += increase;
+  }
+
+  template<std::size_t N>
+  auto temporaries_shift() && -> temporary_buffer_reference&& {
+    return std::move(*this);
   }
 
   auto get_off() const noexcept -> std::size_t { return off; }
@@ -303,7 +329,12 @@ class span_reference {
     return data;
   }
 
-  auto shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
+  auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
+
+  template<std::size_t N>
+  auto temporaries_shift() && -> span_reference&& {
+    return std::move(*this);
+  }
 
   private:
   std::span<std::conditional_t<IsConst, const std::byte, std::byte>, Extent> data;
@@ -360,59 +391,107 @@ struct buffer_operation_appender_ {
 inline constexpr buffer_operation_appender_ buffer_operation_appender{};
 
 
-template<bool IsConst, typename FD, typename Buffer>
+template<bool IsConst, typename FD, typename Buffer, typename Temporaries>
 class state_ {
+  template<bool, typename, typename, typename> friend class state_;
+
   public:
   state_(FD&& fd, Buffer&& buffer)
   : fd(std::move(fd)),
     buffer(std::move(buffer))
   {}
 
+  private:
+  state_(FD&& fd, Buffer&& buffer, Temporaries&& temporaries)
+  : fd(std::move(fd)),
+    buffer(std::move(buffer)),
+    temporaries(std::move(temporaries))
+  {}
+
+  public:
   auto shared_buf() noexcept {
     return std::span<std::conditional_t<IsConst, const std::byte, std::byte>>(buffer.data(), buffer.size());
   }
 
   template<typename OtherFD>
   auto rebind(OtherFD&& other_fd) && {
-    return state_<IsConst, std::remove_cvref_t<OtherFD>, Buffer>(
+    return state_<IsConst, std::remove_cvref_t<OtherFD>, Buffer, Temporaries>(
         std::forward<OtherFD>(other_fd),
-        std::move(buffer));
+        std::move(buffer),
+        std::move(temporaries));
+  }
+
+  template<std::size_t I>
+  requires (I < std::tuple_size_v<Temporaries>)
+  auto get_temporary() -> decltype(auto) {
+    return std::get<I>(temporaries);
+  }
+
+  template<std::size_t I>
+  requires (I < std::tuple_size_v<Temporaries>)
+  auto get_temporary() const -> decltype(auto) {
+    return std::get<I>(temporaries);
   }
 
   FD fd;
 
   private:
   Buffer buffer;
+  Temporaries temporaries;
 };
 
-template<bool IsConst, typename FD, std::size_t N>
-class state_<IsConst, FD, std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N>> {
+template<bool IsConst, typename FD, std::size_t N, typename Temporaries>
+class state_<IsConst, FD, std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N>, Temporaries> {
+  template<bool, typename, typename, typename> friend class state_;
+
   public:
   state_(FD&& fd, std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N>&& buffer)
   : fd(std::move(fd)),
     buffer(std::move(buffer))
   {}
 
+  private:
+  state_(FD&& fd, std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N>&& buffer, Temporaries&& temporaries)
+  : fd(std::move(fd)),
+    buffer(std::move(buffer)),
+    temporaries(std::move(temporaries))
+  {}
+
+  public:
   auto shared_buf() noexcept {
     return std::span<std::conditional_t<IsConst, const std::byte, std::byte>, N>(buffer.data(), buffer.size());
   }
 
   template<typename OtherFD>
   auto rebind(OtherFD&& other_fd) && {
-    return state_<IsConst, std::remove_cvref_t<OtherFD>, std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N>>(
+    return state_<IsConst, std::remove_cvref_t<OtherFD>, std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N>, Temporaries>(
         std::forward<OtherFD>(other_fd),
-        std::move(buffer));
+        std::move(buffer),
+        std::move(temporaries));
+  }
+
+  template<std::size_t I>
+  requires (I < std::tuple_size_v<Temporaries>)
+  auto get_temporary() -> decltype(auto) {
+    return std::get<I>(temporaries);
+  }
+
+  template<std::size_t I>
+  requires (I < std::tuple_size_v<Temporaries>)
+  auto get_temporary() const -> decltype(auto) {
+    return std::get<I>(temporaries);
   }
 
   FD fd;
 
   private:
   std::array<std::conditional_t<IsConst, const std::byte, std::byte>, N> buffer;
+  Temporaries temporaries;
 };
 
-template<bool IsConst, typename FD, typename Buffer>
-inline auto make_state_(FD&& fd, Buffer&& buffer) -> state_<IsConst, std::remove_cvref_t<FD>, std::remove_cvref_t<Buffer>> {
-  return state_<IsConst, std::remove_cvref_t<FD>, std::remove_cvref_t<Buffer>>(
+template<bool IsConst, typename Temporaries, typename FD, typename Buffer>
+inline auto make_state_(FD&& fd, Buffer&& buffer) -> state_<IsConst, std::remove_cvref_t<FD>, std::remove_cvref_t<Buffer>, Temporaries> {
+  return state_<IsConst, std::remove_cvref_t<FD>, std::remove_cvref_t<Buffer>, Temporaries>(
       std::forward<FD>(fd),
       std::forward<Buffer>(buffer));
 }
@@ -595,7 +674,12 @@ class operation_sequence<IsConst, std::tuple<>, std::tuple<>, std::tuple<>> {
     return execution::noop();
   }
 
-  auto shift(std::size_t increase) noexcept -> void {}
+  auto buffer_shift(std::size_t increase) noexcept -> void {}
+
+  template<std::size_t N>
+  auto temporaries_shift() && -> operation_sequence&& {
+    return std::move(*this);
+  }
 
   auto append_operation() && -> operation_sequence&& {
     return std::move(*this);
@@ -782,7 +866,7 @@ class operation_sequence<
           } else {
             return execution::lazy_then(
                 [...x=std::move(x)](auto&& st) mutable {
-                  (std::invoke(std::move(x), st.shared_buf()), ...);
+                  (std::invoke(std::move(x), st), ...);
                   return st;
                 });
           }
@@ -804,7 +888,7 @@ class operation_sequence<
           } else {
             return execution::lazy_then(
                 [...x=std::move(x)](auto st) mutable {
-                  (std::invoke(std::move(x), st.shared_buf()), ...);
+                  (std::invoke(std::move(x), st), ...);
                   return st;
                 });
           }
@@ -812,22 +896,43 @@ class operation_sequence<
         std::move(post_invocations));
   }
 
-  auto shift(std::size_t increase) -> void {
+  auto buffer_shift(std::size_t increase) -> void {
     std::apply(
         [&](auto&... x) {
-          (x.shift(increase), ...);
+          (x.buffer_shift(increase), ...);
         },
         pre_invocations);
     std::apply(
         [&](auto&... x) {
-          (x.shift(increase), ...);
+          (x.buffer_shift(increase), ...);
         },
         buffers);
     std::apply(
         [&](auto&... x) {
-          (x.shift(increase), ...);
+          (x.buffer_shift(increase), ...);
         },
         post_invocations);
+  }
+
+  template<std::size_t N>
+  auto temporaries_shift() && {
+    auto shifted_pre_invocations = std::apply(
+        [](auto&&... x) {
+          return std::make_tuple(std::move(x).template temporaries_shift<N>()...);
+        },
+        std::move(pre_invocations));
+    auto shifted_buffers = std::apply(
+        [](auto&&... x) {
+          return std::make_tuple(std::move(x).template temporaries_shift<N>()...);
+        },
+        std::move(buffers));
+    auto shifted_post_invocations = std::apply(
+        [](auto&&... x) {
+          return std::make_tuple(std::move(x).template temporaries_shift<N>()...);
+        },
+        std::move(post_invocations));
+    return operation_sequence<IsConst, decltype(shifted_pre_invocations), decltype(shifted_buffers), decltype(shifted_post_invocations)>(
+        std::move(shifted_pre_invocations), std::move(shifted_buffers), std::move(shifted_post_invocations));
   }
 
   auto append_operation() && -> operation_sequence&& {
@@ -942,12 +1047,87 @@ class operation_sequence<
 };
 
 
+// An invocation that takes manual control over the file descriptor.
+//
+// The function can do whatever it wants, as long as it produces a sender
+// of file-descriptor. Doesn't have to be the same file-descriptor.
+template<typename Fn, std::size_t... TemporariesIndices>
+class manual_invocation {
+  public:
+  static inline constexpr bool for_writing = true;
+  static inline constexpr bool for_reading = true;
+  static inline constexpr std::size_t extent = std::dynamic_extent;
+
+  explicit manual_invocation(Fn&& fn)
+  : fn(std::move(fn))
+  {}
+
+  explicit manual_invocation(const Fn& fn)
+  : fn(fn)
+  {}
+
+  auto make_sender_chain() && {
+    return execution::lazy_let_value(
+        [fn=std::move(this->fn)](auto& st) mutable {
+          return std::invoke(std::move(fn), st.fd, st.template get_temporary<TemporariesIndices>()...)
+          | execution::lazy_then(
+              [&st]<typename FD>(FD&& fd) {
+                return std::move(st).rebind(std::forward<FD>(fd));
+              });
+        });
+  }
+
+  auto buffer_shift([[maybe_unused]] std::size_t) noexcept {}
+
+  template<std::size_t N>
+  auto temporaries_shift() && {
+    return manual_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
+  }
+
+  private:
+  Fn fn;
+};
+
+
+// Helper type to figure out what the last type in a tuple is.
+//
+// Exposes `void' if the tuple is empty.
+template<typename Tuple>
+struct tuple_last_type__ {
+  using type = std::tuple_element_t<std::tuple_size_v<Tuple> - 1u, Tuple>;
+};
+
+template<>
+struct tuple_last_type__<std::tuple<>> {
+  using type = void;
+};
+
+template<typename Tuple>
+using tuple_last_type_ = typename tuple_last_type__<Tuple>::type;
+
+
 template<typename... Sequences>
 class operation_sequence_tuple
 : public std::tuple<Sequences...>
 {
   public:
   using std::tuple<Sequences...>::tuple;
+
+  auto buffer_shift(std::size_t increase) -> void {
+    apply(
+        [increase](auto&... x) {
+          (x.buffer_shift(x), ...);
+        });
+  }
+
+  template<std::size_t N>
+  auto temporaries_shift() && {
+    return std::move(*this).apply(
+        [](auto&&... x) {
+          return operation_sequence_tuple<std::remove_cvref_t<decltype(std::move(x).template temporaries_shift<N>())>...>(
+              std::move(x).template temporaries_shift<N>()...);
+        });
+  }
 
   template<typename Op0, typename... Ops>
   requires (sizeof...(Ops) > 0)
@@ -1032,21 +1212,20 @@ class operation_sequence_tuple
   template<bool IsConst, typename PreInvocationOperations, typename BufferOperations, typename PostInvocationOperations>
   static inline constexpr bool is_operation_sequence<operation_sequence<IsConst, PreInvocationOperations, BufferOperations, PostInvocationOperations>> = true;
 
-  static inline constexpr bool last_is_operation_sequence =
-      sizeof...(Sequences) > 0 && is_operation_sequence<std::tuple_element_t<sizeof...(Sequences) - 1u, std::tuple<Sequences...>>>;
+  static inline constexpr bool last_is_operation_sequence = is_operation_sequence<tuple_last_type_<std::tuple<Sequences...>>>;
 };
 
-template<bool IsConst, std::size_t Extent, typename... Sequences>
+template<typename Temporaries, bool IsConst, std::size_t Extent, typename... Sequences>
 auto make_operation_block(
       temporary_buffer<IsConst, Extent>&& tmpbuf,
       operation_sequence_tuple<Sequences...>&& sequences)
--> operation_block<IsConst, Extent, Sequences...> {
-  return operation_block<IsConst, Extent, Sequences...>(std::move(tmpbuf), std::move(sequences));
+-> operation_block<IsConst, Extent, Temporaries, Sequences...> {
+  return operation_block<IsConst, Extent, Temporaries, Sequences...>(std::move(tmpbuf), std::move(sequences));
 }
 
-template<bool IsConst, std::size_t Extent, typename... Sequences>
+template<bool IsConst, std::size_t Extent, typename Temporaries, typename... Sequences>
 class operation_block {
-  static_assert(((Sequences::for_writing == IsConst) &&...));
+  static_assert(IsConst ? (Sequences::for_writing &&...) : (Sequences::for_reading &&...));
 
   public:
   static inline constexpr std::size_t extent =
@@ -1064,7 +1243,7 @@ class operation_block {
   auto sender_chain() && {
     return execution::then(
         [tmpbuf=std::move(this->tmpbuf)]<typename FD>(FD&& fd) mutable {
-          return make_state_<IsConst>(std::forward<FD>(fd), std::move(tmpbuf).get_data());
+          return make_state_<IsConst, Temporaries>(std::forward<FD>(fd), std::move(tmpbuf).get_data());
         })
     | std::move(sequences).apply(
         [](auto&&... sequence) {
@@ -1076,32 +1255,29 @@ class operation_block {
         });
   }
 
-  auto shift(std::size_t increase) -> void {
-    sequences.apply(
-        [=](auto&... sequence) {
-          (sequence.shift(increase), ...);
-        });
-  }
-
-  template<typename Fn>
-  auto append(pre_invocation<Fn>&& op) && {
-    return make_operation_block(
-        std::move(tmpbuf),
-        std::move(sequences).append_operation(std::move(op)));
-  }
-
-  template<typename Fn>
-  auto append(post_invocation<Fn>&& op) && {
-    return make_operation_block(
-        std::move(tmpbuf),
-        std::move(sequences).append_operation(std::move(op)));
+  auto buffer_shift(std::size_t increase) -> void {
+    sequences.buffer_shift(increase);
   }
 
   template<std::size_t N>
-  auto append(span_reference<IsConst, N>&& op) && {
-    return make_operation_block(
+  auto temporaries_shift() && {
+    return make_operation_block<Temporaries>(
         std::move(tmpbuf),
-        std::move(sequences).append_operation(std::move(op)));
+        std::move(sequences).template temporaries_shift<N>());
+  }
+
+  template<typename Op>
+  auto append(Op&& op) && {
+    return make_operation_block<Temporaries>(
+        std::move(tmpbuf),
+        std::move(sequences).append_operation(std::forward<Op>(op)));
+  }
+
+  template<typename Seq>
+  auto append_sequence(Seq&& seq) && {
+    return make_operation_block<std::tuple<>>(
+        std::move(tmpbuf),
+        std::move(sequences).merge(std::forward<Seq>(seq)));
   }
 
   template<std::size_t N, typename... Op>
@@ -1111,7 +1287,7 @@ class operation_block {
     const auto off = tmpbuf.size();
     const auto len = data.size();
     (op.assign(off, len), ...);
-    return make_operation_block(
+    return make_operation_block<Temporaries>(
         std::move(tmpbuf).append(std::move(data)),
         std::move(sequences).append_operation(temporary_buffer_reference<true, N>(off, len), std::forward<Op>(op)...));
   }
@@ -1123,7 +1299,7 @@ class operation_block {
 
     const auto off = tmpbuf.size();
     (op.assign(tmpbuf.size(), N), ...);
-    return make_operation_block(
+    return make_operation_block<Temporaries>(
         std::move(tmpbuf).template append<N>(),
         std::move(sequences).append_operation(temporary_buffer_reference<false, N>(off, N), std::forward<Op>(op)...));
   }
@@ -1134,17 +1310,26 @@ class operation_block {
 
     const auto off = tmpbuf.size();
     (op.assign(tmpbuf.size(), n), ...);
-    return make_operation_block(
+    return make_operation_block<Temporaries>(
         std::move(tmpbuf).append(n),
         std::move(sequences).append_operation(temporary_buffer_reference<false>(off, n), std::forward<Op>(op)...));
   }
 
   template<std::size_t OtherExtent, typename OtherPreInvocationOperations, typename OtherBufferOperations, typename OtherPostInvocationOperations>
-  auto append(operation_block<IsConst, OtherExtent, OtherPreInvocationOperations, OtherBufferOperations, OtherPostInvocationOperations>&& other) && {
-    other.shift(tmpbuf.size());
-    return make_operation_block(
-        std::move(tmpbuf).merge(std::move(other.tmpbuf)),
-        std::move(sequences).merge(std::move(other.sequence)));
+  auto merge(operation_block<IsConst, OtherExtent, OtherPreInvocationOperations, OtherBufferOperations, OtherPostInvocationOperations>&& other) && {
+    other.buffer_shift(tmpbuf.size());
+    auto shifted_other = std::move(other).template temporaries_shift<std::tuple_size_v<Temporaries>>();
+    return make_operation_block<Temporaries>(
+        std::move(tmpbuf).merge(std::move(shifted_other.tmpbuf)),
+        std::move(sequences).merge(std::move(shifted_other.sequence)));
+  }
+
+  template<typename Special>
+  requires (std::remove_cvref_t<Special>::for_writing == IsConst)
+  auto add_special_sequence(Special&& special) {
+    return make_operation_block<Temporaries>(
+        std::move(tmpbuf),
+        std::move(sequences).append_operation(std::forward<Special>(special)));
   }
 
   private:
@@ -1163,27 +1348,25 @@ class operation_block<IsConst, 0> {
     return execution::noop();
   }
 
-  auto shift(std::size_t increase) -> void {}
-
-  template<typename Fn>
-  auto append(pre_invocation<Fn>&& op) && {
-    return make_operation_block(
-        temporary_buffer<IsConst>(),
-        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(std::move(op)));
-  }
-
-  template<typename Fn>
-  auto append(post_invocation<Fn>&& op) && {
-    return make_operation_block(
-        temporary_buffer<IsConst>(),
-        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(std::move(op)));
-  }
+  auto buffer_shift(std::size_t increase) -> void {}
 
   template<std::size_t N>
-  auto append(span_reference<IsConst, N>&& op) && {
-    return make_operation_block(
+  auto temporaries_shift() && -> operation_block&& {
+    return std::move(*this);
+  }
+
+  template<typename Op>
+  auto append(Op&& op) && {
+    return make_operation_block<std::tuple<>>(
         temporary_buffer<IsConst>(),
-        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(std::move(op)));
+        operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(std::forward<Op>(op)));
+  }
+
+  template<typename Seq>
+  auto append_sequence(Seq&& seq) && {
+    return make_operation_block<std::tuple<>>(
+        temporary_buffer<IsConst>(),
+        operation_sequence_tuple<>().merge(std::forward<Seq>(seq)));
   }
 
   template<std::size_t N, typename... Op>
@@ -1192,7 +1375,7 @@ class operation_block<IsConst, 0> {
 
     const auto len = data.size();
     (op.assign(0, len), ...);
-    return make_operation_block(
+    return make_operation_block<std::tuple<>>(
         temporary_buffer<IsConst>().append(std::move(data)),
         operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(temporary_buffer_reference<true, N>(0, len), std::forward<Op>(op)...));
   }
@@ -1203,7 +1386,7 @@ class operation_block<IsConst, 0> {
     static_assert(!IsConst);
 
     (op.assign(0, N), ...);
-    return make_operation_block(
+    return make_operation_block<std::tuple<>>(
         temporary_buffer<IsConst>().template append<N>(),
         operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(temporary_buffer_reference<false, N>(0, N), std::forward<Op>(op)...));
   }
@@ -1214,18 +1397,15 @@ class operation_block<IsConst, 0> {
     static_assert(!IsConst);
 
     (op.assign(0, n), ...);
-    return make_operation_block(
+    return make_operation_block<std::tuple<>>(
         temporary_buffer<IsConst>().append(n),
         operation_sequence_tuple<operation_sequence<IsConst>>().append_operation(temporary_buffer_reference<false>(0, n), std::forward<Op>(op)...));
   }
 
-  template<typename Other>
-  requires (std::remove_cvref_t<Other>::for_writing == IsConst)
-  auto merge(Other&& other) {
-    other.shift(0);
-    return make_operation_block(
-        temporary_buffer<IsConst>(),
-        operation_sequence_tuple<operation_sequence<IsConst>>().merge(std::forward<Other>(other)));
+  template<std::size_t OtherExtent, typename OtherPreInvocationOperations, typename OtherBufferOperations, typename OtherPostInvocationOperations>
+  auto merge(operation_block<IsConst, OtherExtent, OtherPreInvocationOperations, OtherBufferOperations, OtherPostInvocationOperations>&& other) &&
+  -> operation_block<IsConst, OtherExtent, OtherPreInvocationOperations, OtherBufferOperations, OtherPostInvocationOperations>&& {
+    return std::move(other);
   }
 };
 
@@ -1773,69 +1953,23 @@ struct uint64_t {
 };
 
 
+// Manual control of an operation.
+//
+// Requires a function, that when called as `fn(a_file_descriptor)'
+// returns a typed-sender, that returns a file-descriptor.
+// It doesn't have to be the same file-descriptor: it's fine if it's
+// a different one, or even changes type.
 struct manual_t {
-  private:
-  template<typename Fn>
-  struct read_implementation {
-    static inline constexpr bool for_writing = false;
-    static inline constexpr bool for_reading = true;
-    static inline constexpr std::size_t extent = std::dynamic_extent;
-
-    auto make_sender_chain() && {
-      return execution::lazy_let_value(
-          [fn=std::move(this->fn)](auto& st) mutable {
-            return std::invoke(std::move(fn), st.fd)
-            | execution::lazy_then(
-                [&st]<typename FD>(FD&& fd) mutable {
-                  return std::move(st).rebind(std::forward<FD>(fd));
-                });
-          });
-    }
-
-    auto shift([[maybe_unused]] std::size_t) noexcept {}
-
-    Fn fn;
-  };
-
-  template<typename Fn>
-  struct write_implementation {
-    static inline constexpr bool for_writing = true;
-    static inline constexpr bool for_reading = false;
-    static inline constexpr std::size_t extent = std::dynamic_extent;
-
-    auto make_sender_chain() && {
-      return execution::lazy_let_value(
-          [fn=std::move(this->fn)](auto& st) mutable {
-            return std::invoke(std::move(fn), st.fd)
-            | execution::lazy_then(
-                [&st]<typename FD>(FD&& fd) mutable {
-                  return std::move(st).rebind(std::forward<FD>(fd));
-                });
-          });
-    }
-
-    auto shift([[maybe_unused]] std::size_t) noexcept {}
-
-    Fn fn;
-  };
-
-  public:
   template<typename Fn>
   auto read(Fn&& fn) const {
     return operation_block<false>{}
-        .merge(
-            read_implementation<std::remove_cvref_t<Fn>>{
-              .fn=std::forward<Fn>(fn)
-            });
+        .append_sequence(manual_invocation(std::forward<Fn>(fn)));
   }
 
   template<typename Fn>
   auto write(Fn&& fn) const {
     return operation_block<true>{}
-        .merge(
-            write_implementation<std::remove_cvref_t<Fn>>{
-              .fn=std::forward<Fn>(fn)
-            });
+        .append_sequence(manual_invocation(std::forward<Fn>(fn)));
   }
 };
 
@@ -1847,7 +1981,6 @@ inline constexpr operation::uint8_t  uint8{};
 inline constexpr operation::uint16_t uint16{};
 inline constexpr operation::uint32_t uint32{};
 inline constexpr operation::uint64_t uint64{};
-
 inline constexpr operation::manual_t manual{};
 
 
