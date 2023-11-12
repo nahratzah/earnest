@@ -761,6 +761,7 @@ struct explode_tuple_t {
 inline constexpr explode_tuple_t explode_tuple{};
 
 
+// An adapter that does nothing.
 struct noop_t {
   template<sender S>
   constexpr auto operator()(S&& s) const noexcept -> S&& {
@@ -774,6 +775,127 @@ struct noop_t {
   }
 };
 inline constexpr noop_t noop;
+
+
+// An adapter that turns an exception-pointer holding a std::system_error,
+// into its corresponding std::error_code.
+struct system_error_to_error_code_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S>
+  constexpr auto operator()(S&& s) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const system_error_to_error_code_t&>(), std::declval<S>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s));
+  }
+
+  constexpr auto operator()() const
+  noexcept(noexcept(_generic_adapter(std::declval<system_error_to_error_code_t>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this);
+  }
+
+  private:
+  // Forward-declaration.
+  template<sender Sender> class sender_impl;
+
+  template<sender Sender>
+  struct sender_types_for_impl
+  : _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>
+  {
+    // Inherit constructors.
+    using _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>::_generic_sender_wrapper;
+  };
+
+  template<typed_sender Sender>
+  struct sender_types_for_impl<Sender>
+  : _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>
+  {
+    // Publish the same error types as our parent, but add std::error_code to the set.
+    template<template<typename...> class Variant>
+    using error_types =
+        typename _type_appender<std::error_code>::merge<
+            typename sender_traits<Sender>::template error_types<_type_appender>
+        >::template type<Variant>;
+
+    // Inherit constructors.
+    using _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>::_generic_sender_wrapper;
+  };
+
+  template<receiver Receiver>
+  class receiver_impl
+  : public _generic_receiver_wrapper<Receiver, set_error_t>
+  {
+    public:
+    explicit receiver_impl(Receiver&& r)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : _generic_receiver_wrapper<Receiver, set_error_t>(std::move(r))
+    {}
+
+    template<typename Error>
+    friend auto tag_invoke([[maybe_unused]] set_error_t, receiver_impl&& self, Error&& err)
+    noexcept
+    -> void {
+      if constexpr(std::is_same_v<std::remove_cvref_t<Error>, std::error_code>) {
+        // We forward exception-pointers by unpacking them (aka rethrowing)
+        // and the trying to catch a system-error.
+        try {
+          std::rethrow_exception(std::forward<Error>(err));
+        } catch (const std::system_error& ex) {
+          // Grab the error code from the exception.
+          execution::set_error(std::move(self.r), ex.code());
+        } catch (...) {
+          // Any exception that isn't std::system_error, is passed through as-is.
+          execution::set_error(std::move(self.r), std::current_exception());
+        }
+      } else {
+        // Anything that isn't an exception pointer is passed through as-is.
+        execution::set_error(std::move(self.r), std::forward<Error>(err));
+      }
+    }
+  };
+
+  template<sender Sender>
+  class sender_impl
+  : public sender_types_for_impl<Sender>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    explicit sender_impl(Sender&& s)
+    noexcept(std::is_nothrow_move_constructible_v<Sender>)
+    : sender_types_for_impl<Sender>(std::move(s))
+    {}
+
+    explicit sender_impl(const Sender& s)
+    noexcept(std::is_nothrow_copy_constructible_v<Sender>)
+    : sender_types_for_impl<Sender>(s)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(noexcept(execution::connect(std::declval<Sender>(), receiver_impl<std::remove_cvref_t<Receiver>>(std::declval<Receiver>()))))
+    -> decltype(auto) {
+      return execution::connect(std::move(self.s), receiver_impl<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>>, OtherSender>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>> {
+      return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
+    }
+  };
+
+  template<sender S>
+  auto default_impl(S&& s) const
+  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<S>>, S>)
+  -> sender_impl<std::remove_cvref_t<S>> {
+    return sender_impl<std::remove_cvref_t<S>>(std::forward<S>(s));
+  }
+};
+inline constexpr system_error_to_error_code_t system_error_to_error_code{};
 
 
 } /* inline namespace extensions */
