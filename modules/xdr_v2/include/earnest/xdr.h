@@ -691,8 +691,8 @@ class operation_sequence<IsConst, std::tuple<>, std::tuple<>, std::tuple<>> {
     return std::move(*this).append_operation(std::forward<Op0>(op0)).append_operation(std::forward<Ops>(ops)...);
   }
 
-  template<typename Fn>
-  auto append_operation(pre_buffer_invocation<Fn>&& op) && {
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(pre_buffer_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
         IsConst,
         std::tuple<pre_buffer_invocation<Fn>>,
@@ -704,8 +704,8 @@ class operation_sequence<IsConst, std::tuple<>, std::tuple<>, std::tuple<>> {
         std::tuple<>());
   }
 
-  template<typename Fn>
-  auto append_operation(post_buffer_invocation<Fn>&& op) && {
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(post_buffer_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
         IsConst,
         std::tuple<>,
@@ -717,8 +717,8 @@ class operation_sequence<IsConst, std::tuple<>, std::tuple<>, std::tuple<>> {
         std::forward_as_tuple(std::move(op)));
   }
 
-  template<typename Fn>
-  auto append_operation(pre_invocation<Fn>&& op) && {
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(pre_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
         IsConst,
         std::tuple<pre_invocation<Fn>>,
@@ -730,8 +730,8 @@ class operation_sequence<IsConst, std::tuple<>, std::tuple<>, std::tuple<>> {
         std::tuple<>());
   }
 
-  template<typename Fn>
-  auto append_operation(post_invocation<Fn>&& op) && {
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(post_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
         IsConst,
         std::tuple<>,
@@ -945,8 +945,8 @@ class operation_sequence<
     return std::move(*this).append(std::forward<Op0>(op0)).append(std::forward<Ops>(ops)...);
   }
 
-  template<typename Fn>
-  auto append_operation(pre_buffer_invocation<Fn>&& op) && {
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(pre_buffer_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
         IsConst,
         std::tuple<PreInvocationOperations..., pre_buffer_invocation<Fn>>,
@@ -958,8 +958,8 @@ class operation_sequence<
         std::move(post_invocations));
   }
 
-  template<typename Fn>
-  auto append_operation(post_buffer_invocation<Fn>&& op) && {
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(post_buffer_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
         IsConst,
         std::tuple<PreInvocationOperations...>,
@@ -971,8 +971,8 @@ class operation_sequence<
         std::tuple_cat(std::move(post_invocations), std::forward_as_tuple(std::move(op))));
   }
 
-  template<typename Fn>
-  auto append_operation(pre_invocation<Fn>&& op) && {
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(pre_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
         IsConst,
         std::tuple<PreInvocationOperations..., pre_invocation<Fn>>,
@@ -984,8 +984,8 @@ class operation_sequence<
         std::move(post_invocations));
   }
 
-  template<typename Fn>
-  auto append_operation(post_invocation<Fn>&& op) && {
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(post_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
         IsConst,
         std::tuple<PreInvocationOperations...>,
@@ -1970,6 +1970,34 @@ struct manual_t {
   auto write(Fn&& fn) const {
     return operation_block<true>{}
         .append_sequence(manual_invocation(std::forward<Fn>(fn)));
+  }
+};
+
+
+// Add between 0 and 3 padding bytes.
+//
+// During reads, confirms the padding bytes are zeroed.
+struct padding_t {
+  private:
+  struct validate {
+    auto operator()(std::span<std::byte> buf) const {
+      if (std::any_of(buf.begin(), buf.end(), [](std::byte b) { return b != std::byte{0}; }))
+        throw xdr_error("non-zero padding");
+    }
+  };
+
+  public:
+  auto read(std::size_t len) const {
+    if (len > 3) throw std::logic_error("padding should be between zero and four (exclusive) bytes");
+    return operation_block<false>{}
+        .buffer(len, post_buffer_invocation<validate>(validate{}));
+  }
+
+  auto write(std::size_t len) const {
+    std::array<std::byte, 3> zeroes = { std::byte{0}, std::byte{0}, std::byte{0} };
+    if (len > zeroes.size()) throw std::logic_error("padding should be between zero and four (exclusive) bytes");
+    return operation_block<true>{}
+        .buffer(std::span<const std::byte>(zeroes.data(), len));
   }
 };
 
