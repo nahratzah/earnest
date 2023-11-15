@@ -63,6 +63,60 @@ class xdr_error
 
 
 template<typename T>
+concept with_buffer_shift = requires(T& v, std::size_t sz) {
+  { v.buffer_shift(sz) };
+};
+
+template<typename T>
+concept with_temporaries_shift = requires(T&& v) {
+  { std::move(v).template temporaries_shift<std::size_t(0)>() };
+};
+
+template<typename T>
+concept with_constexpr_extent = requires(T v) {
+  { std::remove_cvref_t<T>::extent } -> std::same_as<const std::size_t&>;
+  { std::bool_constant<(std::remove_cvref_t<T>::extent, true)>() } -> std::same_as<std::true_type>; // Confirm extent is constexpr.
+};
+
+template<typename T>
+concept buffer_operation =
+    with_buffer_shift<T> &&
+    with_temporaries_shift<T> &&
+    with_constexpr_extent<T> &&
+    // We require a get_buffer operation, which accepts at least one of
+    // `std::span<std::byte>' (when reading) or
+    // `std::span<const std::byte>' (when writing)
+    ( requires (T v, const std::span<std::byte> s) {
+        { v.get_buffer(s) } -> std::convertible_to<std::span<std::byte>>;
+      }
+      ||
+      requires (T v, const std::span<const std::byte> s) {
+        { v.get_buffer(s) } -> std::convertible_to<std::span<const std::byte>>;
+      });
+
+template<typename T>
+concept invocable_operation =
+    with_buffer_shift<T> &&
+    with_temporaries_shift<T>;
+template<typename T, typename State>
+concept invocable_operation_for_state =
+    invocable_operation<T> &&
+    std::invocable<T, State&>;
+
+template<typename T>
+concept operation_block_element =
+    with_buffer_shift<T> &&
+    with_temporaries_shift<T> &&
+    with_constexpr_extent<T> &&
+    requires (T v) {
+      { T::for_writing } -> std::same_as<const bool&>;
+      { T::for_reading } -> std::same_as<const bool&>;
+      { std::bool_constant<T::for_writing>() }; // Confirm for_writing is constexpr.
+      { std::bool_constant<T::for_reading>() }; // Confirm for_reading is constexpr.
+      { std::move(v).make_sender_chain() } -> execution::sender;
+    };
+
+template<typename T>
 concept read_operation =
     true; // XXX
 
@@ -88,7 +142,20 @@ namespace operation {
 
 template<bool, typename = std::tuple<>, typename = std::tuple<>, typename = std::tuple<>> class operation_sequence;
 
-template<bool IsConst, std::size_t Extent = 0, typename Temporaries = std::tuple<>, typename... Sequences>
+// Describe an operation-block.
+//
+// Operation-blocks contain sequences, describing how to decode/encode data.
+// The operation-block tracks:
+// - a shared buffer, for anything that gets encoded early.
+// - the type of temporaries (not instantiated), tracking what scratch-variables are required during the operation.
+//
+// Template parameters:
+// - IsConst: if `true', all buffer-references are constants, meaning the operation-block is for writing.
+//   Otherwise, the buffer-references are non-const, meaning the operation-block is for reading.
+// - Extent: the extent of the temporary buffer.
+// - Temporaries: a tuple of default-initialized types, that are used during the operation. Basically scratch-space.
+// - Sequences...: the actual steps, that are to be executed sequentially.
+template<bool IsConst, std::size_t Extent = 0, typename Temporaries = std::tuple<>, operation_block_element... Sequences>
 class operation_block;
 
 
@@ -151,7 +218,7 @@ class pre_buffer_invocation {
 
 template<typename Fn, std::size_t... TemporariesIndices>
 class post_buffer_invocation {
-  template<bool, std::size_t, typename, typename...> friend class operation_block;
+  template<bool, std::size_t, typename, operation_block_element...> friend class operation_block;
 
   public:
   explicit post_buffer_invocation(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
@@ -207,7 +274,7 @@ class pre_invocation {
   auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
 
   template<std::size_t N>
-  auto temporaries_shift() && -> pre_invocation&& {
+  auto temporaries_shift() && {
     return pre_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
   }
 
@@ -234,7 +301,7 @@ class post_invocation {
   auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
 
   template<std::size_t N>
-  auto temporaries_shift() && -> post_invocation&& {
+  auto temporaries_shift() && {
     return post_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
   }
 
@@ -504,6 +571,9 @@ template<>
 class temporary_buffer<true, std::dynamic_extent> {
   template<bool, std::size_t> friend class temporary_buffer;
 
+  public:
+  static inline constexpr std::size_t extent = std::dynamic_extent;
+
   private:
   explicit temporary_buffer(std::vector<std::byte> data)
   : data(std::move(data))
@@ -538,6 +608,9 @@ class temporary_buffer<true, std::dynamic_extent> {
 template<>
 class temporary_buffer<false, std::dynamic_extent> {
   template<bool, std::size_t> friend class temporary_buffer;
+
+  public:
+  static inline constexpr std::size_t extent = std::dynamic_extent;
 
   private:
   explicit temporary_buffer(std::size_t sz)
@@ -578,6 +651,8 @@ class temporary_buffer<true, Extent> {
   template<bool, std::size_t> friend class temporary_buffer;
 
   public:
+  static inline constexpr std::size_t extent = Extent;
+
   temporary_buffer() {}
 
   private:
@@ -627,6 +702,8 @@ class temporary_buffer<false, Extent> {
   template<bool, std::size_t> friend class temporary_buffer;
 
   public:
+  static inline constexpr std::size_t extent = Extent;
+
   temporary_buffer() = default;
 
   auto size() const noexcept -> std::size_t {
@@ -664,7 +741,7 @@ class operation_sequence<IsConst, std::tuple<>, std::tuple<>, std::tuple<>> {
   public:
   static inline constexpr bool for_writing = IsConst;
   static inline constexpr bool for_reading = !IsConst;
-  static inline constexpr std::size_t size = 0;
+  static inline constexpr std::size_t extent = 0;
 
   operation_sequence() = default;
   operation_sequence(operation_sequence&&) = default;
@@ -776,6 +853,9 @@ class operation_sequence<IsConst, std::tuple<>, std::tuple<>, std::tuple<>> {
   }
 };
 
+static_assert(operation_block_element<operation_sequence<true>>);
+static_assert(operation_block_element<operation_sequence<false>>);
+
 // Helper type, that takes zero or more buffers, and transforms it into a sender adapter.
 template<bool IsConst>
 struct make_read_write_op_ {
@@ -823,7 +903,7 @@ struct make_read_write_op_ {
   }
 };
 
-template<bool IsConst, typename... PreInvocationOperations, typename... BufferOperations, typename... PostInvocationOperations>
+template<bool IsConst, invocable_operation... PreInvocationOperations, buffer_operation... BufferOperations, invocable_operation... PostInvocationOperations>
 class operation_sequence<
     IsConst,
     std::tuple<PreInvocationOperations...>,
@@ -1088,6 +1168,10 @@ class manual_invocation {
   Fn fn;
 };
 
+// Confirm that manual operation is a block-element.
+// (We use a temporary lambda to complete the type, just for testing.)
+static_assert(operation_block_element<manual_invocation<decltype([](auto) { /* do nothing */ })>>);
+
 
 // Helper type to figure out what the last type in a tuple is.
 //
@@ -1106,7 +1190,7 @@ template<typename Tuple>
 using tuple_last_type_ = typename tuple_last_type__<Tuple>::type;
 
 
-template<typename... Sequences>
+template<operation_block_element... Sequences>
 class operation_sequence_tuple
 : public std::tuple<Sequences...>
 {
@@ -1223,11 +1307,15 @@ auto make_operation_block(
   return operation_block<IsConst, Extent, Temporaries, Sequences...>(std::move(tmpbuf), std::move(sequences));
 }
 
-template<bool IsConst, std::size_t Extent, typename Temporaries, typename... Sequences>
+template<bool IsConst, std::size_t Extent, typename Temporaries, operation_block_element... Sequences>
 class operation_block {
   static_assert(IsConst ? (Sequences::for_writing &&...) : (Sequences::for_reading &&...));
 
   public:
+  using temporaries = Temporaries;
+
+  // Figure out how many bytes we require to encode this block.
+  // We use std::dynamic_extent if the size is unknown at compile time.
   static inline constexpr std::size_t extent =
       ((Sequences::extent == std::dynamic_extent) ||...) ?
       std::dynamic_extent :
@@ -1324,14 +1412,6 @@ class operation_block {
         std::move(sequences).merge(std::move(shifted_other.sequence)));
   }
 
-  template<typename Special>
-  requires (std::remove_cvref_t<Special>::for_writing == IsConst)
-  auto add_special_sequence(Special&& special) {
-    return make_operation_block<Temporaries>(
-        std::move(tmpbuf),
-        std::move(sequences).append_operation(std::forward<Special>(special)));
-  }
-
   private:
   temporary_buffer<IsConst, Extent> tmpbuf;
   operation_sequence_tuple<Sequences...> sequences;
@@ -1340,6 +1420,9 @@ class operation_block {
 template<bool IsConst>
 class operation_block<IsConst, 0> {
   public:
+  using temporaries = std::tuple<>;
+
+  // We require exactly zero bytes to encode this block.
   static inline constexpr std::size_t extent = 0;
 
   operation_block() = default;
