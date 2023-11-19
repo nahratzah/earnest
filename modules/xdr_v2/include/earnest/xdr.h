@@ -40,6 +40,8 @@
 #include <ranges>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <system_error>
 #include <tuple>
 #include <type_traits>
@@ -196,6 +198,24 @@ noexcept
 -> std::array<std::byte, X + Y> {
   return array_cat_(std::make_index_sequence<X>(), x, std::make_index_sequence<Y>(), y);
 }
+
+
+struct io_barrier {
+  static inline constexpr std::size_t extent = 0;
+  static inline constexpr bool for_writing = true;
+  static inline constexpr bool for_reading = true;
+
+  auto buffer_shift([[maybe_unused]] std::size_t) noexcept {}
+
+  template<std::size_t N>
+  auto temporaries_shift() noexcept {}
+
+  template<bool IsConst>
+  auto make_sender_chain() {
+    return execution::noop();
+  }
+};
+static_assert(operation_block_element<io_barrier>);
 
 
 template<typename Fn, std::size_t... TemporariesIndices>
@@ -434,6 +454,40 @@ class span_reference {
   std::span<std::conditional_t<IsConst, const std::byte, std::byte>, Extent> data;
 };
 
+template<std::invocable Fn>
+class dynamic_span_reference {
+  private:
+  using span_type = std::remove_cvref_t<std::invoke_result_t<Fn>>;
+
+  public:
+  static inline constexpr std::size_t extent = span_type::extent;
+  static inline constexpr bool for_writing = true;
+  static inline constexpr bool for_reading = !std::is_const_v<typename span_type::element_type>;
+
+  explicit dynamic_span_reference(Fn&& fn)
+  : fn(std::move(fn))
+  {}
+
+  explicit dynamic_span_reference(const Fn& fn)
+  : fn(fn)
+  {}
+
+  template<typename Span>
+  auto get_buffer([[maybe_unused]] const Span& shared_buf) const {
+    return std::invoke(fn);
+  }
+
+  auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
+
+  template<std::size_t N>
+  auto temporaries_shift() && -> dynamic_span_reference&& {
+    return std::move(*this);
+  }
+
+  private:
+  Fn fn;
+};
+
 
 struct buffer_operation_appender_ {
   template<typename... T, typename Op>
@@ -468,8 +522,18 @@ struct buffer_operation_appender_ {
     return std::forward_as_tuple(std::move(s), std::forward<Op>(op));
   }
 
+  template<typename Fn, typename Op>
+  auto maybe_squash(dynamic_span_reference<Fn>&& s, Op&& op) const {
+    return std::forward_as_tuple(std::move(s), std::forward<Op>(op));
+  }
+
   template<bool IsConst, std::size_t Extent1, std::size_t Extent2>
   auto maybe_squash(temporary_buffer_reference<IsConst, Extent1>&& s, span_reference<IsConst, Extent2>&& op) const {
+    return std::forward_as_tuple(std::move(s), std::move(op));
+  }
+
+  template<bool IsConst, std::size_t Extent1, typename Fn>
+  auto maybe_squash(temporary_buffer_reference<IsConst, Extent1>&& s, dynamic_span_reference<Fn>&& op) const {
     return std::forward_as_tuple(std::move(s), std::move(op));
   }
 
@@ -772,6 +836,18 @@ class operation_sequence<std::tuple<>, std::tuple<>, std::tuple<>> {
         std::tuple<>());
   }
 
+  template<typename Fn>
+  auto append_operation(dynamic_span_reference<Fn>&& op) && {
+    using result_type = operation_sequence<
+        std::tuple<>,
+        std::tuple<dynamic_span_reference<Fn>>,
+        std::tuple<>>;
+    return result_type(
+        std::tuple<>(),
+        std::forward_as_tuple(std::move(op)),
+        std::tuple<>());
+  }
+
   template<typename OtherPreInvocationOperations, typename OtherBufferOperations, typename OtherPostInvocationOperations>
   auto merge(operation_sequence<OtherPreInvocationOperations, OtherBufferOperations, OtherPostInvocationOperations>&& other)
   -> operation_sequence<OtherPreInvocationOperations, OtherBufferOperations, OtherPostInvocationOperations>&& {
@@ -1044,6 +1120,18 @@ class operation_sequence<
         std::move(post_invocations));
   }
 
+  template<typename Fn>
+  auto append_operation(dynamic_span_reference<Fn>&& op) && {
+    using result_type = operation_sequence<
+        std::tuple<PreInvocationOperations...>,
+        decltype(buffer_operation_appender(std::move(buffers), std::move(op))),
+        std::tuple<PostInvocationOperations...>>;
+    return result_type(
+        std::move(pre_invocations),
+        buffer_operation_appender(std::move(buffers), std::move(op)),
+        std::move(post_invocations));
+  }
+
   template<typename OtherPreInvocationOperations, typename OtherBufferOperations, typename OtherPostInvocationOperations>
   auto merge(operation_sequence<OtherPreInvocationOperations, OtherBufferOperations, OtherPostInvocationOperations> other) {
     auto new_pre = std::tuple_cat(std::move(pre_invocations), std::move(other.pre_invocations));
@@ -1171,6 +1259,16 @@ class operation_sequence_tuple
     } else {
       return std::move(*this).append_sequence(operation_sequence<>{}.append_operation(std::forward<Op>(op)));
     }
+  }
+
+  auto append_sequence() && -> operation_sequence_tuple&& {
+    return std::move(*this);
+  }
+
+  template<typename Seq0, typename... Seqs>
+  requires (sizeof...(Seqs) > 0)
+  auto append_sequence(Seq0&& seq0, Seqs&&... seqs) && {
+    return std::move(*this).append_sequence(std::forward<Seq0>(seq0)).append_sequence(std::forward<Seqs>(seqs)...);
   }
 
   template<operation_block_element Seq>
@@ -1327,7 +1425,7 @@ class operation_block {
   auto append_sequence(Seq&& seq) && {
     return make_operation_block<IsConst>(
         std::move(tmpbuf),
-        std::move(sequences).merge(std::forward<Seq>(seq)));
+        std::move(sequences).append_sequence(std::forward<Seq>(seq)));
   }
 
   template<std::size_t N, typename... Op>
@@ -2176,27 +2274,36 @@ struct manual_t {
 //
 // During reads, confirms the padding bytes are zeroed.
 struct padding_t {
-  private:
-  struct validate {
-    auto operator()(std::span<std::byte> buf) const {
-      if (std::any_of(buf.begin(), buf.end(), [](std::byte b) { return b != std::byte{0}; }))
-        throw xdr_error("non-zero padding");
-    }
+  struct value {
+    std::uint8_t len = 0;
+    std::array<std::byte, 3> buf = { std::byte{0}, std::byte{0}, std::byte{0} };
   };
 
-  public:
-  auto read(std::size_t len) const {
-    if (len > 3) throw std::logic_error("padding should be between zero and four (exclusive) bytes");
+  auto read(value& v) const {
     return operation_block<false>{}
-        .buffer(len, post_buffer_invocation<validate>(validate{}));
+        .append(dynamic_span_reference(
+                [&v]() {
+                  if (v.len > v.buf.size()) throw std::logic_error("xdr: incorrect padding instruction");
+                  return std::span<std::byte>(v.buf.data(), v.buf.size()).subspan(0, v.len);
+                }))
+        .append(
+            post_invocation(
+                [&v]() {
+                  if (std::any_of(v.buf.begin(), v.buf.end(),
+                          [](std::byte b) {
+                            return b != std::byte{0};
+                          }))
+                    throw xdr_error("padding with non-zeroed bytes");
+                }));
   }
 
-  auto write(std::size_t len) const {
-    static constexpr std::array<std::byte, 3> zeroes{ std::byte{0}, std::byte{0}, std::byte{0} };
-    if (len > zeroes.size()) throw std::logic_error("padding should be between zero and four (exclusive) bytes");
+  auto write(value& v) const {
     return operation_block<true>{}
-        .append(
-            span_reference<true>(std::span<const std::byte, 3>(zeroes).subspan(len)));
+        .append(dynamic_span_reference(
+                [&v]() {
+                  if (v.len > v.buf.size()) throw std::logic_error("xdr: incorrect padding instruction");
+                  return std::span<const std::byte>(v.buf.data(), v.buf.size()).subspan(0, v.len);
+                }));
   }
 };
 
@@ -2284,7 +2391,7 @@ template<typename... TupleElementOfType>
 inline constexpr readwrite_temporary_variable_t<TupleElementOfType...> readwrite_temporary_variable{};
 
 
-// Read/write a constant vlaue.
+// Read/write a constant value.
 struct constant_t {
   template<typename T, typename Invocation, typename... ExtraArgs>
   auto read(T&& v, Invocation&& invocation, ExtraArgs&&... extra_args) const {
@@ -2313,6 +2420,113 @@ struct constant_t {
   }
 };
 
+// Read/write a 7-bit ascii string value.
+struct ascii_string_t {
+  template<typename Char, typename CharT, typename Alloc>
+  requires (sizeof(Char) == 1)
+  auto read(std::basic_string<Char, CharT, Alloc>& v, std::optional<std::size_t> max_size = std::nullopt) const {
+    using size_type = typename std::basic_string<Char, CharT, Alloc>::size_type;
+
+    auto apply_size_fn = [&v, max_size](auto sz, padding_t::value& padding) {
+      if (max_size.has_value() && sz > max_size)
+        throw xdr_error("string too large");
+      v.resize(sz);
+      padding.len = (std::size_t(0) - static_cast<std::size_t>(sz)) % 4u;
+    };
+
+    return unresolved_operation_block<false, std::tuple<size_type, padding_t::value>>{}
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, size_type>>.read(uint32_t{}))
+        .append_block(operation_block<false>{}
+            .append(post_invocation<decltype(apply_size_fn), 0, 1>(std::move(apply_size_fn)))
+            .append_sequence(io_barrier{})
+            .append(
+                dynamic_span_reference(
+                    [&v]() {
+                      return std::as_writable_bytes(std::span<Char>(v.data(), v.size()));
+                    }))
+            .append(
+                post_invocation(
+                    [&v]() {
+                      if (std::any_of(v.begin(), v.end(),
+                              [](const auto& c) {
+                                return c < Char(0) || c > Char(0x7f);
+                              }))
+                        throw xdr_error("character outside ascii range");
+                    })))
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<1, padding_t::value>>.read(padding_t{}));
+  }
+
+  template<typename Char, typename CharT>
+  requires (sizeof(Char) == 1)
+  auto write(const std::basic_string_view<Char, CharT>& v, std::optional<std::size_t> max_size = std::nullopt) const {
+    using size_type = typename std::basic_string_view<Char, CharT>::size_type;
+
+    auto set_size_fn = [&v, max_size](auto& sz, padding_t::value& padding) {
+      if (max_size.has_value() && v.size() > max_size.value())
+        throw xdr_error("string too large");
+      sz = v.size();
+      padding.len = (std::size_t(0) - static_cast<std::size_t>(v.size())) % 4u;
+    };
+
+    return unresolved_operation_block<true, std::tuple<size_type, padding_t::value>>{}
+        .append_block(operation_block<true>{}
+            .append(pre_invocation<decltype(set_size_fn), 0, 1>(std::move(set_size_fn)))
+            .append(
+                pre_invocation(
+                    [&v]() {
+                      if (std::any_of(v.begin(), v.end(),
+                              [](const auto& c) {
+                                return c < Char(0) || c > Char(0x7f);
+                              }))
+                        throw xdr_error("character outside ascii range");
+                    })))
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, size_type>>.write(uint32_t{}))
+        .append_block(operation_block<true>{}
+            .append(
+                dynamic_span_reference(
+                    [&v]() {
+                      return std::as_bytes(std::span<const Char>(v.data(), v.size()));
+                    })))
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<1, padding_t::value>>.write(padding_t{}));
+  }
+
+  template<typename Char, typename CharT, typename Alloc>
+  auto write(const std::basic_string<Char, CharT, Alloc>& v, std::optional<std::size_t> max_size = std::nullopt) const {
+    using size_type = typename std::basic_string<Char, CharT, Alloc>::size_type;
+
+    auto set_size_fn = [&v, max_size](auto& sz, padding_t::value& padding) {
+      if (max_size.has_value() && v.size() > max_size.value())
+        throw xdr_error("string too large");
+      sz = v.size();
+      padding.len = (std::size_t(0) - static_cast<std::size_t>(v.size())) % 4u;
+    };
+
+    return unresolved_operation_block<true, std::tuple<size_type, padding_t::value>>{}
+        .append_block(operation_block<true>{}
+            .append(pre_invocation<decltype(set_size_fn), 0, 1>(std::move(set_size_fn)))
+            .append(
+                pre_invocation(
+                    [&v]() {
+                      if (std::any_of(v.begin(), v.end(),
+                              [](const auto& c) {
+                                return c < Char(0) || c > Char(0x7f);
+                              }))
+                        throw xdr_error("character outside ascii range");
+                    })))
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, size_type>>.write(uint32_t{}))
+        .append_block(operation_block<true>{}
+            .append(
+                dynamic_span_reference(
+                    [&v]() {
+                      return std::as_bytes(std::span<const Char>(v.data(), v.size()));
+                    })))
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<1, padding_t::value>>.write(padding_t{}));
+  }
+
+  private:
+  padding_t padding;
+};
+
 
 } /* namespace operation */
 
@@ -2323,6 +2537,7 @@ inline constexpr operation::uint32_t uint32{};
 inline constexpr operation::uint64_t uint64{};
 inline constexpr operation::manual_t manual{};
 inline constexpr operation::constant_t constant{};
+inline constexpr operation::ascii_string_t ascii_string{};
 
 
 } /* namespace earnest::xdr */
