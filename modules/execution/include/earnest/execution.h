@@ -439,14 +439,12 @@ class sender_base {
 };
 
 // Figure out if a type has the value_types, error_types, and sends_done members.
-template<typename S, typename = void, typename = void, typename = void>
-inline constexpr bool _has_sender_traits_members_ = false;
 template<typename S>
-inline constexpr bool _has_sender_traits_members_<
-    S,
-    std::void_t<typename S::template value_types<std::tuple, std::variant>>,
-    std::void_t<typename S::template error_types<std::variant>>,
-    std::void_t<std::integral_constant<bool, S::sends_done>>> = true;
+concept _has_sender_traits_members_ = requires {
+  typename S::template value_types<std::tuple, std::variant>;
+  typename S::template error_types<std::variant>;
+  { std::bool_constant<S::sends_done>{} };
+};
 
 // Implementation of sender traits.
 //
@@ -625,12 +623,7 @@ template<typename T> concept sender =
       typename sender_traits<std::remove_cvref_t<T>>::__unspecialized; // exposition only
     };
 // A typed-sender, is a sender, for which the sender_traits are all populated.
-template<typename T> concept typed_sender =
-    sender<T> && requires {
-      typename sender_traits<std::remove_cvref_t<T>>::template value_types<std::tuple, std::variant>;
-      typename sender_traits<std::remove_cvref_t<T>>::template error_types<std::variant>;
-      typename std::integral_constant<bool, sender_traits<std::remove_cvref_t<T>>::sends_done>;
-    };
+template<typename T> concept typed_sender = sender<T> && _has_sender_traits_members_<std::remove_cvref_t<T>>;
 
 // An operation-state is something that can be started.
 template<typename O>
@@ -1010,11 +1003,6 @@ struct connect_t {
 
   template<typename... ArgTuples>
   struct accepts_values;
-  template<>
-  struct accepts_values<> {
-    template<receiver R>
-    static inline constexpr bool valid = true;
-  };
   template<typename... Args, typename... ArgTuples>
   struct accepts_values<std::tuple<Args...>, ArgTuples...> {
     template<receiver_of<Args...> R>
@@ -1034,6 +1022,12 @@ struct connect_t {
   }
 };
 inline constexpr connect_t connect{};
+
+template<>
+struct connect_t::accepts_values<> {
+  template<receiver R>
+  static inline constexpr bool valid = true;
+};
 
 
 // A sender-to checks if a sender (S) can be attached to a specific receiver (R).
@@ -2145,7 +2139,7 @@ class _just_sender {
 
   template<typename... T_>
   explicit constexpr _just_sender(T_&&... v)
-  noexcept(std::conjunction_v<std::is_nothrow_constructible<std::tuple<T...>>, T_...>)
+  noexcept(std::is_nothrow_constructible_v<std::tuple<T...>, T_...>)
   : values(std::forward<T_>(v)...)
   {}
 
@@ -3403,7 +3397,7 @@ struct _let_adapter_common_t {
     using collect_value_types_ = typename SenderTraits::template value_types<_type_appender, _type_appender>;
     // Collect all types into a `_type_appender<_type_appender<...>, _type_appender<...>, ...>'.
     // The outer _type_appender is the variant, the inner are the tuples.
-    using collect_value_types = all_senders::
+    using collect_value_types = typename all_senders::
         template transform<collect_value_types_>:: // Produces value-types, but they're all wrapped inside another _type_appender
         template type<_type_appender<>::merge>;    // Unpacks the outer _type_appender.
 
@@ -3413,7 +3407,7 @@ struct _let_adapter_common_t {
     using collect_error_types_ = typename SenderTraits::template error_types<_type_appender>;
     // Collect all the error types into a _type_appender.
     // Creates `_type_appender<ErrorType1, ErrorType2, ...>'.
-    using collect_error_types = all_senders::
+    using collect_error_types = typename all_senders::
         template transform<collect_error_types_>:: // Produces error-types, but they're all wrapped in another _type_appender
         template type<_type_appender<>::merge>;    // Unpacks the outer _type_appender.
 
@@ -4004,20 +3998,6 @@ struct ensure_started_t {
     private:
     [[no_unique_address]] Error error;
   };
-  // Outcome for the set-done signal.
-  template<>
-  class outcome<set_done_t> {
-    public:
-    template<template<typename...> class Tuple> using value_types = _type_appender<>;
-    using error_types = _type_appender<>;
-
-    explicit outcome() noexcept {}
-
-    template<receiver Receiver>
-    auto apply(Receiver&& r) noexcept -> void {
-      ::earnest::execution::set_done(std::forward<Receiver>(r));
-    }
-  };
 
   // Helper type, that creates an outcome for a given signal.
   template<typename Signal>
@@ -4091,7 +4071,7 @@ struct ensure_started_t {
   template<typename AllOutcomes, bool SendsDone>
   class outcome_handler {
     private:
-    using variant_type = _type_appender<std::monostate>::merge<AllOutcomes>::template type<std::variant>;
+    using variant_type = typename _type_appender<std::monostate>::merge<AllOutcomes>::template type<std::variant>;
     using next_receiver_fn = void(void*, outcome_handler&) noexcept;
 
     public:
@@ -4426,6 +4406,21 @@ struct ensure_started_t {
   }
 };
 inline constexpr ensure_started_t ensure_started{};
+
+// Outcome for the set-done signal.
+template<>
+class ensure_started_t::outcome<set_done_t> {
+  public:
+  template<template<typename...> class Tuple> using value_types = _type_appender<>;
+  using error_types = _type_appender<>;
+
+  explicit outcome() noexcept {}
+
+  template<receiver Receiver>
+  auto apply(Receiver&& r) noexcept -> void {
+    ::earnest::execution::set_done(std::forward<Receiver>(r));
+  }
+};
 
 
 // The when-all adapter takes multiple senders, and concatenates their values.
@@ -5019,7 +5014,7 @@ struct when_all_t {
 
   // If no senders are specified, we'll return the `just()' sender.
   // Having the zero-senders case covered, makes implementing the when_all operation a little easier.
-  constexpr auto default_impl() const noexcept -> typed_sender decltype(auto) {
+  auto default_impl() const noexcept -> typed_sender decltype(auto) {
     return just();
   }
 
@@ -5247,7 +5242,7 @@ struct lazy_split_t {
 
     public:
     // Create a type-appender containing all the required outcome-types.
-    using type = _type_appender<>::merge<                           // We want the union of
+    using type = typename _type_appender<>::merge<                  // We want the union of
             computed_value_types,                                   // all value-outcome types
             computed_error_types,                                   // all error-outcome types
             computed_done_types                                     // and the done-outcome type (if we need one)

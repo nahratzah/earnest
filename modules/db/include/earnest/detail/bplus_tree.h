@@ -6540,7 +6540,7 @@ struct formatter<earnest::detail::bplus_tree_page<RawDbType>>
     std::ostringstream s;
     s << std::boolalpha;
     pg.log_dump(s);
-    return format_to(ctx.out(), "{}", std::move(s).str());
+    return fmt::format_to(ctx.out(), "{}", std::move(s).str());
   }
 };
 
@@ -6564,24 +6564,24 @@ struct formatter<earnest::detail::bplus_tree_leaf_use_element>
 
     switch (elem) {
       default:
-        return format_to(ctx.out(), "earnest::detail::bplus_tree_leaf_use_element({})",
+        return fmt::format_to(ctx.out(), "earnest::detail::bplus_tree_leaf_use_element({})",
             static_cast<std::underlying_type_t<earnest::detail::bplus_tree_leaf_use_element>>(elem));
       case earnest::detail::bplus_tree_leaf_use_element::unused:
-        return format_to(ctx.out(), "unused"sv);
+        return fmt::format_to(ctx.out(), "unused"sv);
       case earnest::detail::bplus_tree_leaf_use_element::used:
-        return format_to(ctx.out(), "used"sv);
+        return fmt::format_to(ctx.out(), "used"sv);
       case earnest::detail::bplus_tree_leaf_use_element::before_first:
-        return format_to(ctx.out(), "before_first"sv);
+        return fmt::format_to(ctx.out(), "before_first"sv);
       case earnest::detail::bplus_tree_leaf_use_element::after_last:
-        return format_to(ctx.out(), "after_last"sv);
+        return fmt::format_to(ctx.out(), "after_last"sv);
       case earnest::detail::bplus_tree_leaf_use_element::ghost_create:
-        return format_to(ctx.out(), "ghost_create"sv);
+        return fmt::format_to(ctx.out(), "ghost_create"sv);
       case earnest::detail::bplus_tree_leaf_use_element::ghost_delete:
-        return format_to(ctx.out(), "ghost_delete"sv);
+        return fmt::format_to(ctx.out(), "ghost_delete"sv);
       case earnest::detail::bplus_tree_leaf_use_element::ghost_iterator_before:
-        return format_to(ctx.out(), "ghost_iterator_before"sv);
+        return fmt::format_to(ctx.out(), "ghost_iterator_before"sv);
       case earnest::detail::bplus_tree_leaf_use_element::ghost_iterator_after:
-        return format_to(ctx.out(), "ghost_iterator_after"sv);
+        return fmt::format_to(ctx.out(), "ghost_iterator_after"sv);
     }
   }
 };

@@ -52,7 +52,7 @@ struct formatter<earnest::db_address>
 : formatter<std::string>
 {
   auto format(const earnest::db_address& addr, format_context& ctx) -> decltype(ctx.out()) {
-    return format_to(ctx.out(), "{}@{}", addr.offset, addr.file);
+    return fmt::format_to(ctx.out(), "{}@{}", addr.offset, addr.file);
   }
 };
 

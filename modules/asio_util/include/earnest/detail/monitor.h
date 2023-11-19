@@ -400,7 +400,7 @@ struct formatter<earnest::detail::monitor_state::location>
 : formatter<std::string>
 {
   auto format(const earnest::detail::monitor_state::location& loc, format_context& ctx) -> decltype(ctx.out()) {
-    return format_to(ctx.out(), "{}:{}", loc.file, loc.line);
+    return fmt::format_to(ctx.out(), "{}:{}", loc.file, loc.line);
   }
 };
 

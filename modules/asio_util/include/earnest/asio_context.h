@@ -32,8 +32,10 @@ using asio_context_ptr = std::shared_ptr<asio_context>;
 class asio_context
 : public std::enable_shared_from_this<asio_context>
 {
-#if __cpp_lib_source_location < 201907L
   private:
+#if __cpp_lib_source_location >= 201907L
+  using source_location = std::source_location;
+#else
   struct source_location {
     constexpr source_location() noexcept = default;
 

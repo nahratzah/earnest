@@ -343,11 +343,11 @@ class in_place_stop_token {
   : cb_registry(cb_registry)
   {}
 
-  constexpr auto operator==(const in_place_stop_token& other) const noexcept -> bool {
+  auto operator==(const in_place_stop_token& other) const noexcept -> bool {
     return cb_registry == other.cb_registry;
   }
 
-  constexpr auto operator!=(const in_place_stop_token& other) const noexcept -> bool {
+  auto operator!=(const in_place_stop_token& other) const noexcept -> bool {
     return !(*this == other);
   }
 

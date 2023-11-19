@@ -86,7 +86,7 @@ struct formatter<earnest::file_id>
 : formatter<std::string>
 {
   auto format(const earnest::file_id& fid, format_context& ctx) -> decltype(ctx.out()) {
-    return format_to(ctx.out(), "{}/{}", fid.ns, fid.filename);
+    return fmt::format_to(ctx.out(), "{}/{}", fid.ns, fid.filename);
   }
 };
 

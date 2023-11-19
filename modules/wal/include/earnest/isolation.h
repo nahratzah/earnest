@@ -73,7 +73,7 @@ struct formatter<earnest::isolation>
     std::string_view isv;
     switch (i) {
       default: [[unlikely]]
-        return format_to(ctx.out(), "isolation:{}", static_cast<std::underlying_type_t<earnest::isolation>>(i));
+        return fmt::format_to(ctx.out(), "isolation:{}", static_cast<std::underlying_type_t<earnest::isolation>>(i));
       case earnest::isolation::read_commited:
         isv = "read-committed"sv;
         break;
@@ -84,7 +84,7 @@ struct formatter<earnest::isolation>
         isv = "serializable"sv;
         break;
     }
-    return format_to(ctx.out(), "{}", isv);
+    return fmt::format_to(ctx.out(), "{}", isv);
   }
 };
 

@@ -198,7 +198,7 @@ struct formatter<earnest::byte_span_printer>
   auto format(const earnest::byte_span_printer& p, format_context& ctx) -> decltype(ctx.out()) {
     std::ostringstream s;
     s << p;
-    return format_to(ctx.out(), "{}", std::move(s).str());
+    return fmt::format_to(ctx.out(), "{}", std::move(s).str());
   }
 };
 

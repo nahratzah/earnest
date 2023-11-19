@@ -198,7 +198,7 @@ struct formatter<earnest::tx_mode>
     std::string_view isv;
     switch (i) {
       default: [[unlikely]]
-        return format_to(ctx.out(), "tx-mode:0x{:x}", static_cast<std::underlying_type_t<earnest::tx_mode>>(i));
+        return fmt::format_to(ctx.out(), "tx-mode:0x{:x}", static_cast<std::underlying_type_t<earnest::tx_mode>>(i));
       case earnest::tx_mode::decline:
         isv = "tx-mode-decline"sv;
         break;
@@ -212,7 +212,7 @@ struct formatter<earnest::tx_mode>
         isv = "read-write"sv;
         break;
     }
-    return format_to(ctx.out(), "{}", isv);
+    return fmt::format_to(ctx.out(), "{}", isv);
   }
 };
 

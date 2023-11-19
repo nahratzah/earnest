@@ -451,7 +451,7 @@ struct ec_to_exception_t {
     // which we turn into std::system_error (so we add std::exception_ptr).
     template<template<typename...> class Variant>
     using error_types =
-        _type_appender<>::merge<
+        typename _type_appender<>::merge<
             _type_appender<std::exception_ptr>,    // We turn error_code into an exception, so we'll need to publish exception_ptr.
             typename sender_traits<Sender>::       // Take the sender traits
             template error_types<_type_appender>:: // and compute the collection of error types
@@ -637,9 +637,17 @@ struct lazy_read_some_at_ec_t {
 
   // Figure out if a given receiver has a scheduler.
   template<receiver, typename = void>
-  static inline constexpr bool has_scheduler = false;
+  struct has_scheduler_
+  : std::false_type
+  {};
   template<receiver T>
-  static inline constexpr bool has_scheduler<T, std::void_t<decltype(execution::get_scheduler(std::declval<const T&>()))>> = true;
+  struct has_scheduler_<T, std::void_t<decltype(execution::get_scheduler(std::declval<const T&>()))>>
+  : std::true_type
+  {};
+
+  // Figure out if a given receiver has a scheduler.
+  template<receiver Receiver>
+  static inline constexpr bool has_scheduler = has_scheduler_<Receiver>::value;
 
   class sender_impl {
     public:
@@ -901,9 +909,17 @@ struct lazy_read_some_ec_t {
 
   // Figure out if a given receiver has a scheduler.
   template<receiver, typename = void>
-  static inline constexpr bool has_scheduler = false;
+  struct has_scheduler_
+  : std::false_type
+  {};
   template<receiver T>
-  static inline constexpr bool has_scheduler<T, std::void_t<decltype(execution::get_scheduler(std::declval<const T&>()))>> = true;
+  struct has_scheduler_<T, std::void_t<decltype(execution::get_scheduler(std::declval<const T&>()))>>
+  : std::true_type
+  {};
+
+  // Figure out if a given receiver has a scheduler.
+  template<receiver Receiver>
+  static inline constexpr bool has_scheduler = has_scheduler_<Receiver>::value;
 
   class sender_impl {
     public:
@@ -1151,9 +1167,17 @@ struct lazy_write_some_at_ec_t {
 
   // Figure out if a given receiver has a scheduler.
   template<receiver, typename = void>
-  static inline constexpr bool has_scheduler = false;
+  struct has_scheduler_
+  : std::false_type
+  {};
   template<receiver T>
-  static inline constexpr bool has_scheduler<T, std::void_t<decltype(execution::get_scheduler(std::declval<const T&>()))>> = true;
+  struct has_scheduler_<T, std::void_t<decltype(execution::get_scheduler(std::declval<const T&>()))>>
+  : std::true_type
+  {};
+
+  // Figure out if a given receiver has a scheduler.
+  template<receiver Receiver>
+  static inline constexpr bool has_scheduler = has_scheduler_<Receiver>::value;
 
   class sender_impl {
     public:
@@ -1401,9 +1425,17 @@ struct lazy_write_some_ec_t {
 
   // Figure out if a given receiver has a scheduler.
   template<receiver, typename = void>
-  static inline constexpr bool has_scheduler = false;
+  struct has_scheduler_
+  : std::false_type
+  {};
   template<receiver T>
-  static inline constexpr bool has_scheduler<T, std::void_t<decltype(execution::get_scheduler(std::declval<const T&>()))>> = true;
+  struct has_scheduler_<T, std::void_t<decltype(execution::get_scheduler(std::declval<const T&>()))>>
+  : std::true_type
+  {};
+
+  // Figure out if a given receiver has a scheduler.
+  template<receiver Receiver>
+  static inline constexpr bool has_scheduler = has_scheduler_<Receiver>::value;
 
   class sender_impl {
     public:

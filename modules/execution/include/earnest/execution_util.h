@@ -121,10 +121,18 @@ struct lazy_repeat_t {
 
   // Determine if a receiver has an associated scheduler.
   template<receiver Receiver, typename = void>
-  static inline constexpr bool has_scheduler = false;
+  struct has_scheduler_
+  : std::false_type
+  {};
   // Specialization of has_scheduler, for receivers which have a scheduler.
   template<receiver Receiver>
-  static inline constexpr bool has_scheduler<Receiver, std::void_t<decltype(::earnest::execution::get_scheduler(std::declval<Receiver>()))>> = true;
+  struct has_scheduler_<Receiver, std::void_t<decltype(::earnest::execution::get_scheduler(std::declval<Receiver>()))>>
+  : std::true_type
+  {};
+
+  // Determine if a receiver has an associated scheduler.
+  template<receiver Receiver>
+  static inline constexpr bool has_scheduler = has_scheduler_<Receiver>::value;
 
   // Operation-state, that's used for if we have a scheduler.
   //
@@ -270,8 +278,7 @@ struct lazy_repeat_t {
       nested_opstate(execution::connect(std::move(s), accepting_receiver(*this)))
     {}
 
-    // block copy/move operations, so we are pointer-safe.
-    opstate(opstate&&) = delete;
+    opstate(opstate&&) = default;
     opstate(const opstate&) = delete;
 
     friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> decltype(auto) {
