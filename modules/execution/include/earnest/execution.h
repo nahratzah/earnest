@@ -521,6 +521,28 @@ struct _sender_traits_<S,
 };
 
 
+struct operation_state_base_ {
+  protected:
+  operation_state_base_() = default;
+  operation_state_base_(const operation_state_base_&) = delete;
+  operation_state_base_& operator=(const operation_state_base_&) = delete;
+  operation_state_base_& operator=(operation_state_base_&&) = delete;
+  ~operation_state_base_() = default;
+
+#if __cpp_guaranteed_copy_elision >= 201606L && \
+    !(!defined(__clang__) && defined(__GNUC__)) // GCC requires a move-constructor. Don't know why.
+  operation_state_base_(operation_state_base_&&) noexcept = delete;
+#else
+  // We only allow copy-elision.
+  // But in order to permit copy-elision, we must pretend to have a move-constructor.
+  // But we don't actually want to allow move-construction, so we ensure moves will abort.
+  operation_state_base_(operation_state_base_&&) noexcept {
+    std::abort();
+  }
+#endif
+};
+
+
 // Start an operation_state.
 // An operation_state is an object that describes how to run an operation.
 //
@@ -531,6 +553,7 @@ struct start_t {
   noexcept
   -> tag_invoke_result_t<start_t, O> {
     static_assert(nothrow_tag_invocable<start_t, O>, "start should be a no-except invocation");
+    static_assert(std::is_base_of_v<operation_state_base_, std::remove_cvref_t<O>>); // XXX remove later
     return tag_invoke(*this, std::forward<O>(o));
   }
 };
@@ -601,7 +624,8 @@ inline constexpr set_done_t set_done{};
 
 
 // Constraints on a receiver.
-template<typename T, typename E = std::exception_ptr> concept receiver =
+template<typename T, typename E = std::exception_ptr>
+concept receiver =
     std::move_constructible<std::remove_cvref_t<T>> &&
     std::constructible_from<std::remove_cvref_t<T>, T> &&
     requires(std::remove_cvref_t<T>&& t, E&& e) {
@@ -613,17 +637,19 @@ template<typename T, typename... A>
 concept receiver_of =
     receiver<T> &&
     requires(std::remove_cvref_t<T>&& t, A&&... a) {
-      execution::set_value(std::move(t), std::forward<A>(a)...);
+      { execution::set_value(std::move(t), std::forward<A>(a)...) };
     };
 // A sender must have a sender_traits.
-template<typename T> concept sender =
+template<typename T>
+concept sender =
     std::move_constructible<std::remove_cvref_t<T>> &&
     // A sender must have a sender_traits.
     !requires {
       typename sender_traits<std::remove_cvref_t<T>>::__unspecialized; // exposition only
     };
 // A typed-sender, is a sender, for which the sender_traits are all populated.
-template<typename T> concept typed_sender = sender<T> && _has_sender_traits_members_<std::remove_cvref_t<T>>;
+template<typename T>
+concept typed_sender = sender<T> && _has_sender_traits_members_<std::remove_cvref_t<T>>;
 
 // An operation-state is something that can be started.
 template<typename O>
@@ -836,6 +862,14 @@ struct _generic_operand_base_t {
     static constexpr bool noexcept_ = noexcept(do_default_impl(std::declval<Tag>(), std::declval<Args>()...));
   };
 
+  // This is always true, and provides a no-except value.
+  // Used so that the no-except clause won't error out if there are no invocable constraints met.
+  struct not_invocable_
+  : std::true_type
+  {
+    static constexpr bool noexcept_ = true;
+  };
+
   public:
   // Implementation of `_generic_operand_base_t`.
   //
@@ -843,17 +877,17 @@ struct _generic_operand_base_t {
   // If none exist, the function will be hidden due to SFINAE.
   template<typename Tag, sender S, typename... Args>
   requires(
-      std::disjunction_v<
-          invocable_with_scheduler_<void(Tag, S, Args...)>,
-          invocable_without_scheduler_<void(Tag, S, Args...)>,
-          has_default_impl_<void(Tag, S, Args...)>>)
+      invocable_with_scheduler_<void(Tag, S, Args...)>::value ||
+      invocable_without_scheduler_<void(Tag, S, Args...)>::value ||
+      has_default_impl_<void(Tag, S, Args...)>::value)
   constexpr auto operator()(const Tag& t, S&& s, Args&&... args) const
   noexcept( // Each of the checks has a `noexcept_` constant, that says if the invocation is noexcept.
             // We use disjunction to select the first of the checks that passes, and use its `noexcept_`.
       std::disjunction<
           invocable_with_scheduler_<void(Tag, S, Args...)>,
           invocable_without_scheduler_<void(Tag, S, Args...)>,
-          has_default_impl_<void(Tag, S, Args...)>
+          has_default_impl_<void(Tag, S, Args...)>,
+          not_invocable_
       >::noexcept_)
   -> decltype(auto) {
     // I wanted to write `else { static_assert(false) }`,
@@ -997,16 +1031,15 @@ struct connect_t {
   template<typename... Error>
   struct accepts_errors {
     template<receiver R>
-    requires (receiver<R, Error> &&...)
-    static inline constexpr bool valid = true;
+    static inline constexpr bool valid = (receiver<R, Error> &&...);
   };
 
   template<typename... ArgTuples>
   struct accepts_values;
   template<typename... Args, typename... ArgTuples>
   struct accepts_values<std::tuple<Args...>, ArgTuples...> {
-    template<receiver_of<Args...> R>
-    static inline constexpr bool valid = accepts_values<ArgTuples...>::template valid<R>;
+    template<receiver R>
+    static inline constexpr bool valid = receiver_of<R, Args...> && accepts_values<ArgTuples...>::template valid<R>;
   };
 
   public:
@@ -1027,6 +1060,113 @@ template<>
 struct connect_t::accepts_values<> {
   template<receiver R>
   static inline constexpr bool valid = true;
+};
+
+
+// We block the move-operator for operation-state, relying on only copy-elision.
+//
+// We cannot use std::optional, because it requires a move-constructor for its emplace operation to work.
+// So instead, we'll use a dedicated optional.
+template<operation_state State>
+class optional_operation_state_ {
+  static_assert(!std::is_reference_v<State>);
+  static_assert(!std::is_const_v<State>);
+  static_assert(sizeof(State) != 0, "operation-state must be a complete type");
+
+  public:
+  using value_type = State;
+
+  optional_operation_state_() = default;
+
+  optional_operation_state_([[maybe_unused]] std::nullopt_t) noexcept
+  {}
+
+  template<typed_sender Sender, receiver Receiver>
+  explicit optional_operation_state_(Sender&& sender, Receiver&& receiver)
+  : optional_operation_state_()
+  {
+    emplace(std::forward<Sender>(sender), std::forward<Receiver>(receiver));
+  }
+
+  ~optional_operation_state_() {
+    reset();
+  }
+
+  // No copy/move operations: operation-state is not allowed to be moved (nor copied).
+  optional_operation_state_(const optional_operation_state_&) = delete;
+  optional_operation_state_(optional_operation_state_&&) = delete;
+  optional_operation_state_& operator=(const optional_operation_state_&) = delete;
+  optional_operation_state_& operator=(optional_operation_state_&&) = delete;
+
+  auto has_value() const noexcept -> bool {
+    return engaged_;
+  }
+
+  explicit operator bool() const noexcept {
+    return engaged_;
+  }
+
+  auto value() & -> value_type& {
+    if (!has_value()) throw std::bad_optional_access();
+    return *reinterpret_cast<value_type*>(&state_);
+  }
+
+  auto value() && -> value_type&& {
+    if (!has_value()) throw std::bad_optional_access();
+    return std::move(*reinterpret_cast<value_type*>(&state_));
+  }
+
+  auto value() const & -> const value_type& {
+    if (!has_value()) throw std::bad_optional_access();
+    return *reinterpret_cast<const value_type*>(&state_);
+  }
+
+  auto operator*() & -> value_type& {
+    assert(has_value());
+    return *reinterpret_cast<value_type*>(&state_);
+  }
+
+  auto operator*() && -> value_type&& {
+    assert(has_value());
+    return std::move(*reinterpret_cast<value_type*>(&state_));
+  }
+
+  auto operator*() const & -> const value_type& {
+    assert(has_value());
+    return *reinterpret_cast<const value_type*>(&state_);
+  }
+
+  auto operator->() -> value_type* {
+    assert(has_value());
+    return reinterpret_cast<value_type*>(&state_);
+  }
+
+  auto operator->() const -> const value_type* {
+    assert(has_value());
+    return reinterpret_cast<const value_type*>(&state_);
+  }
+
+  auto reset() noexcept -> void {
+    if (engaged_) {
+      reinterpret_cast<value_type*>(&state_)->~value_type();
+      engaged_ = false;
+    }
+  }
+
+  template<typed_sender Sender, receiver Receiver>
+  auto emplace(Sender&& sender, Receiver&& receiver) -> value_type& {
+    static_assert(sizeof(state_) >= sizeof(value_type));
+    assert(!engaged_);
+
+    ::new(static_cast<void*>(reinterpret_cast<value_type*>(&state_))) value_type(
+        execution::connect(std::forward<Sender>(sender), std::forward<Receiver>(receiver)));
+    engaged_ = true;
+    return *reinterpret_cast<value_type*>(&state_);
+  }
+
+  private:
+  std::aligned_storage_t<sizeof(value_type), alignof(value_type)> state_;
+  bool engaged_ = false;
 };
 
 
@@ -1373,8 +1513,10 @@ struct lazy_then_t {
 
     template<typename... Args>
     static constexpr auto noexcept_() noexcept -> bool {
-      if constexpr(std::is_void_v<std::invoke_result_t<Fn, Args...>>) {
-        return noexcept(std::invoke(std::declval<Fn&>(), std::declval<Args>()...)) &&
+      if constexpr(!std::is_invocable_v<Fn, Args...>) {
+        return false;
+      } else if constexpr(std::is_void_v<std::invoke_result_t<Fn, Args...>>) {
+        return noexcept(std::invoke(std::declval<Fn>(), std::declval<Args>()...)) &&
             noexcept(::earnest::execution::set_value(std::declval<Receiver>()));
       } else {
         return noexcept(::earnest::execution::set_value(
@@ -1384,6 +1526,7 @@ struct lazy_then_t {
     }
 
     template<typename... Args>
+    requires std::invocable<Fn, Args...>
     friend auto tag_invoke([[maybe_unused]] set_value_t, wrapped_receiver&& self, Args&&... args)
     noexcept(noexcept_<Args...>())
     -> decltype(auto) {
@@ -2076,25 +2219,11 @@ class _just_sender {
   //
   // Does the actual work of passing values to a receiver.
   template<typename Receiver>
-  struct operation_state {
+  struct operation_state
+  : public operation_state_base_
+  {
     public:
-    constexpr operation_state(const std::tuple<T...>& values, const Receiver& r)
-    noexcept(
-        std::is_nothrow_copy_constructible_v<std::tuple<T...>> &&
-        std::is_nothrow_copy_constructible_v<Receiver>)
-    : values(values),
-      r(r)
-    {}
-
-    constexpr operation_state(std::tuple<T...>&& values, const Receiver& r)
-    noexcept(
-        std::is_nothrow_move_constructible_v<std::tuple<T...>> &&
-        std::is_nothrow_copy_constructible_v<Receiver>)
-    : values(std::move(values)),
-      r(r)
-    {}
-
-    constexpr operation_state(const std::tuple<T...>& values, Receiver&& r)
+    operation_state(const std::tuple<T...>& values, Receiver&& r)
     noexcept(
         std::is_nothrow_copy_constructible_v<std::tuple<T...>> &&
         std::is_nothrow_move_constructible_v<Receiver>)
@@ -2102,7 +2231,7 @@ class _just_sender {
       r(std::move(r))
     {}
 
-    constexpr operation_state(std::tuple<T...>&& values, Receiver&& r)
+    operation_state(std::tuple<T...>&& values, Receiver&& r)
     noexcept(
         std::is_nothrow_move_constructible_v<std::tuple<T...>> &&
         std::is_nothrow_move_constructible_v<Receiver>)
@@ -2201,6 +2330,7 @@ struct into_variant_t {
     using result_type = typename sender_traits<Sender>::template value_types<std::tuple, std::variant>;
 
     template<typename... Args>
+    requires std::constructible_from<result_type, std::tuple<std::remove_cvref_t<Args>...>>
     constexpr auto operator()(Args&&... args)
     noexcept(noexcept(result_type(std::make_tuple(std::declval<Args>()...))))
     -> result_type {
@@ -2267,8 +2397,8 @@ struct start_detached_t {
   -> void {
     using op_state_type = std::remove_cvref_t<decltype(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver>()))>;
 
-    const auto state_ptr = std::make_shared<std::optional<op_state_type>>(std::nullopt);
-    state_ptr->emplace(::earnest::execution::connect(std::forward<Sender>(s), receiver(state_ptr)));
+    const auto state_ptr = std::make_shared<optional_operation_state_<op_state_type>>(std::nullopt);
+    state_ptr->emplace(std::forward<Sender>(s), receiver(state_ptr));
     ::earnest::execution::start(**state_ptr);
   }
 };
@@ -2323,7 +2453,9 @@ struct sync_wait_t {
     // Operation state holds on to a nested operation state.
     // Its start() operation will execute it in the execution-context.
     template<operation_state OpState>
-    class operation_state {
+    class operation_state
+    : public operation_state_base_
+    {
       public:
       template<sender Sender, receiver Receiver>
       explicit operation_state(execution_context& ex_ctx, Sender&& s, Receiver&& r)
@@ -2332,19 +2464,11 @@ struct sync_wait_t {
         op_state(execution::connect(std::forward<Sender>(s), std::forward<Receiver>(r)))
       {}
 
-      friend auto tag_invoke([[maybe_unused]] const start_t&, operation_state&& o) noexcept -> void {
+      friend auto tag_invoke([[maybe_unused]] start_t, operation_state& o) noexcept -> void {
         // XXX this can actually throw.
         o.ex_ctx.push(
-            [op_state=std::move(o.op_state)]() mutable noexcept {
-              start(op_state);
-            });
-      }
-
-      friend auto tag_invoke([[maybe_unused]] const start_t&, operation_state& o) noexcept -> void {
-        // XXX this can actually throw.
-        o.ex_ctx.push(
-            [op_state=std::move(o.op_state)]() mutable noexcept {
-              start(op_state);
+            [&o]() noexcept {
+              start(o.op_state);
             });
       }
 
@@ -2751,7 +2875,9 @@ struct lazy_schedule_from_t {
   };
 
   template<template<typename...> class SignalReceiverWrapper, scheduler Scheduler, receiver Receiver, typename... Args>
-  class op_state {
+  class op_state
+  : public operation_state_base_
+  {
     public:
     // Declare the operation-state type that this op_state will wrap.
     using op_state_type = decltype(
@@ -3245,7 +3371,7 @@ struct _let_adapter_common_t {
   requires (sizeof...(ValuesAndOpstates) > 0)
   class op_state {
     public:
-    constexpr op_state() noexcept = default;
+    op_state() noexcept = default;
 
     // Op-state aren't moveable.
     // But, if the operation hasn't been started, we'll hold a std::monostate.
@@ -4280,7 +4406,7 @@ struct ensure_started_t {
       try {
         assert(!nested_operation_state.has_value());
         receiver auto r = typename outcome_handler_type::receiver_impl(handler_ptr()); // Never throws
-        nested_operation_state.emplace(::earnest::execution::connect(std::forward<Sender>(s), std::move(r)));
+        nested_operation_state.emplace(std::forward<Sender>(s), std::move(r));
         ::earnest::execution::start(*nested_operation_state);
       } catch (...) {
         // The spec says we must pass on the exception to the next step in the chain,
@@ -4298,7 +4424,7 @@ struct ensure_started_t {
 
     private:
     outcome_handler_type handler;
-    std::optional<nested_operation_state_type> nested_operation_state;
+    optional_operation_state_<nested_operation_state_type> nested_operation_state;
   };
 
   // Create an operation state and handler.
@@ -4317,7 +4443,9 @@ struct ensure_started_t {
   // This operation state holds on to the outcome handler,
   // and will at some point, install the next_receiver.
   template<typename OutcomeHandlerType, receiver Receiver>
-  class opstate {
+  class opstate
+  : public operation_state_base_
+  {
     public:
     explicit opstate(std::shared_ptr<OutcomeHandlerType>&& outcome_handler, Receiver&& r)
     noexcept(std::is_nothrow_move_constructible_v<Receiver>)
@@ -4473,7 +4601,7 @@ struct when_all_t {
         noexcept(::earnest::execution::set_value(std::declval<Receiver>())))
     -> void {
       assert(!self.outcome->has_value());
-      self.outcome->emplace(std::forward<Args>(args)...);  // Save our value (may throw).
+      self.outcome->emplace(std::forward<Args>(args)...); // Save our value (may throw).
       ::earnest::execution::set_value(std::move(self.r)); // And invoke our wrapped sender (without arguments).
     }
 
@@ -4483,7 +4611,9 @@ struct when_all_t {
 
   // A local operation-state, that stores the value-signal of the Sender.
   template<typed_sender Sender, receiver_of<> Receiver, typename = void>
-  class local_opstate {
+  class local_opstate
+  : public operation_state_base_
+  {
     public:
     using tuple_type = typename sender_traits<Sender>::template value_types<std::tuple, std::type_identity_t>;
 
@@ -4543,6 +4673,7 @@ struct when_all_t {
       std::enable_if_t<std::is_same_v<
           std::variant<std::tuple<>>,
           typename sender_traits<Sender>::template value_types<std::tuple, std::variant>>>>
+  : public operation_state_base_
   {
     public:
     using tuple_type = std::tuple<>;
@@ -4896,7 +5027,8 @@ struct when_all_t {
 
   template<receiver Receiver, typed_sender... Sender>
   class opstate
-  : private basic_opstate_for_senders<Sender...>
+  : private basic_opstate_for_senders<Sender...>,
+    public operation_state_base_
   {
     template<bool, typename...> friend class basic_opstate;
 
@@ -5496,7 +5628,8 @@ struct lazy_split_t {
   // The operation state for successive operations.
   template<typed_sender Sender, receiver Receiver>
   class opstate
-  : private opstate_link
+  : private opstate_link,
+    public operation_state_base_
   {
     public:
     explicit opstate(std::shared_ptr<shared_opstate<Sender>>&& shared_state, Receiver&& r)
@@ -5630,7 +5763,9 @@ struct lazy_on_t {
   //
   // When this opstate is started, it'll run `start_detached(scheduler_sender)'.
   template<scheduler Scheduler, sender Sender, receiver Receiver>
-  class opstate {
+  class opstate
+  : public operation_state_base_
+  {
     private:
     template<receiver LocalReceiver>
     class scheduler_receiver

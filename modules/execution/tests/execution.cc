@@ -227,13 +227,10 @@ TEST(into_variant) {
   static_assert(!lazy_upon_error_traits::sends_done);
 
   const auto expected = std::variant<std::tuple<int, int>>(std::make_tuple(3, 4));
-  sync_wait(
+  auto [x] = sync_wait(
       just(3, 4)
-      | into_variant()
-      | then(
-          [expected](std::variant<std::tuple<int, int>> x) {
-            CHECK(expected == x);
-          }));
+      | into_variant()).value();
+  CHECK(expected == x);
 }
 
 TEST(transfer) {

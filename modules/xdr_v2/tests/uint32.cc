@@ -21,6 +21,19 @@ TEST(write_uint64) {
       result_64);
 }
 
+TEST(write_uint64_using_buffer_ref) {
+  std::uint64_t value_64 = 0x01020304u;
+  buffer buf;
+  static_assert(decltype(uint32.write(value_64))::extent == 4);
+  auto [result_64] = sync_wait(
+      just(std::ref(buf))
+      | uint32.write(value_64).sender_chain()).value();
+  CHECK_EQUAL(&buf, &result_64.get());
+  CHECK_EQUAL(
+      buffer({ 0x01, 0x02, 0x03, 0x04 }),
+      buf);
+}
+
 TEST(write_uint32) {
   std::uint32_t value_32 = 0x01020304u;
   static_assert(decltype(uint32.write(value_32))::extent == 4);

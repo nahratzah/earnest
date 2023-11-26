@@ -7,7 +7,6 @@
 #include <cstddef>
 #include <exception>
 #include <functional>
-#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -68,10 +67,10 @@ struct lazy_repeat_t {
     using scheduler_type = decltype(execution::get_scheduler(std::declval<const Receiver<values_container>&>()));
     using fn_sender_optional = std::invoke_result_t<Fn&, std::size_t, T&...>;
     using fn_sender = typename fn_sender_optional::value_type;
-    using opstate_type = decltype(
-        execution::connect(
-            execution::lazy_on(std::declval<scheduler_type>(), std::declval<fn_sender>()),
-            std::declval<Receiver<values_container>>()));
+    using opstate_type = std::remove_cvref_t<std::invoke_result_t<
+        connect_t,
+        decltype(execution::lazy_on(std::declval<scheduler_type>(), std::declval<fn_sender>())),
+        Receiver<values_container>>>;
 
     public:
     template<typename... T_>
@@ -92,10 +91,10 @@ struct lazy_repeat_t {
 
       auto receiver = Receiver<values_container>(parent_state, *this);
       auto scheduler = execution::get_scheduler(std::as_const(receiver));
-      return &state.emplace(
-          execution::connect(
-              execution::lazy_on(std::move(scheduler), *std::move(opt_fn_sender)),
-              Receiver<values_container>(parent_state, *this)));
+      auto ptr = &state.emplace(
+          execution::lazy_on(std::move(scheduler), *std::move(opt_fn_sender)),
+          Receiver<values_container>(parent_state, *this));
+      return ptr;
     }
 
     template<std::invocable<T&&...> Fn_>
@@ -105,7 +104,7 @@ struct lazy_repeat_t {
 
     private:
     std::tuple<T...> values;
-    std::optional<opstate_type> state;
+    optional_operation_state_<opstate_type> state;
   };
 
   template<typename Fn, template<typename> class Receiver>
@@ -139,7 +138,9 @@ struct lazy_repeat_t {
   // The operation-state grabs hold of the arguments, and then repeatedly enqueues
   // the operation returned by the function. (One at a time.)
   template<sender Sender, receiver Receiver, typename Fn>
-  class opstate {
+  class opstate
+  : public operation_state_base_
+  {
     private:
     // Local-receiver accepts the result of the fn-sender.
     // It wraps a receiver (the one we get from `start_detached')
@@ -166,27 +167,24 @@ struct lazy_repeat_t {
         }
       }
 
-      template<typename Tag, typename... Args,
-          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
-          typename = std::enable_if_t<!std::same_as<Tag, set_value_t>>>
+      template<typename Tag, typename... Args>
+      requires (_is_forwardable_receiver_tag<Tag> && !std::same_as<Tag, set_value_t>)
       friend auto tag_invoke([[maybe_unused]] Tag tag, const local_receiver& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, const Receiver&, Args...>)
       -> tag_invoke_result_t<Tag, const Receiver&, Args...> {
         return execution::tag_invoke(std::move(tag), std::as_const(self.state.r), std::forward<Args>(args)...);
       }
 
-      template<typename Tag, typename... Args,
-          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
-          typename = std::enable_if_t<!std::same_as<Tag, set_value_t>>>
+      template<typename Tag, typename... Args>
+      requires (_is_forwardable_receiver_tag<Tag> && !std::same_as<Tag, set_value_t>)
       friend auto tag_invoke([[maybe_unused]] Tag tag, local_receiver& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, Receiver&, Args...>)
       -> tag_invoke_result_t<Tag, Receiver&, Args...> {
         return execution::tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
       }
 
-      template<typename Tag, typename... Args,
-          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
-          typename = std::enable_if_t<!std::same_as<Tag, set_value_t>>>
+      template<typename Tag, typename... Args>
+      requires (_is_forwardable_receiver_tag<Tag> && !std::same_as<Tag, set_value_t>)
       friend auto tag_invoke([[maybe_unused]] Tag tag, local_receiver&& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, Receiver, Args...>)
       -> tag_invoke_result_t<Tag, Receiver, Args...> {
@@ -234,35 +232,32 @@ struct lazy_repeat_t {
 
       // Forward all other tags to the wrapped receiver.
       // This version accepts const-reference accepting_receiver.
-      template<typename Tag, typename... Args,
-          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
-          typename = std::enable_if_t<std::negation_v<std::is_same<set_value_t, Tag>>>>
+      template<typename Tag, typename... Args>
+      requires (_is_forwardable_receiver_tag<Tag> && !std::same_as<Tag, set_value_t>)
       friend auto tag_invoke(Tag tag, accepting_receiver& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, const Receiver&, Args...>)
       -> tag_invoke_result_t<Tag, const Receiver&, Args...> {
-        execution::tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
+        return execution::tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
       }
 
       // Forward all other tags to the wrapped receiver.
       // This version accepts non-const lvalue-reference accepting_receiver.
-      template<typename Tag, typename... Args,
-          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
-          typename = std::enable_if_t<std::negation_v<std::is_same<set_value_t, Tag>>>>
+      template<typename Tag, typename... Args>
+      requires (_is_forwardable_receiver_tag<Tag> && !std::same_as<Tag, set_value_t>)
       friend auto tag_invoke(Tag tag, accepting_receiver& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, Receiver&, Args...>)
       -> tag_invoke_result_t<Tag, Receiver&, Args...> {
-        execution::tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
+        return execution::tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
       }
 
       // Forward all other tags to the wrapped receiver.
       // This version accepts rvalue-reference accepting_receiver.
-      template<typename Tag, typename... Args,
-          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
-          typename = std::enable_if_t<std::negation_v<std::is_same<set_value_t, Tag>>>>
+      template<typename Tag, typename... Args>
+      requires (_is_forwardable_receiver_tag<Tag> && !std::same_as<Tag, set_value_t>)
       friend auto tag_invoke(Tag tag, accepting_receiver&& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, Receiver&&, Args...>)
       -> tag_invoke_result_t<Tag, Receiver&&, Args...> {
-        execution::tag_invoke(std::move(tag), std::move(self.state.r), std::forward<Args>(args)...);
+        return execution::tag_invoke(std::move(tag), std::move(self.state.r), std::forward<Args>(args)...);
       }
 
       private:
@@ -289,12 +284,14 @@ struct lazy_repeat_t {
     template<typename... Args>
     auto start(Args&&... args) -> void {
       using container_type = values_container<Fn, local_receiver, std::remove_cvref_t<Args>...>;
+      assert(std::holds_alternative<std::monostate>(values));
       container_type& container = values.template emplace<container_type>(std::forward<Args>(args)...);
       apply(container);
     }
 
     template<typename ValuesContainer>
     auto apply(ValuesContainer& container) -> void {
+      assert(std::holds_alternative<ValuesContainer>(values));
       auto repeated_opstate_ptr = container.build_opstate(fn, idx++, *this);
       if (repeated_opstate_ptr == nullptr) {
         std::move(container).apply(
@@ -843,7 +840,7 @@ struct system_error_to_error_code_t {
     friend auto tag_invoke([[maybe_unused]] set_error_t, receiver_impl&& self, Error&& err)
     noexcept
     -> void {
-      if constexpr(std::is_same_v<std::remove_cvref_t<Error>, std::error_code>) {
+      if constexpr(std::is_same_v<std::remove_cvref_t<Error>, std::exception_ptr>) {
         // We forward exception-pointers by unpacking them (aka rethrowing)
         // and the trying to catch a system-error.
         try {

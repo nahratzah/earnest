@@ -877,13 +877,13 @@ struct make_read_write_op_ {
         // lazy_let_value will ensure the lifetime of `auto& st' is long enough for us to maintain a reference.
         [...buffer=std::forward<Buffer>(buffer)](auto& st) -> execution::typed_sender auto {
           if constexpr(for_writing) {
-            return execution::io::lazy_write_ec(st.fd, maybe_wrap_in_array_for_writing(buffer.get_buffer(st.shared_buf())...))
+            return execution::io::lazy_write_ec(std::ref(st.fd), maybe_wrap_in_array_for_writing(buffer.get_buffer(st.shared_buf())...))
             | execution::lazy_then(
                 [&st]([[maybe_unused]] std::size_t wlen) -> decltype(auto) {
                   return std::move(st);
                 });
           } else {
-            return execution::io::lazy_read_ec(st.fd, maybe_wrap_in_array_for_reading(buffer.get_buffer(st.shared_buf())...))
+            return execution::io::lazy_read_ec(std::ref(st.fd), maybe_wrap_in_array_for_reading(buffer.get_buffer(st.shared_buf())...))
             | execution::lazy_then(
                 [&st]([[maybe_unused]] std::size_t rlen) -> decltype(auto) {
                   return std::move(st);
@@ -955,7 +955,7 @@ class operation_sequence<
             return execution::noop();
           } else {
             return execution::lazy_then(
-                [...x=std::move(x)](auto&& st) mutable {
+                [...x=std::move(x)](auto st) mutable {
                   (std::invoke(std::move(x), st), ...);
                   return st;
                 });
@@ -2435,10 +2435,28 @@ struct constant_t {
   }
 };
 
+
+template<typename S, std::size_t ElementSize>
+concept string =
+    std::integral<typename std::remove_cvref_t<S>::value_type> &&
+    (sizeof(typename std::remove_cvref_t<S>::value_type) == ElementSize) &&
+    requires(S s) {
+      { s.data() } -> std::convertible_to<const typename std::remove_cvref_t<S>::value_type*>;
+      { s.size() } -> std::convertible_to<std::size_t>;
+    };
+
+template<typename S, std::size_t ElementSize>
+concept variable_string =
+    string<S, ElementSize> &&
+    requires(std::remove_cvref_t<S> s, std::size_t sz) {
+      { s.resize(sz) };
+    };
+
+
 // Read a byte string of fixed size.
 struct fixed_byte_string_t {
   private:
-  template<typename String>
+  template<string<1> String>
   static auto fix_padding_fn(const String& v) noexcept {
     return [&v](padding_t::value& padding) {
       padding.len = (std::size_t(0) - static_cast<std::size_t>(v.size())) % 4u;
@@ -2446,7 +2464,7 @@ struct fixed_byte_string_t {
   }
 
   public:
-  template<typename String>
+  template<string<1> String>
   requires (sizeof(typename String::value_type) == 1)
   auto read(String& v) const {
     using value_type = typename std::remove_cvref_t<String>::value_type;
@@ -2462,7 +2480,7 @@ struct fixed_byte_string_t {
         .append_block(readwrite_temporary_variable<tuple_element_of_type<0, padding_t::value>>.read(padding_t{}));
   }
 
-  template<typename String>
+  template<string<1> String>
   requires (sizeof(typename String::value_type) == 1)
   auto write(const String& v) const {
     using value_type = typename std::remove_cvref_t<String>::value_type;
@@ -2481,7 +2499,7 @@ struct fixed_byte_string_t {
 
 // Read a byte string of variable size.
 struct byte_string_t {
-  template<typename String>
+  template<variable_string<1> String>
   requires (sizeof(typename String::value_type) == 1)
   auto read(String& v, std::optional<std::size_t> max_size = std::nullopt) const {
     using size_type = typename String::size_type;
@@ -2500,7 +2518,7 @@ struct byte_string_t {
         .merge(fixed_byte_string_t{}.read(v));
   }
 
-  template<typename String>
+  template<string<1> String>
   requires (sizeof(typename String::value_type) == 1)
   auto write(const String& v, std::optional<std::size_t> max_size = std::nullopt) const {
     using size_type = typename String::size_type;
@@ -2520,8 +2538,44 @@ struct byte_string_t {
 };
 
 // Read/write a 7-bit ascii string value.
+struct fixed_ascii_string_t {
+  template<string<1> String>
+  requires (sizeof(typename String::value_type) == 1)
+  auto read(String& v) const {
+    return fixed_byte_string_t{}.read(v)
+        .append_block(operation_block<false>{}
+            .append(
+                post_invocation(
+                    [&v]() {
+                      if (std::any_of(v.begin(), v.end(),
+                              [](const auto& c) {
+                                return c < typename String::value_type(0) || c > typename String::value_type(0x7f);
+                              }))
+                        throw xdr_error("character outside ascii range");
+                    })));
+  }
+
+  template<string<1> String>
+  requires (sizeof(typename String::value_type) == 1)
+  auto write(const String& v) const {
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .append(
+                pre_invocation(
+                    [&v]() {
+                      if (std::any_of(v.begin(), v.end(),
+                              [](const auto& c) {
+                                return c < typename String::value_type(0) || c > typename String::value_type(0x7f);
+                              }))
+                        throw xdr_error("character outside ascii range");
+                    })))
+        .merge(fixed_byte_string_t{}.write(v));
+  }
+};
+
+// Read/write a 7-bit ascii string value.
 struct ascii_string_t {
-  template<typename String>
+  template<variable_string<1> String>
   requires (sizeof(typename String::value_type) == 1)
   auto read(String& v, std::optional<std::size_t> max_size = std::nullopt) const {
     return byte_string_t{}.read(v, max_size)
@@ -2537,7 +2591,7 @@ struct ascii_string_t {
                     })));
   }
 
-  template<typename String>
+  template<string<1> String>
   requires (sizeof(typename String::value_type) == 1)
   auto write(const String& v, std::optional<std::size_t> max_size = std::nullopt) const {
     return unresolved_operation_block<true, std::tuple<>>{}
@@ -2556,16 +2610,211 @@ struct ascii_string_t {
 };
 
 
+// Read/write a collection of fixed size.
+struct fixed_collection_t {
+  template<typename Collection, typename Invocation>
+  auto read(Collection& collection, Invocation invocation) const {
+    return manual_t{}.read(
+        [&collection, invocation=std::move(invocation)](auto& fd) {
+          using std::begin;
+          using std::end;
+          using execution::just;
+          using execution::then;
+          using execution::lazy_then;
+          using execution::repeat;
+
+          auto factory = [invocation=std::move(invocation)](auto fd, auto& iter) {
+            return just(std::move(fd))
+            | invocation.read(*iter).sender_chain()
+            | lazy_then(
+                [&iter]([[maybe_unused]] auto post_invocation_fd) {
+                  ++iter;
+                });
+          };
+
+          return just(std::move(fd), begin(collection), end(collection))
+          | repeat(
+              [factory]([[maybe_unused]] std::size_t idx, auto& fd, auto& iter, auto& end) {
+                using result_type = decltype(factory(std::ref(fd), iter));
+                if (iter != end)
+                  return std::make_optional(factory(std::ref(fd), iter));
+                else
+                  return std::optional<result_type>{};
+              })
+          | then(
+              []<typename FD>(FD&& fd, [[maybe_unused]] auto&& iter, [[maybe_unused]] auto&& end) -> decltype(auto) {
+                return std::forward<FD>(fd);
+              });
+        });
+  }
+
+  template<typename Collection, typename Invocation>
+  auto write(const Collection& collection, Invocation invocation) const {
+    return manual_t{}.write(
+        [&collection, invocation=std::move(invocation)]<typename FD>(FD&& fd) {
+          using std::begin;
+          using std::end;
+          using execution::just;
+          using execution::then;
+          using execution::repeat;
+
+          auto factory = [invocation=std::move(invocation)](FD& fd, auto& iter) {
+            return just(std::move(fd))
+            | invocation.write(*iter).sender_chain()
+            | then(
+                [&fd, &iter](auto post_invocation_fd) {
+                  fd = std::move(post_invocation_fd);
+                  ++iter;
+                });
+          };
+
+          return just(std::forward<FD>(fd), begin(collection), end(collection))
+          | repeat(
+              [factory]([[maybe_unused]] std::size_t, FD& fd, auto& iter, auto& end) {
+                using result_type = decltype(factory(fd, iter));
+                if (iter != end)
+                  return std::make_optional(factory(fd, iter));
+                else
+                  return std::optional<result_type>{};
+              })
+          | then(
+              [](auto fd, [[maybe_unused]] auto&& iter, [[maybe_unused]] auto&& end) {
+                return fd;
+              });
+        });
+  }
+};
+
+
+// Read/write a collection of arbitrary size.
+struct collection_t {
+  template<typename Collection, typename Invocation>
+  requires requires(Collection collection, std::size_t sz) {
+    { collection.resize(sz) };
+  }
+  auto read(Collection& collection, Invocation invocation, std::optional<std::size_t> max_size = std::nullopt) const {
+    using size_type = typename Collection::size_type;
+
+    auto apply_size_fn = [&collection, max_size](auto sz) {
+      if (max_size.has_value() && sz > max_size)
+        throw xdr_error("collection too large");
+      collection.resize(sz);
+    };
+
+    return unresolved_operation_block<false, std::tuple<size_type>>{}
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, size_type>>.read(uint32_t{}))
+        .append_block(operation_block<false>{}
+            .append(post_invocation<decltype(apply_size_fn), 0>(std::move(apply_size_fn)))
+            .append_sequence(io_barrier{}))
+        .append_block(fixed_collection_t{}.read(collection, std::move(invocation)));
+  }
+
+  // When we cannot resize the collection,
+  // we'll need to read elements one-at-a-time and insert them.
+  template<typename Collection, typename Invocation>
+  requires (!requires(Collection collection, std::size_t sz) {
+        { collection.resize(sz) };
+      })
+  auto read(Collection& collection, Invocation invocation, std::optional<std::size_t> max_size = std::nullopt) const {
+    using size_type = typename Collection::size_type;
+    using value_type = typename Collection::value_type;
+
+    auto apply_size_fn = [&collection, max_size](auto sz) {
+      if (max_size.has_value() && sz > max_size)
+        throw xdr_error("collection too large");
+      collection.clear();
+    };
+
+    auto reader = [&collection, invocation=std::move(invocation)]<typename FD>(FD&& fd, size_type sz) {
+      using std::begin;
+      using std::end;
+      using execution::just;
+      using execution::then;
+      using execution::repeat;
+
+      auto factory = [&collection, invocation=std::move(invocation)](FD& fd) {
+        auto inserter = [&collection](value_type& value) {
+          collection.insert(collection.end(), std::move(value));
+        };
+
+        auto read_1 = unresolved_operation_block<false, std::tuple<value_type>>{}
+            .append_block(
+                readwrite_temporary_variable<tuple_element_of_type<0, value_type>>
+                    .read(invocation))
+            .append_block(operation_block<false>{}
+                .append(post_invocation<decltype(inserter), 0>(inserter)));
+
+        return just(std::move(fd))
+        | std::move(read_1).sender_chain()
+        | then(
+            [&fd](auto post_invocation_fd) {
+              fd = std::move(post_invocation_fd);
+            });
+      };
+
+      return just(std::forward<FD>(fd), sz)
+      | repeat(
+          [factory]([[maybe_unused]] std::size_t idx, FD& fd, size_type sz) {
+            using result_type = decltype(factory(fd));
+            if (idx != sz)
+              return std::make_optional(factory(fd));
+            else
+              return std::optional<result_type>{};
+          })
+      | then(
+          [&collection](auto fd, size_type sz) {
+            // Confirm the collection actually is the intended size.
+            // We only expect this to cause a mismatch, if the collection is a set or map (etc)
+            // and there were duplicate elements.
+            if (collection.size() != sz)
+              throw xdr_error("reading N items did not result in collection of N items");
+
+            return fd;
+          });
+    };
+
+    return unresolved_operation_block<false, std::tuple<size_type>>{}
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, size_type>>.read(uint32_t{}))
+        .append_block(operation_block<false>{}
+            .append(post_invocation<decltype(apply_size_fn), 0>(std::move(apply_size_fn)))
+            .append_sequence(io_barrier{}))
+            .append_sequence(manual_invocation<decltype(reader), 0>(std::move(reader)));
+  }
+
+  template<typename Collection, typename Invocation>
+  auto write(const Collection& collection, Invocation invocation, std::optional<std::size_t> max_size = std::nullopt) const {
+    using size_type = typename Collection::size_type;
+
+    auto set_size_fn = [&collection, max_size](auto& sz) {
+      if (max_size.has_value() && collection.size() > max_size.value())
+        throw xdr_error("collection too large");
+      sz = collection.size();
+    };
+
+    return unresolved_operation_block<true, std::tuple<size_type>>{}
+        .append_block(operation_block<true>{}
+            .append(pre_invocation<decltype(set_size_fn), 0>(std::move(set_size_fn))))
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, size_type>>.write(uint32_t{}))
+        .merge(fixed_collection_t{}.write(collection, std::move(invocation), max_size));
+  }
+};
+
+
 } /* namespace operation */
 
 
-inline constexpr operation::uint8_t  uint8{};
-inline constexpr operation::uint16_t uint16{};
-inline constexpr operation::uint32_t uint32{};
-inline constexpr operation::uint64_t uint64{};
-inline constexpr operation::manual_t manual{};
-inline constexpr operation::constant_t constant{};
-inline constexpr operation::ascii_string_t ascii_string{};
+inline constexpr operation::uint8_t              uint8{};
+inline constexpr operation::uint16_t             uint16{};
+inline constexpr operation::uint32_t             uint32{};
+inline constexpr operation::uint64_t             uint64{};
+inline constexpr operation::manual_t             manual{};
+inline constexpr operation::constant_t           constant{};
+inline constexpr operation::fixed_byte_string_t  fixed_byte_string{};
+inline constexpr operation::byte_string_t        byte_string{};
+inline constexpr operation::fixed_ascii_string_t fixed_ascii_string{};
+inline constexpr operation::ascii_string_t       ascii_string{};
+inline constexpr operation::fixed_collection_t   fixed_collection{};
+inline constexpr operation::collection_t         collection{};
 
 
 } /* namespace earnest::xdr */

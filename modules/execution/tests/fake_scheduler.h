@@ -7,7 +7,14 @@ using namespace earnest::execution;
 template<bool is_noexcept>
 struct fake_scheduler {
   template<typename Receiver>
-  struct op_state {
+  struct op_state
+  : public operation_state_base_
+  {
+    explicit op_state(fake_scheduler sch, Receiver&& rcv)
+    : sch(std::move(sch)),
+      rcv(std::move(rcv))
+    {}
+
     friend auto tag_invoke([[maybe_unused]] start_t, op_state& self) noexcept -> void {
       if (self.sch.start_mark != nullptr) *self.sch.start_mark = true;
 
@@ -33,7 +40,7 @@ struct fake_scheduler {
 
     template<typename Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& receiver) noexcept(is_noexcept) -> op_state<std::remove_cvref_t<Receiver>> {
-      return {std::move(self.sch), std::forward<Receiver>(receiver)};
+      return op_state<std::remove_cvref_t<Receiver>>(std::move(self.sch), std::forward<Receiver>(receiver));
     }
 
     friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_value_t>, const sender_impl& self) noexcept -> fake_scheduler {

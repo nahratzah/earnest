@@ -308,6 +308,8 @@ struct readwrite_state_offset_<false> {
 // A readwrite_state.
 //
 // We use this during reads and writes, to ensure we write the minimum-requested bytes.
+//
+// Note: FD may be a reference (this is in fact very likely).
 template<typename FD, bool ForReading, bool Vectored, bool EnableOffset>
 class readwrite_state_
 : public readwrite_state_offset_<EnableOffset>,
@@ -347,6 +349,9 @@ class readwrite_state_
     if (this->minbytes > this->size())
       throw std::logic_error("buffer is too short for requested minimum read/write");
   }
+
+  readwrite_state_(const readwrite_state_& other) = delete;
+  readwrite_state_(readwrite_state_&& other) = default;
 
   auto make_updater() & {
     return [this](std::size_t rlen) {
@@ -541,7 +546,9 @@ struct lazy_read_some_at_ec_t {
 
   private:
   template<receiver_of<std::size_t> Receiver>
-  class opstate {
+  class opstate
+  : public operation_state_base_
+  {
     public:
     explicit opstate(Receiver&& r, int fd, offset_type offset, std::span<std::byte> buf)
     noexcept(std::is_nothrow_move_constructible_v<Receiver>)
@@ -584,7 +591,9 @@ struct lazy_read_some_at_ec_t {
   };
 
   template<receiver_of<std::size_t> Receiver>
-  class vectored_opstate {
+  class vectored_opstate
+  : public operation_state_base_
+  {
     public:
     template<mutable_buffer_sequence Buffers>
     explicit vectored_opstate(Receiver&& r, int fd, offset_type offset, Buffers&& buf)
@@ -817,7 +826,9 @@ struct lazy_read_some_ec_t {
 
   private:
   template<receiver_of<std::size_t> Receiver>
-  class opstate {
+  class opstate
+  : public operation_state_base_
+  {
     public:
     explicit opstate(Receiver&& r, int fd, std::span<std::byte> buf)
     noexcept(std::is_nothrow_move_constructible_v<Receiver>)
@@ -858,7 +869,9 @@ struct lazy_read_some_ec_t {
   };
 
   template<receiver_of<std::size_t> Receiver>
-  class vectored_opstate {
+  class vectored_opstate
+  : public operation_state_base_
+  {
     public:
     template<mutable_buffer_sequence Buffers>
     explicit vectored_opstate(Receiver&& r, int fd, Buffers&& buf)
@@ -1083,7 +1096,9 @@ struct lazy_write_some_at_ec_t {
 
   private:
   template<receiver_of<std::size_t> Receiver>
-  class opstate {
+  class opstate
+  : public operation_state_base_
+  {
     public:
     explicit opstate(Receiver&& r, int fd, offset_type offset, std::span<const std::byte> buf)
     noexcept(std::is_nothrow_move_constructible_v<Receiver>)
@@ -1120,7 +1135,9 @@ struct lazy_write_some_at_ec_t {
   };
 
   template<receiver_of<std::size_t> Receiver>
-  class vectored_opstate {
+  class vectored_opstate
+  : public operation_state_base_
+  {
     public:
     template<const_buffer_sequence Buffers>
     explicit vectored_opstate(Receiver&& r, int fd, offset_type offset, Buffers&& buf)
@@ -1345,7 +1362,9 @@ struct lazy_write_some_ec_t {
 
   private:
   template<receiver_of<std::size_t> Receiver>
-  class opstate {
+  class opstate
+  : public operation_state_base_
+  {
     public:
     explicit opstate(Receiver&& r, int fd, std::span<const std::byte> buf)
     noexcept(std::is_nothrow_move_constructible_v<Receiver>)
@@ -1380,7 +1399,9 @@ struct lazy_write_some_ec_t {
   };
 
   template<receiver_of<std::size_t> Receiver>
-  class vectored_opstate {
+  class vectored_opstate
+  : public operation_state_base_
+  {
     public:
     template<const_buffer_sequence Buffers>
     explicit vectored_opstate(Receiver&& r, int fd, Buffers&& buf)
@@ -2360,7 +2381,9 @@ struct lazy_truncate_ec_t {
 
   private:
   template<receiver_of<> Receiver>
-  class opstate {
+  class opstate
+  : public operation_state_base_
+  {
     public:
     explicit opstate(int fd, offset_type len, Receiver&& r)
     noexcept(std::is_nothrow_move_constructible_v<Receiver>)

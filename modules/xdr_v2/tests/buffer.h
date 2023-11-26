@@ -16,6 +16,8 @@ class buffer {
   // Prohibit copying.
   buffer(const buffer&) = delete;
   buffer(buffer&&) = default;
+  buffer& operator=(const buffer&) = delete;
+  buffer& operator=(buffer&&) = default;
 
   auto operator==(const buffer& y) const noexcept -> bool;
   auto operator!=(const buffer& y) const noexcept -> bool { return !(*this == y); }
@@ -39,6 +41,30 @@ class buffer {
     | earnest::execution::lazy_then(
         [&self, buf]() {
           if (self.data.empty() && buf.size() != 0)
+            throw std::system_error(std::error_code(::earnest::execution::io::errc::eof));
+
+          const auto count = std::min(self.data.size(), buf.size());
+          std::copy_n(self.data.begin(), count, buf.begin());
+          self.data.erase(self.data.begin(), self.data.begin() + count);
+          return count;
+        })
+    | earnest::execution::system_error_to_error_code();
+  }
+
+  friend auto tag_invoke([[maybe_unused]] earnest::execution::io::lazy_write_ec_t, buffer& self, std::span<const std::byte> buf, [[maybe_unused]] std::optional<std::size_t> minbytes) {
+    return earnest::execution::just()
+    | earnest::execution::lazy_then(
+        [&self, buf, minbytes]() {
+          self.data.insert(self.data.end(), buf.begin(), buf.end());
+          return buf.size();
+        });
+  }
+
+  friend auto tag_invoke([[maybe_unused]] earnest::execution::io::lazy_read_ec_t, buffer& self, std::span<std::byte> buf, std::optional<std::size_t> minbytes) {
+    return earnest::execution::just()
+    | earnest::execution::lazy_then(
+        [&self, buf, minbytes=minbytes.value_or(buf.size())]() {
+          if (self.data.size() < minbytes)
             throw std::system_error(std::error_code(::earnest::execution::io::errc::eof));
 
           const auto count = std::min(self.data.size(), buf.size());
