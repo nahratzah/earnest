@@ -988,23 +988,23 @@ class operation_sequence<
 
   template<typename Temporaries>
   auto resolve(Temporaries& temporaries) && {
-    auto shifted_pre_invocations = std::apply(
+    auto resolved_pre_invocations = std::apply(
         [&temporaries](auto&&... x) {
           return std::make_tuple(std::move(x).resolve(temporaries)...);
         },
         std::move(pre_invocations));
-    auto shifted_buffers = std::apply(
+    auto resolved_buffers = std::apply(
         [&temporaries](auto&&... x) {
           return std::make_tuple(std::move(x).resolve(temporaries)...);
         },
         std::move(buffers));
-    auto shifted_post_invocations = std::apply(
+    auto resolved_post_invocations = std::apply(
         [&temporaries](auto&&... x) {
           return std::make_tuple(std::move(x).resolve(temporaries)...);
         },
         std::move(post_invocations));
-    return operation_sequence<decltype(shifted_pre_invocations), decltype(shifted_buffers), decltype(shifted_post_invocations)>(
-        std::move(shifted_pre_invocations), std::move(shifted_buffers), std::move(shifted_post_invocations));
+    return operation_sequence<decltype(resolved_pre_invocations), decltype(resolved_buffers), decltype(resolved_post_invocations)>(
+        std::move(resolved_pre_invocations), std::move(resolved_buffers), std::move(resolved_post_invocations));
   }
 
   auto buffer_shift(std::size_t increase) -> void {
@@ -1547,6 +1547,18 @@ class operation_block<IsConst, 0> {
 template<bool IsConst, typename Temporaries, unresolved_operation_block_element<Temporaries>... Elements>
 class unresolved_operation_block;
 
+template<typename T>
+struct is_unresolved_operation_block_ : std::false_type {};
+template<bool IsConst, typename Temporaries, typename... Elements>
+struct is_unresolved_operation_block_<unresolved_operation_block<IsConst, Temporaries, Elements...>> : std::true_type {};
+template<typename T>
+constexpr bool is_unresolved_operation_block = is_unresolved_operation_block_<std::remove_cvref_t<T>>::value;
+
+template<typename T>
+struct unresolved_operation_block_is_const_;
+template<bool IsConst, typename Temporaries, typename... Elements>
+struct unresolved_operation_block_is_const_<unresolved_operation_block<IsConst, Temporaries, Elements...>> : std::bool_constant<IsConst> {};
+
 template<bool IsConst, typename... Temporaries, typename... Elements>
 class unresolved_operation_block<IsConst, std::tuple<Temporaries...>, Elements...> {
   template<bool, typename OtherTemporaries, unresolved_operation_block_element<OtherTemporaries>...>
@@ -1611,8 +1623,9 @@ class unresolved_operation_block<IsConst, std::tuple<Temporaries...>, Elements..
                 std::move(other.elements))));
   }
 
-  template<typename Block>
+  template<unresolved_operation_block_element<std::tuple<Temporaries...>> Block>
   auto append_block(Block&& block) && {
+    static_assert(!is_unresolved_operation_block<Block>);
     return std::move(*this).append_block_(std::forward<Block>(block), std::index_sequence_for<Elements...>());
   }
 
@@ -1624,8 +1637,10 @@ class unresolved_operation_block<IsConst, std::tuple<Temporaries...>, Elements..
 
   template<std::size_t Idx0, std::size_t... Idx, typename OperationBlock>
   auto resolve_([[maybe_unused]] std::index_sequence<Idx0, Idx...>, OperationBlock&& op_block, temporaries& t) && {
-    auto next_block = std::get<Idx0>(std::move(elements))
-        .template resolve(t);
+    auto next_block = std::get<Idx0>(std::move(elements)).resolve(t);
+    if constexpr(is_unresolved_operation_block<decltype(next_block)>) {
+      static_assert(std::is_void_v<std::tuple_element_t<Idx0, std::tuple<Elements...>>>);
+    }
     return std::move(*this).resolve_(
         std::index_sequence<Idx...>(),
         std::move(op_block).merge(std::move(next_block)),
@@ -1641,7 +1656,58 @@ class unresolved_operation_block<IsConst, std::tuple<Temporaries...>, Elements..
 };
 
 
-struct uint8_t {
+template<typename Op, typename... Options>
+class operation_with_options {
+  public:
+  template<typename Op_, typename... Options_>
+  constexpr operation_with_options(Op_&& op, Options_&&... options)
+  : op(std::forward<Op_>(op)),
+    options(std::forward<Options_>(options)...)
+  {}
+
+  template<typename T>
+  auto read(T& v) const {
+    return std::apply(
+        [&v, this](auto&... options) {
+          return this->op.read(v, options...);
+        },
+        options);
+  }
+
+  template<typename T>
+  auto write(T& v) const {
+    return std::apply(
+        [&v, this](auto&... options) {
+          return this->op.write(v, options...);
+        },
+        options);
+  }
+
+  private:
+  Op op;
+  std::tuple<Options...> options;
+};
+
+template<typename Op, typename... Options>
+operation_with_options(Op&& op, Options&&... options) -> operation_with_options<std::remove_cvref_t<Op>, std::remove_cvref_t<Options>...>;
+
+
+template<typename Derived>
+struct basic_operation {
+  constexpr auto operator()() const {
+    return Derived{};
+  }
+
+  template<typename... Options>
+  constexpr auto operator()(Options&&... options) const {
+    return operation_with_options(static_cast<const Derived&>(*this), std::forward<Options>(options)...);
+  }
+};
+
+
+struct uint8_t
+: basic_operation<uint8_t>
+{
   template<std::unsigned_integral T>
   auto read(T& v) const {
     return operation_block<false>{}
@@ -1727,7 +1793,9 @@ struct uint8_t {
 };
 
 
-struct uint16_t {
+struct uint16_t
+: basic_operation<uint16_t>
+{
   template<std::unsigned_integral T>
   auto read(T& v) const {
     return operation_block<false>{}
@@ -1812,7 +1880,9 @@ struct uint16_t {
 };
 
 
-struct uint32_t {
+struct uint32_t
+: basic_operation<uint32_t>
+{
   template<std::unsigned_integral T>
   requires (sizeof(T) == 4)
   auto read(T& v) const {
@@ -2022,7 +2092,9 @@ struct uint32_t {
 };
 
 
-struct uint64_t {
+struct uint64_t
+: basic_operation<uint64_t>
+{
   template<std::unsigned_integral T>
   requires (sizeof(T) == 8)
   auto read(T& v) const {
@@ -2270,7 +2342,9 @@ struct uint64_t {
 // returns a typed-sender, that returns a file-descriptor.
 // It doesn't have to be the same file-descriptor: it's fine if it's
 // a different one, or even changes type.
-struct manual_t {
+struct manual_t
+: basic_operation<manual_t>
+{
   template<typename Fn>
   auto read(Fn&& fn) const {
     return operation_block<false>{}
@@ -2288,7 +2362,9 @@ struct manual_t {
 // Add between 0 and 3 padding bytes.
 //
 // During reads, confirms the padding bytes are zeroed.
-struct padding_t {
+struct padding_t
+: basic_operation<padding_t>
+{
   struct value {
     std::uint8_t len = 0;
     std::array<std::byte, 3> buf = { std::byte{0}, std::byte{0}, std::byte{0} };
@@ -2363,7 +2439,7 @@ class unresolved_operation<Fn, tuple_element_of_type<Idx, T>...> {
 
   template<typename Temporaries>
   auto resolve(Temporaries& temporaries) && {
-    return std::invoke(std::move(fn), tuple_element_of_type<Idx, T>::get(temporaries)...);
+    return maybe_insulate_(std::invoke(std::move(fn), tuple_element_of_type<Idx, T>::get(temporaries)...));
   }
 
   template<std::size_t N>
@@ -2372,66 +2448,124 @@ class unresolved_operation<Fn, tuple_element_of_type<Idx, T>...> {
   }
 
   private:
+  // When this operation is resolved, all temporaries have already been declared (and bound).
+  // So if the `op' requires its own temporaries (aka, it's an unresolved operation),
+  // then it needs to be insulated:
+  // its operation needs to be run separately from the containing operation.
+  template<typename Op>
+  static auto maybe_insulate_(Op&& op) {
+    if constexpr(!is_unresolved_operation_block<Op>) {
+      return std::forward<Op>(op);
+    } else if constexpr(std::tuple_size_v<typename std::remove_cvref_t<Op>::temporaries> == 0) {
+      // If the unresolved-operation doesn't use temporaries, it's always embeddable,
+      // and we need no insulation.
+      std::tuple<> no_temporaries;
+      return std::move(op).resolve(no_temporaries);
+    } else {
+      constexpr bool is_const = unresolved_operation_block_is_const_<std::remove_cvref_t<Op>>::value;
+      return operation_block<is_const>{}
+          .append_sequence(
+              manual_invocation(
+                  [op=std::forward<Op>(op)](auto& fd) mutable {
+                    return execution::just(std::move(fd))
+                    | std::move(op).sender_chain();
+                  }));
+    }
+  }
+
   Fn fn;
 };
 
 
 // Read/write a temporary variable.
-template<typename... TupleElementOfType>
+template<typename TupleElementOfType>
 struct readwrite_temporary_variable_t;
 
-template<std::size_t... Idx, typename... T>
-struct readwrite_temporary_variable_t<tuple_element_of_type<Idx, T>...> {
-  template<typename Invocation, typename... ExtraArgs>
-  auto read(Invocation&& invocation, ExtraArgs&&... extra_args) const {
-    auto fn = [invocation=std::forward<Invocation>(invocation), ...extra_args=std::forward<ExtraArgs>(extra_args)](auto&... temporary) mutable {
-      static_assert(sizeof...(temporary) == sizeof...(Idx));
-      return std::move(invocation).read(temporary..., std::move(extra_args)...);
-    };
+template<std::size_t Idx, typename T>
+struct readwrite_temporary_variable_t<tuple_element_of_type<Idx, T>> {
+  private:
+  template<typename Invocation>
+  requires requires(Invocation&& invocation, T& v) {
+    { std::move(invocation).read(v) };
+    { std::move(invocation).write(v) };
+  }
+  struct bound {
+    explicit constexpr bound(const Invocation& invocation)
+    : invocation(invocation)
+    {}
 
-    return unresolved_operation<decltype(fn), tuple_element_of_type<Idx, T>...>(std::move(fn));
+    explicit constexpr bound(Invocation&& invocation)
+    : invocation(std::move(invocation))
+    {}
+
+    auto read() const {
+      return readwrite_temporary_variable_t{}.read(invocation);
+    }
+
+    auto write() const {
+      return readwrite_temporary_variable_t{}.write(invocation);
+    }
+
+    private:
+    [[no_unique_address]] Invocation invocation;
+  };
+
+  public:
+  template<typename Invocation>
+  constexpr auto operator()(Invocation&& invocation) const {
+    return bound<std::remove_cvref_t<Invocation>>(std::forward<Invocation>(invocation));
   }
 
-  template<typename Invocation, typename... ExtraArgs>
-  auto write(Invocation&& invocation, ExtraArgs&&... extra_args) const {
-    auto fn = [invocation=std::forward<Invocation>(invocation), ...extra_args=std::forward<ExtraArgs>(extra_args)](auto&... temporary) mutable {
-      static_assert(sizeof...(temporary) == sizeof...(Idx));
-      return std::move(invocation).write(temporary..., std::move(extra_args)...);
+  template<typename Invocation>
+  requires requires(Invocation&& invocation, T& v) {
+    { std::move(invocation).read(v) };
+  }
+  auto read(Invocation&& invocation) const {
+    auto fn = [invocation=std::forward<Invocation>(invocation)](auto& temporary) mutable {
+      return std::move(invocation).read(temporary);
     };
 
-    return unresolved_operation<decltype(fn), tuple_element_of_type<Idx, T>...>(std::move(fn));
+    return unresolved_operation<decltype(fn), tuple_element_of_type<Idx, T>>(std::move(fn));
+  }
+
+  template<typename Invocation>
+  requires requires(Invocation&& invocation, T& v) {
+    { std::move(invocation).write(v) };
+  }
+  auto write(Invocation&& invocation) const {
+    auto fn = [invocation=std::forward<Invocation>(invocation)](auto& temporary) mutable {
+      return std::move(invocation).write(temporary);
+    };
+
+    return unresolved_operation<decltype(fn), tuple_element_of_type<Idx, T>>(std::move(fn));
   }
 };
-template<typename... TupleElementOfType>
-inline constexpr readwrite_temporary_variable_t<TupleElementOfType...> readwrite_temporary_variable{};
+template<typename TupleElementOfType>
+inline constexpr readwrite_temporary_variable_t<TupleElementOfType> readwrite_temporary_variable{};
 
 
 // Read/write a constant value.
 struct constant_t {
-  template<typename T, typename Invocation, typename... ExtraArgs>
-  auto read(T&& v, Invocation&& invocation, ExtraArgs&&... extra_args) const {
+  template<typename T, typename Invocation>
+  auto read(T&& v, Invocation&& invocation) const {
     auto confirmation_fn = [expected=std::forward<T>(v)](std::remove_cvref_t<T>& decoded) {
       if (decoded != expected) throw xdr_error("mismatched constant");
     };
 
     return unresolved_operation_block<false, std::tuple<T>>{}
-        .append_block(
-            readwrite_temporary_variable<tuple_element_of_type<0, std::remove_cvref_t<T>>>
-                .read(std::forward<Invocation>(invocation), std::forward<ExtraArgs>(extra_args)...))
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::remove_cvref_t<T>>>(std::forward<Invocation>(invocation)).read())
         .append_block(operation_block<false>{}.append(post_invocation<decltype(confirmation_fn), 0>(std::move(confirmation_fn))));
   }
 
-  template<typename T, typename Invocation, typename... ExtraArgs>
-  auto write(T&& v, Invocation&& invocation, ExtraArgs&&... extra_args) const {
+  template<typename T, typename Invocation>
+  auto write(T&& v, Invocation&& invocation) const {
     auto initialize_fn = [initial_value=std::forward<T>(v)](std::remove_cvref_t<T>& to_be_encoded) mutable {
       to_be_encoded = std::move(initial_value);
     };
 
     return unresolved_operation_block<true, std::tuple<T>>{}
         .append_block(operation_block<true>{}.append(pre_invocation<decltype(initialize_fn), 0>(std::move(initialize_fn))))
-        .append_block(
-            readwrite_temporary_variable<tuple_element_of_type<0, std::remove_cvref_t<T>>>
-                .write(std::forward<Invocation>(invocation), std::forward<ExtraArgs>(extra_args)...));
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::remove_cvref_t<T>>>(std::forward<Invocation>(invocation)).write());
   }
 };
 
@@ -2454,7 +2588,9 @@ concept variable_string =
 
 
 // Read a byte string of fixed size.
-struct fixed_byte_string_t {
+struct fixed_byte_string_t
+: basic_operation<fixed_byte_string_t>
+{
   private:
   template<string<1> String>
   static auto fix_padding_fn(const String& v) noexcept {
@@ -2498,7 +2634,9 @@ struct fixed_byte_string_t {
 };
 
 // Read a byte string of variable size.
-struct byte_string_t {
+struct byte_string_t
+: basic_operation<byte_string_t>
+{
   template<variable_string<1> String>
   requires (sizeof(typename String::value_type) == 1)
   auto read(String& v, std::optional<std::size_t> max_size = std::nullopt) const {
@@ -2538,7 +2676,9 @@ struct byte_string_t {
 };
 
 // Read/write a 7-bit ascii string value.
-struct fixed_ascii_string_t {
+struct fixed_ascii_string_t
+: basic_operation<fixed_ascii_string_t>
+{
   template<string<1> String>
   requires (sizeof(typename String::value_type) == 1)
   auto read(String& v) const {
@@ -2574,7 +2714,9 @@ struct fixed_ascii_string_t {
 };
 
 // Read/write a 7-bit ascii string value.
-struct ascii_string_t {
+struct ascii_string_t
+: basic_operation<ascii_string_t>
+{
   template<variable_string<1> String>
   requires (sizeof(typename String::value_type) == 1)
   auto read(String& v, std::optional<std::size_t> max_size = std::nullopt) const {
@@ -2611,7 +2753,9 @@ struct ascii_string_t {
 
 
 // Read/write a collection of fixed size.
-struct fixed_collection_t {
+struct fixed_collection_t
+: basic_operation<fixed_collection_t>
+{
   template<typename Collection, typename Invocation>
   auto read(Collection& collection, Invocation invocation) const {
     return manual_t{}.read(
@@ -2687,7 +2831,9 @@ struct fixed_collection_t {
 
 
 // Read/write a collection of arbitrary size.
-struct collection_t {
+struct collection_t
+: basic_operation<collection_t>
+{
   template<typename Collection, typename Invocation>
   requires requires(Collection collection, std::size_t sz) {
     { collection.resize(sz) };
@@ -2725,16 +2871,24 @@ struct collection_t {
       collection.clear();
     };
 
-    auto reader = [&collection, invocation=std::move(invocation)]<typename FD>(FD&& fd, size_type sz) {
+    auto confirm_size_fn = [&collection](auto sz) {
+      if (collection.size() != sz)
+        throw xdr_error("collection size mismatch after reading");
+    };
+
+    auto reader = [&collection, invocation=std::move(invocation)](auto& fd, size_type sz) {
       using std::begin;
       using std::end;
       using execution::just;
       using execution::then;
       using execution::repeat;
 
-      auto factory = [&collection, invocation=std::move(invocation)](FD& fd) {
+      auto factory = [&collection, invocation=std::move(invocation)](auto fd) {
         auto inserter = [&collection](value_type& value) {
-          collection.insert(collection.end(), std::move(value));
+          if constexpr(requires(Collection c, value_type v) { c.push_back(v); })
+            collection.push_back(std::move(value));
+          else
+            collection.insert(collection.end(), std::move(value));
         };
 
         auto read_1 = unresolved_operation_block<false, std::tuple<value_type>>{}
@@ -2745,19 +2899,15 @@ struct collection_t {
                 .append(post_invocation<decltype(inserter), 0>(inserter)));
 
         return just(std::move(fd))
-        | std::move(read_1).sender_chain()
-        | then(
-            [&fd](auto post_invocation_fd) {
-              fd = std::move(post_invocation_fd);
-            });
+        | std::move(read_1).sender_chain();
       };
 
-      return just(std::forward<FD>(fd), sz)
+      return just(std::move(fd), sz)
       | repeat(
-          [factory]([[maybe_unused]] std::size_t idx, FD& fd, size_type sz) {
-            using result_type = decltype(factory(fd));
+          [factory]([[maybe_unused]] std::size_t idx, auto& fd, size_type sz) {
+            using result_type = decltype(factory(std::ref(fd)));
             if (idx != sz)
-              return std::make_optional(factory(fd));
+              return std::make_optional(factory(std::ref(fd)));
             else
               return std::optional<result_type>{};
           })
@@ -2777,8 +2927,9 @@ struct collection_t {
         .append_block(readwrite_temporary_variable<tuple_element_of_type<0, size_type>>.read(uint32_t{}))
         .append_block(operation_block<false>{}
             .append(post_invocation<decltype(apply_size_fn), 0>(std::move(apply_size_fn)))
-            .append_sequence(io_barrier{}))
-            .append_sequence(manual_invocation<decltype(reader), 0>(std::move(reader)));
+            .append_sequence(io_barrier{})
+            .append_sequence(manual_invocation<decltype(reader), 0>(std::move(reader)))
+            .append(post_invocation<decltype(confirm_size_fn), 0>(std::move(confirm_size_fn))));
   }
 
   template<typename Collection, typename Invocation>
