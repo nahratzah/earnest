@@ -1161,12 +1161,12 @@ class operation_sequence<
 //
 // The function can do whatever it wants, as long as it produces a sender
 // of file-descriptor. Doesn't have to be the same file-descriptor.
-template<typename Fn, std::size_t... TemporariesIndices>
+template<typename Fn, std::size_t Extent = std::dynamic_extent, std::size_t... TemporariesIndices>
 class manual_invocation {
   public:
   static inline constexpr bool for_writing = true;
   static inline constexpr bool for_reading = true;
-  static inline constexpr std::size_t extent = std::dynamic_extent;
+  static inline constexpr std::size_t extent = Extent;
 
   explicit manual_invocation(Fn&& fn)
   : fn(std::move(fn))
@@ -2929,7 +2929,7 @@ struct collection_t
         .append_block(operation_block<false>{}
             .append(post_invocation<decltype(apply_size_fn), 0>(std::move(apply_size_fn)))
             .append_sequence(io_barrier{})
-            .append_sequence(manual_invocation<decltype(reader), 0>(std::move(reader)))
+            .append_sequence(manual_invocation<decltype(reader), std::dynamic_extent, 0>(std::move(reader)))
             .append(post_invocation<decltype(confirm_size_fn), 0>(std::move(confirm_size_fn))));
   }
 
@@ -2974,12 +2974,12 @@ struct optional_t
       switch (discriminant) {
         default:
           throw xdr_error("optional discriminant out-of-range");
-        case 0:
-          opt.reset();
-          return variant_type(reader_when_clear());
         case 1:
           opt.emplace();
-          return variant_type(reader_when_set());
+          return variant_type(std::in_place_index<0>, reader_when_set());
+        case 0:
+          opt.reset();
+          return variant_type(std::in_place_index<1>, reader_when_clear());
       }
     };
 
@@ -2988,11 +2988,13 @@ struct optional_t
       | let_variant(make_sender);
     };
 
+    constexpr std::size_t nested_extent = (decltype(invocation.read(std::declval<T&>()))::extent == 0 ? 0u : std::dynamic_extent);
+
     return unresolved_operation_block<false, std::tuple<std::uint32_t>>{}
         .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::uint32_t>>(uint32_t{}).read())
         .append_block(operation_block<false>{}
             .append_sequence(io_barrier{})
-            .append_sequence(manual_invocation<decltype(reader), 0>(std::move(reader))));
+            .append_sequence(manual_invocation<decltype(reader), nested_extent, 0>(std::move(reader))));
   }
 
   template<typename T, typename Invocation>
@@ -3014,10 +3016,10 @@ struct optional_t
       };
       using variant_type = std::variant<decltype(writer_when_set()), decltype(writer_when_clear())>;
 
-      if (discriminant)
-        return variant_type(writer_when_set());
+      if (discriminant != 0)
+        return variant_type(std::in_place_index<0>, writer_when_set());
       else
-        return variant_type(writer_when_clear());
+        return variant_type(std::in_place_index<1>, writer_when_clear());
     };
 
     auto writer = [&opt, make_sender](auto& fd, const std::uint32_t& discriminant) {
@@ -3025,12 +3027,29 @@ struct optional_t
       | let_variant(make_sender);
     };
 
+    constexpr std::size_t nested_extent = (decltype(invocation.write(std::declval<const T&>()))::extent == 0 ? 0u : std::dynamic_extent);
+
     return unresolved_operation_block<true, std::tuple<std::uint32_t>>{}
         .append_block(operation_block<true>{}
             .append(pre_invocation<decltype(set_discriminant), 0>(std::move(set_discriminant))))
         .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::uint32_t>>(uint32_t{}).write())
         .append_block(operation_block<true>{}
-            .append_sequence(manual_invocation<decltype(writer), 0>(std::move(writer))));
+            .append_sequence(manual_invocation<decltype(writer), nested_extent, 0>(std::move(writer))));
+  }
+};
+
+// Skip reading/writing.
+struct skip_t
+: basic_operation<skip_t>
+{
+  template<typename T>
+  auto read([[maybe_unused]] T& v) const noexcept {
+    return unresolved_operation_block<false, std::tuple<>>{};
+  }
+
+  template<typename T>
+  auto write([[maybe_unused]] const T& v) const noexcept {
+    return unresolved_operation_block<true, std::tuple<>>{};
   }
 };
 
@@ -3051,6 +3070,7 @@ inline constexpr operation::ascii_string_t       ascii_string{};
 inline constexpr operation::fixed_collection_t   fixed_collection{};
 inline constexpr operation::collection_t         collection{};
 inline constexpr operation::optional_t           optional{};
+inline constexpr operation::skip_t               skip{};
 
 
 } /* namespace earnest::xdr */
