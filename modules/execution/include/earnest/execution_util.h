@@ -765,6 +765,153 @@ struct explode_tuple_t {
 inline constexpr explode_tuple_t explode_tuple{};
 
 
+// Given a tuple-return, convert it to a multi-argument return.
+struct lazy_explode_variant_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S>
+  constexpr auto operator()(S&& s) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const lazy_explode_variant_t&>(), std::declval<S>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s));
+  }
+
+  constexpr auto operator()() const
+  noexcept(noexcept(_generic_adapter(std::declval<lazy_explode_variant_t>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this);
+  }
+
+  private:
+  // Forward-declaration.
+  template<sender Sender> class sender_impl;
+
+  template<sender Sender>
+  struct sender_types_for_impl
+  : _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>
+  {
+    // Inherit constructors.
+    using _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>::_generic_sender_wrapper;
+  };
+
+  // Unpack a type-appender containing a variant, into a type-appender containing all the values in that variant.
+  template<typename TypeAppenderOfTuple> struct unpack_variant_;
+  template<typename... T>
+  struct unpack_variant_<_type_appender<std::variant<T...>>> {
+    using type = _type_appender<T...>;
+  };
+  template<typename TypeAppenderOfVariant>
+  using unpack_variant = typename unpack_variant_<TypeAppenderOfVariant>::type;
+
+  template<typed_sender Sender>
+  struct sender_types_for_impl<Sender>
+  : _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>
+  {
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types =
+        typename sender_traits<Sender>::                          // From the sender
+        template value_types<_type_appender, _type_appender>::    // take all the value-types `_type_appender<_type_appender<std::variant<T...>>, ...>'
+        template transform<unpack_variant>::                      // and extract the types from that variant: `_type_appender<_type_appender<T...>, ...>'
+        template type<_type_appender<>::merge>::                  // squash all the types into a single collection: `_type_appender<T1, T2, ...>'
+        template transform<Tuple>::                               // wrap each value in its own Tuple: `_type_appender<Tuple<T1>, Tuple<T2>, ...>'
+        template type<Variant>;                                   // and finally wrap the whole thing in the Variant.
+
+    // Inherit constructors.
+    using _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>::_generic_sender_wrapper;
+  };
+
+  template<receiver Receiver>
+  class receiver_impl
+  : public _generic_receiver_wrapper<Receiver, set_value_t>
+  {
+    public:
+    explicit receiver_impl(Receiver&& r)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r))
+    {}
+
+    template<typename Variant>
+    friend auto tag_invoke([[maybe_unused]] set_value_t, receiver_impl&& self, Variant&& var)
+    -> void {
+      std::visit(
+          [&]<typename Args>(Args&& args) {
+            execution::set_value(std::move(self.r), std::forward<Args>(args));
+          },
+          std::forward<Variant>(var));
+    }
+  };
+
+  template<sender Sender>
+  class sender_impl
+  : public sender_types_for_impl<Sender>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    explicit sender_impl(Sender&& s)
+    noexcept(std::is_nothrow_move_constructible_v<Sender>)
+    : sender_types_for_impl<Sender>(std::move(s))
+    {}
+
+    explicit sender_impl(const Sender& s)
+    noexcept(std::is_nothrow_copy_constructible_v<Sender>)
+    : sender_types_for_impl<Sender>(s)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(noexcept(execution::connect(std::declval<Sender>(), receiver_impl<std::remove_cvref_t<Receiver>>(std::declval<Receiver>()))))
+    -> decltype(auto) {
+      return execution::connect(std::move(self.s), receiver_impl<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>>, OtherSender>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>> {
+      return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
+    }
+  };
+
+  template<sender S>
+  auto default_impl(S&& s) const
+  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<S>>, S>)
+  -> sender_impl<std::remove_cvref_t<S>> {
+    return sender_impl<std::remove_cvref_t<S>>(std::forward<S>(s));
+  }
+};
+inline constexpr lazy_explode_variant_t lazy_explode_variant{};
+
+
+// Given a variant-return, convert it to a multi-argument return.
+struct explode_variant_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S>
+  constexpr auto operator()(S&& s) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const explode_variant_t&>(), std::declval<S>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s));
+  }
+
+  constexpr auto operator()() const
+  noexcept(noexcept(_generic_adapter(std::declval<explode_variant_t>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this);
+  }
+
+  private:
+  template<sender S>
+  auto default_impl(S&& s) const
+  noexcept(noexcept(lazy_explode_variant(std::forward<S>(s))))
+  -> sender decltype(auto) {
+    return lazy_explode_variant(std::forward<S>(s));
+  }
+};
+inline constexpr explode_variant_t explode_variant{};
+
+
 // An adapter that does nothing.
 struct noop_t {
   template<sender S>
