@@ -902,5 +902,331 @@ struct system_error_to_error_code_t {
 inline constexpr system_error_to_error_code_t system_error_to_error_code{};
 
 
+// Adapter that takes a function, and invokes the variant-of-senders returned by that function.
+struct let_variant_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S, typename Fn>
+  constexpr auto operator()(S&& s, Fn&& fn) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const let_variant_t&>(), std::declval<S>(), std::declval<Fn>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
+  }
+
+  template<typename Fn>
+  constexpr auto operator()(Fn&& fn) const
+  noexcept(noexcept(_generic_adapter(std::declval<const let_variant_t&>(), std::declval<Fn>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Fn>(fn));
+  }
+
+  private:
+  // We need to translate `std::variant<T1, T2, ...>' to `_type_appender<T1, T2, ...>'.
+  template<typename T> struct replace_variant_with_type_appender_;
+  template<typename... T>
+  struct replace_variant_with_type_appender_<std::variant<T...>>
+  {
+    using type = _type_appender<T...>;
+  };
+  template<typename T>
+  using replace_variant_with_type_appender = typename replace_variant_with_type_appender_<T>::type;
+
+  template<typename Fn>
+  struct return_types_for_fn {
+    private:
+    // Figure out what the function returns.
+    // Something like `std::variant<sender_1, sender_2, ...>'.
+    template<typename... Args>
+    using raw_return_type = std::invoke_result_t<Fn, Args...>;
+
+    // Figure out what senders the function returns.
+    template<typename... Args>
+    using return_type = replace_variant_with_type_appender<std::remove_cvref_t<raw_return_type<std::add_lvalue_reference_t<Args>...>>>;
+
+    public:
+    // Given a type-appender of arguments, figures out what the different senders will be.
+    // `_type_appender<Sender1, Sender2, Sender3, ...>'
+    template<typename TypeAppender>
+    using type = typename TypeAppender::template type<return_type>;
+  };
+
+  // Helper, translates sender_traits to std::bool_constant for sends_done.
+  template<typename Traits>
+  using sends_done_for_traits = std::bool_constant<Traits::sends_done>;
+
+  // Helper, translates sender_traits to list of error-types: `_type_appender<E1, E2, ...>'.
+  template<typename Traits>
+  using error_types_for_traits = typename Traits::template error_types<_type_appender>;
+
+  // Helper, translates sender_traits to list of value-types: `_type_appender<Tuple<...>, Tuple<...>, ...>'.
+  template<template<typename...> class Tuple>
+  struct value_types_for_traits {
+    template<typename Traits>
+    using type = typename Traits::template value_types<Tuple, _type_appender>;
+  };
+
+  // Here we do the error-types, value-types, and sends-done computations.
+  template<typed_sender Sender, typename Fn>
+  struct sender_types_helper {
+    using traits = sender_traits<Sender>;
+
+    // Capture existing error types.
+    // _type_appender<ErrorType1, ErrorType2, ...>
+    using existing_error_types = typename traits::template error_types<_type_appender>;
+    // Capture input value types.
+    // _type_appender<_type_appender<T...>, _type_appender<T...>, ...>
+    using input_value_types = typename traits::template value_types<_type_appender, _type_appender>;
+
+    // Figure out all the variant-types that can be returned.
+    using all_sender_types = typename input_value_types::
+        template transform<return_types_for_fn<Fn>::template type>:: // Translate each argument-set to a sender-set.
+                                                                     // `_type_appender<
+                                                                     //   _type_appender<Sender1a, Sender1b, ...>
+                                                                     //   _type_appender<Sender2a, Sender2b, ...>
+                                                                     // >'
+        template type<_type_appender<>::merge>;                      // Merge them all together:
+                                                                     // `_type_appender<Sender1a, Sender1b, ..., Sender2a, Sender2b, ...>'
+
+    // Each of the sender-traits, from the senders returned by `fn'.
+    using all_sender_trait_types = typename all_sender_types::template transform<sender_traits>;
+
+    // Error types are the union of error types in each of these.
+    // And also std::exception_ptr, if an exception occurs.
+    using error_types = _type_appender<>::merge<
+        _type_appender<std::exception_ptr>,                     // We may introduce an exception.
+        typename traits::template error_types<_type_appender>,  // Retain error-types from input-sender.
+        typename all_sender_trait_types::                       // All the sender-types from `fn': `_type_appender<Traits1, Traits2, ...>'
+            template transform<error_types_for_traits>::        // Take the error types: `_type_appender<
+                                                                //   _type_appender<E1, E2, ...>, _type_appender<E3, ...>, ...
+                                                                // >'
+            template type<typename _type_appender<>::merge>     // And squash them all together: `_type_appender<E1, E2, ..., E3, ...>'
+        >;
+
+    template<template<typename...> class Tuple>
+    using value_types =
+        typename all_sender_trait_types::
+            template transform<value_types_for_traits<Tuple>::template type>::
+            template type<typename _type_appender<>::merge>;
+
+    // We will send-done, if our input sends-done, or any of the senders from `fn' sends-done.
+    static inline constexpr bool sends_done =
+        _type_appender<std::bool_constant<traits::sends_done>>::template merge<        // Take the sends-done from our input-sender.
+            typename all_sender_trait_types::template transform<sends_done_for_traits> // And all of the sends-done from senders returned by `fn'
+        >::template type<std::disjunction>::value;                                     // And take the logic-or of those.
+  };
+
+  template<typed_sender Sender, receiver Receiver>
+  class nested_opstate {
+    private:
+    using impl_type = std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>;
+
+    public:
+    nested_opstate(Sender&& sender, Receiver&& receiver)
+    : impl(execution::connect(std::move(sender), std::move(receiver)))
+    {}
+
+    auto start() noexcept -> void {
+      execution::start(impl);
+    }
+
+    private:
+    impl_type impl;
+  };
+
+  template<typed_sender Sender, typename Fn, receiver Receiver>
+  class opstate
+  : public operation_state_base_
+  {
+    private:
+    using types_helper = sender_types_helper<Sender, Fn>;
+
+    // A variant of all the possible values tuples.
+    // The first type of the variant is std::monostate, so it can be default-initialized.
+    using values_variant = _type_appender<std::monostate>::
+        template merge<typename types_helper::traits::template value_types<std::tuple, _type_appender>>::
+        template type<_deduplicate<std::variant>::template type>;
+
+    using local_receiver = _generic_rawptr_receiver<Receiver>;
+
+    template<typed_sender NestedSender>
+    using nested_opstate_for_sender = nested_opstate<NestedSender, local_receiver>;
+
+    using opstate_variant = typename _type_appender<std::monostate>::
+        template merge<typename types_helper::all_sender_types::template transform<nested_opstate_for_sender>>::
+        template type<_deduplicate<std::variant>::template type>;
+
+    class accepting_receiver {
+      public:
+      explicit accepting_receiver(opstate& state) noexcept
+      : state(state)
+      {}
+
+      template<typename... Args>
+      friend auto tag_invoke([[maybe_unused]] set_value_t, accepting_receiver&& self, Args&&... args) noexcept -> void {
+        try {
+          self.state.apply(std::forward<Args>(args)...);
+        } catch (...) {
+          execution::set_error(std::move(self.state.r), std::current_exception());
+        }
+      }
+
+      template<typename Tag, typename... Args,
+          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
+          typename = std::enable_if_t<!std::is_same_v<set_value_t, Tag>>>
+      friend constexpr auto tag_invoke(Tag tag, const accepting_receiver& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, const Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, const Receiver&, Args...> {
+        return tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
+      }
+
+      template<typename Tag, typename... Args,
+          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
+          typename = std::enable_if_t<!std::is_same_v<set_value_t, Tag>>>
+      friend constexpr auto tag_invoke(Tag tag, accepting_receiver& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver&, Args...> {
+        return tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
+      }
+
+      template<typename Tag, typename... Args,
+          typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
+          typename = std::enable_if_t<!std::is_same_v<set_value_t, Tag>>>
+      friend constexpr auto tag_invoke(Tag tag, accepting_receiver&& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver&&, Args...> {
+        return tag_invoke(std::move(tag), std::move(self.state.r), std::forward<Args>(args)...);
+      }
+
+      private:
+      opstate& state;
+    };
+
+    using parent_opstate = std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<accepting_receiver>()))>;
+
+    public:
+    opstate(Sender&& sender, Fn&& fn, Receiver&& r)
+    : parent(execution::connect(std::move(sender), accepting_receiver(*this))),
+      fn(fn),
+      r(r)
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
+      execution::start(self.parent);
+    }
+
+    private:
+    template<typename... Args>
+    auto apply(Args&&... args) {
+      assert(std::holds_alternative<std::monostate>(values));
+      auto& tuple = values.template emplace<std::tuple<std::remove_cvref_t<Args>...>>(std::forward<Args>(args)...);
+
+      auto sender_variant = std::apply(std::move(fn), tuple);
+      std::visit(
+          [this]<typed_sender NestedSender>(NestedSender&& nested_sender) {
+            using opstate_type = nested_opstate_for_sender<std::remove_cvref_t<NestedSender>>;
+            assert(std::holds_alternative<std::monostate>(opstates));
+            auto& opstate_impl = opstates.template emplace<opstate_type>(std::forward<NestedSender>(nested_sender), local_receiver(&this->r));
+            opstate_impl.start();
+          },
+          std::move(sender_variant));
+    }
+
+    parent_opstate parent;
+    values_variant values;
+    opstate_variant opstates;
+    Fn fn;
+    Receiver r;
+  };
+
+  // Forward-declaration.
+  template<sender Sender, typename Fn> class sender_impl;
+
+  // Figure out value-types, error-types, and sends-done.
+  // For untyped senders, we won't know anything.
+  template<sender Sender, typename Fn>
+  struct sender_types_for_impl
+  : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
+  {
+    // Inherit constructors.
+    using _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>::_generic_sender_wrapper;
+  };
+
+  // Figure out value-types, error-types, and sends-done.
+  // For typed senders, we can figure this out.
+  template<typed_sender Sender, typename Fn>
+  struct sender_types_for_impl<Sender, Fn>
+  : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
+  {
+    private:
+    using types_helper = sender_types_helper<Sender, Fn>;
+
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = typename types_helper::template value_types<Tuple>::template type<Variant>;
+
+    template<template<typename...> class Variant>
+    using error_types = typename types_helper::error_types::template type<Variant>;
+
+    static inline constexpr bool sends_done = types_helper::sends_done;
+
+    // Inherit constructors.
+    using _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>::_generic_sender_wrapper;
+  };
+
+  template<sender Sender, typename Fn>
+  class sender_impl
+  : public sender_types_for_impl<Sender, Fn>
+  {
+    public:
+    sender_impl(Sender&& s, Fn&& fn)
+    noexcept(std::is_nothrow_move_constructible_v<Sender> && std::is_nothrow_move_constructible_v<Fn>)
+    : sender_types_for_impl<Sender, Fn>(std::move(s)),
+      fn(std::move(fn))
+    {}
+
+    sender_impl(const Sender& s, Fn&& fn)
+    noexcept(std::is_nothrow_copy_constructible_v<Sender> && std::is_nothrow_move_constructible_v<Fn>)
+    : sender_types_for_impl<Sender, Fn>(s),
+      fn(std::move(fn))
+    {}
+
+    sender_impl(Sender&& s, const Fn& fn)
+    noexcept(std::is_nothrow_move_constructible_v<Sender> && std::is_nothrow_copy_constructible_v<Fn>)
+    : sender_types_for_impl<Sender, Fn>(std::move(s)),
+      fn(fn)
+    {}
+
+    sender_impl(const Sender& s, const Fn& fn)
+    noexcept(std::is_nothrow_copy_constructible_v<Sender> && std::is_nothrow_copy_constructible_v<Fn>)
+    : sender_types_for_impl<Sender, Fn>(s),
+      fn(fn)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r) -> opstate<Sender, Fn, std::remove_cvref_t<Receiver>> {
+      return opstate<Sender, Fn, std::remove_cvref_t<Receiver>>(std::move(self.s), std::move(self.fn), std::forward<Receiver>(r));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Fn>, OtherSender, Fn>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Fn> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
+    }
+
+    Fn fn;
+  };
+
+  template<sender S, typename Fn>
+  auto default_impl(S&& s, Fn&& fn) const
+  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>, S, Fn>)
+  -> sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>> {
+    return sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>(std::forward<S>(s), std::forward<Fn>(fn));
+  }
+};
+inline constexpr let_variant_t let_variant;
+
+
 } /* inline namespace extensions */
 } /* namespace earnest::execution */

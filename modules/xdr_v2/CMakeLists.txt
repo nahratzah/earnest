@@ -32,6 +32,7 @@ target_sources(xdr_v2_test PRIVATE
     tests/constant.cc
     tests/ascii_string.cc
     tests/collection.cc
+    tests/optional.cc
     tests/buffer.cc
     tests/main.cc)
 add_test(NAME xdr_v2 COMMAND xdr_v2_test)

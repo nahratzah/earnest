@@ -37,6 +37,7 @@
 #include <concepts>
 #include <cstddef>
 #include <limits>
+#include <optional>
 #include <ranges>
 #include <span>
 #include <stdexcept>
@@ -2951,6 +2952,89 @@ struct collection_t
 };
 
 
+// Read/write a std::optional.
+struct optional_t
+: basic_operation<optional_t>
+{
+  template<typename T, typename Invocation>
+  auto read(std::optional<T>& opt, Invocation&& invocation) const {
+    using execution::just;
+    using execution::noop;
+    using execution::let_variant;
+
+    auto make_sender = [invocation=std::forward<Invocation>(invocation)](auto& fd, std::optional<T>& opt, const std::uint32_t& discriminant) {
+      auto reader_when_set = [&]() {
+        return just(std::move(fd)) | invocation.read(opt.value()).sender_chain();
+      };
+      auto reader_when_clear = [&]() {
+        return just(std::move(fd));
+      };
+      using variant_type = std::variant<decltype(reader_when_set()), decltype(reader_when_clear())>;
+
+      switch (discriminant) {
+        default:
+          throw xdr_error("optional discriminant out-of-range");
+        case 0:
+          opt.reset();
+          return variant_type(reader_when_clear());
+        case 1:
+          opt.emplace();
+          return variant_type(reader_when_set());
+      }
+    };
+
+    auto reader = [&opt, make_sender](auto& fd, std::uint32_t discriminant) {
+      return just(std::move(fd), std::ref(opt), discriminant)
+      | let_variant(make_sender);
+    };
+
+    return unresolved_operation_block<false, std::tuple<std::uint32_t>>{}
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::uint32_t>>(uint32_t{}).read())
+        .append_block(operation_block<false>{}
+            .append_sequence(io_barrier{})
+            .append_sequence(manual_invocation<decltype(reader), 0>(std::move(reader))));
+  }
+
+  template<typename T, typename Invocation>
+  auto write(const std::optional<T>& opt, Invocation&& invocation) const {
+    using execution::just;
+    using execution::noop;
+    using execution::let_variant;
+
+    auto set_discriminant = [&opt](std::uint32_t& discriminant) {
+      discriminant = (opt.has_value() ? 1u : 0u);
+    };
+
+    auto make_sender = [invocation=std::forward<Invocation>(invocation)](auto& fd, const std::optional<T>& opt, const std::uint32_t& discriminant) {
+      auto writer_when_set = [&]() {
+        return just(std::move(fd)) | invocation.write(opt.value()).sender_chain();
+      };
+      auto writer_when_clear = [&]() {
+        return just(std::move(fd));
+      };
+      using variant_type = std::variant<decltype(writer_when_set()), decltype(writer_when_clear())>;
+
+      if (discriminant)
+        return variant_type(writer_when_set());
+      else
+        return variant_type(writer_when_clear());
+    };
+
+    auto writer = [&opt, make_sender](auto& fd, const std::uint32_t& discriminant) {
+      return just(std::move(fd), std::cref(opt), discriminant)
+      | let_variant(make_sender);
+    };
+
+    return unresolved_operation_block<true, std::tuple<std::uint32_t>>{}
+        .append_block(operation_block<true>{}
+            .append(pre_invocation<decltype(set_discriminant), 0>(std::move(set_discriminant))))
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::uint32_t>>(uint32_t{}).write())
+        .append_block(operation_block<true>{}
+            .append_sequence(manual_invocation<decltype(writer), 0>(std::move(writer))));
+  }
+};
+
+
 } /* namespace operation */
 
 
@@ -2966,6 +3050,7 @@ inline constexpr operation::fixed_ascii_string_t fixed_ascii_string{};
 inline constexpr operation::ascii_string_t       ascii_string{};
 inline constexpr operation::fixed_collection_t   fixed_collection{};
 inline constexpr operation::collection_t         collection{};
+inline constexpr operation::optional_t           optional{};
 
 
 } /* namespace earnest::xdr */

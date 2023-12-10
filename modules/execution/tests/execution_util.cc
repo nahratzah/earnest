@@ -75,3 +75,26 @@ TEST(repeat_with_scheduler) {
   CHECK_EQUAL(expected.size(), result_2.size());
   CHECK_ARRAY_EQUAL(expected.data(), result_2.data(), std::min(expected.size(), result_2.size()));
 }
+
+TEST(let_variant) {
+  auto fn = []() {
+    auto string_sender = just(std::string("bla bla chocoladevla"));
+    auto int_sender = just(int(0));
+    return std::variant<decltype(string_sender), decltype(int_sender)>(std::move(string_sender));
+  };
+
+  using let_variant_traits = sender_traits<decltype(just() | let_variant(fn))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<std::string>, std::tuple<int>>,
+      let_variant_traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      let_variant_traits::error_types<std::variant>>);
+  static_assert(let_variant_traits::sends_done == false);
+
+  auto [x] = sync_wait(just() | let_variant(fn) | into_variant()).value();
+  REQUIRE CHECK(std::holds_alternative<std::tuple<std::string>>(x));
+  CHECK_EQUAL(
+      std::string("bla bla chocoladevla"),
+      std::get<0>(std::get<std::tuple<std::string>>(x)));
+}
