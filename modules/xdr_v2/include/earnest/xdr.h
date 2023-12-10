@@ -161,6 +161,34 @@ concept writable_object =
 namespace operation {
 
 
+template<typename Invocation, typename T>
+concept read_invocation_for =
+    std::copy_constructible<std::remove_cvref_t<Invocation>> &&
+    requires(const std::remove_cvref_t<Invocation> invocation, T& v) {
+      // Must have a read method.
+      { invocation.read(v) };
+      // Confirm extent is defined and is a constant-time expression.
+      typename std::integral_constant<std::size_t, decltype(invocation.read(v))::extent>;
+      // Confirm the invocation can produce a sender.
+      { invocation.read(v).sender_chain() } -> execution::sender;
+    };
+
+template<typename Invocation, typename T>
+concept write_invocation_for =
+    std::copy_constructible<std::remove_cvref_t<Invocation>> &&
+    requires(const std::remove_cvref_t<Invocation> invocation, const T& const_v) {
+      // Must have a write method.
+      { invocation.write(const_v) };
+      // Confirm extent is defined and is a constant-time expression.
+      typename std::integral_constant<std::size_t, decltype(invocation.write(const_v))::extent>;
+      // Confirm the invocation can produce a sender.
+      { invocation.write(const_v).sender_chain() } -> execution::sender;
+    };
+
+template<typename Invocation, typename T>
+concept invocation_for = read_invocation_for<Invocation, T> && write_invocation_for<Invocation, T>;
+
+
 template<typename = std::tuple<>, typename = std::tuple<>, typename = std::tuple<>> class operation_sequence;
 
 // Describe an operation-block.
@@ -1606,8 +1634,6 @@ class unresolved_operation_block<IsConst, std::tuple<Temporaries...>, Elements..
 
   template<typename... OtherTemporaries, typename... OtherElements>
   auto merge(unresolved_operation_block<IsConst, std::tuple<OtherTemporaries...>, OtherElements...>&& other) && {
-    static_assert(sizeof...(Temporaries) + sizeof...(OtherTemporaries) == 2);
-
     return std::apply(
         []<typename... X>(X&&... x) {
           return unresolved_operation_block<
@@ -1661,7 +1687,7 @@ template<typename Op, typename... Options>
 class operation_with_options {
   public:
   template<typename Op_, typename... Options_>
-  constexpr operation_with_options(Op_&& op, Options_&&... options)
+  explicit constexpr operation_with_options(Op_&& op, Options_&&... options)
   : op(std::forward<Op_>(op)),
     options(std::forward<Options_>(options)...)
   {}
@@ -1669,16 +1695,16 @@ class operation_with_options {
   template<typename T>
   auto read(T& v) const {
     return std::apply(
-        [&v, this](auto&... options) {
+        [&v, this](const auto&... options) {
           return this->op.read(v, options...);
         },
         options);
   }
 
   template<typename T>
-  auto write(T& v) const {
+  auto write(const T& v) const {
     return std::apply(
-        [&v, this](auto&... options) {
+        [&v, this](const auto&... options) {
           return this->op.write(v, options...);
         },
         options);
@@ -1793,6 +1819,17 @@ struct uint8_t
   }
 };
 
+static_assert(invocation_for<uint8_t, std::uint8_t>);
+static_assert(invocation_for<uint8_t, std::uint16_t>);
+static_assert(invocation_for<uint8_t, std::uint32_t>);
+static_assert(invocation_for<uint8_t, std::uint64_t>);
+static_assert(invocation_for<uint8_t, std::uintmax_t>);
+static_assert(invocation_for<uint8_t, std::int8_t>);
+static_assert(invocation_for<uint8_t, std::int16_t>);
+static_assert(invocation_for<uint8_t, std::int32_t>);
+static_assert(invocation_for<uint8_t, std::int64_t>);
+static_assert(invocation_for<uint8_t, std::intmax_t>);
+
 
 struct uint16_t
 : basic_operation<uint16_t>
@@ -1879,6 +1916,17 @@ struct uint16_t
                 }));
   }
 };
+
+static_assert(invocation_for<uint16_t, std::uint8_t>);
+static_assert(invocation_for<uint16_t, std::uint16_t>);
+static_assert(invocation_for<uint16_t, std::uint32_t>);
+static_assert(invocation_for<uint16_t, std::uint64_t>);
+static_assert(invocation_for<uint16_t, std::uintmax_t>);
+static_assert(invocation_for<uint16_t, std::int8_t>);
+static_assert(invocation_for<uint16_t, std::int16_t>);
+static_assert(invocation_for<uint16_t, std::int32_t>);
+static_assert(invocation_for<uint16_t, std::int64_t>);
+static_assert(invocation_for<uint16_t, std::intmax_t>);
 
 
 struct uint32_t
@@ -2091,6 +2139,17 @@ struct uint32_t
                 }));
   }
 };
+
+static_assert(invocation_for<uint32_t, std::uint8_t>);
+static_assert(invocation_for<uint32_t, std::uint16_t>);
+static_assert(invocation_for<uint32_t, std::uint32_t>);
+static_assert(invocation_for<uint32_t, std::uint64_t>);
+static_assert(invocation_for<uint32_t, std::uintmax_t>);
+static_assert(invocation_for<uint32_t, std::int8_t>);
+static_assert(invocation_for<uint32_t, std::int16_t>);
+static_assert(invocation_for<uint32_t, std::int32_t>);
+static_assert(invocation_for<uint32_t, std::int64_t>);
+static_assert(invocation_for<uint32_t, std::intmax_t>);
 
 
 struct uint64_t
@@ -2336,6 +2395,17 @@ struct uint64_t
   }
 };
 
+static_assert(invocation_for<uint64_t, std::uint8_t>);
+static_assert(invocation_for<uint64_t, std::uint16_t>);
+static_assert(invocation_for<uint64_t, std::uint32_t>);
+static_assert(invocation_for<uint64_t, std::uint64_t>);
+static_assert(invocation_for<uint64_t, std::uintmax_t>);
+static_assert(invocation_for<uint64_t, std::int8_t>);
+static_assert(invocation_for<uint64_t, std::int16_t>);
+static_assert(invocation_for<uint64_t, std::int32_t>);
+static_assert(invocation_for<uint64_t, std::int64_t>);
+static_assert(invocation_for<uint64_t, std::intmax_t>);
+
 
 // Manual control of an operation.
 //
@@ -2343,9 +2413,11 @@ struct uint64_t
 // returns a typed-sender, that returns a file-descriptor.
 // It doesn't have to be the same file-descriptor: it's fine if it's
 // a different one, or even changes type.
-struct manual_t
-: basic_operation<manual_t>
-{
+struct manual_t {
+  constexpr auto operator()() const noexcept -> manual_t {
+    return *this;
+  }
+
   template<typename Fn>
   auto read(Fn&& fn) const {
     return operation_block<false>{}
@@ -2389,7 +2461,7 @@ struct padding_t
                 }));
   }
 
-  auto write(value& v) const {
+  auto write(const value& v) const {
     return operation_block<true>{}
         .append(dynamic_span_reference(
                 [&v]() {
@@ -2398,6 +2470,8 @@ struct padding_t
                 }));
   }
 };
+
+static_assert(invocation_for<padding_t, padding_t::value>);
 
 
 template<std::size_t Idx, typename T>
@@ -2634,6 +2708,9 @@ struct fixed_byte_string_t
   }
 };
 
+static_assert(invocation_for<fixed_byte_string_t, std::string>);
+static_assert(invocation_for<fixed_byte_string_t, std::array<std::uint8_t, 12>>);
+
 // Read a byte string of variable size.
 struct byte_string_t
 : basic_operation<byte_string_t>
@@ -2676,6 +2753,11 @@ struct byte_string_t
   }
 };
 
+static_assert(invocation_for<byte_string_t, std::string>);
+static_assert(invocation_for<byte_string_t, std::vector<std::uint8_t>>);
+static_assert(invocation_for<decltype(byte_string_t{}(12)), std::string>);
+static_assert(invocation_for<decltype(byte_string_t{}(12)), std::vector<std::uint8_t>>);
+
 // Read/write a 7-bit ascii string value.
 struct fixed_ascii_string_t
 : basic_operation<fixed_ascii_string_t>
@@ -2713,6 +2795,9 @@ struct fixed_ascii_string_t
         .merge(fixed_byte_string_t{}.write(v));
   }
 };
+
+static_assert(invocation_for<fixed_ascii_string_t, std::string>);
+static_assert(invocation_for<fixed_ascii_string_t, std::array<std::uint8_t, 12>>);
 
 // Read/write a 7-bit ascii string value.
 struct ascii_string_t
@@ -2752,12 +2837,17 @@ struct ascii_string_t
   }
 };
 
+static_assert(invocation_for<ascii_string_t, std::string>);
+static_assert(invocation_for<ascii_string_t, std::vector<std::uint8_t>>);
+static_assert(invocation_for<decltype(ascii_string_t{}(12)), std::string>);
+static_assert(invocation_for<decltype(ascii_string_t{}(12)), std::vector<std::uint8_t>>);
+
 
 // Read/write a collection of fixed size.
 struct fixed_collection_t
 : basic_operation<fixed_collection_t>
 {
-  template<typename Collection, typename Invocation>
+  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
   auto read(Collection& collection, Invocation invocation) const {
     return manual_t{}.read(
         [&collection, invocation=std::move(invocation)](auto& fd) {
@@ -2793,49 +2883,51 @@ struct fixed_collection_t
         });
   }
 
-  template<typename Collection, typename Invocation>
+  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
   auto write(const Collection& collection, Invocation invocation) const {
     return manual_t{}.write(
-        [&collection, invocation=std::move(invocation)]<typename FD>(FD&& fd) {
+        [&collection, invocation=std::move(invocation)](auto& fd) {
           using std::begin;
           using std::end;
           using execution::just;
           using execution::then;
           using execution::repeat;
 
-          auto factory = [invocation=std::move(invocation)](FD& fd, auto& iter) {
+          auto factory = [invocation=std::move(invocation)](auto fd, auto& iter) {
             return just(std::move(fd))
             | invocation.write(*iter).sender_chain()
             | then(
-                [&fd, &iter](auto post_invocation_fd) {
-                  fd = std::move(post_invocation_fd);
+                [&iter]([[maybe_unused]] auto post_invocation_fd) {
                   ++iter;
                 });
           };
 
-          return just(std::forward<FD>(fd), begin(collection), end(collection))
+          return just(std::move(fd), begin(collection), end(collection))
           | repeat(
-              [factory]([[maybe_unused]] std::size_t, FD& fd, auto& iter, auto& end) {
-                using result_type = decltype(factory(fd, iter));
+              [factory]([[maybe_unused]] std::size_t idx, auto& fd, auto& iter, auto& end) {
+                using result_type = decltype(factory(std::ref(fd), iter));
                 if (iter != end)
-                  return std::make_optional(factory(fd, iter));
+                  return std::make_optional(factory(std::ref(fd), iter));
                 else
                   return std::optional<result_type>{};
               })
           | then(
-              [](auto fd, [[maybe_unused]] auto&& iter, [[maybe_unused]] auto&& end) {
-                return fd;
+              []<typename FD>(FD&& fd, [[maybe_unused]] auto&& iter, [[maybe_unused]] auto&& end) -> decltype(auto) {
+                return std::forward<FD>(fd);
               });
         });
   }
 };
+
+static_assert(invocation_for<decltype(fixed_collection_t{}(ascii_string_t{})), std::array<std::string, 12>>);
+static_assert(invocation_for<decltype(fixed_collection_t{}(ascii_string_t{}(12))), std::array<std::string, 12>>);
 
 
 // Read/write a collection of arbitrary size.
 struct collection_t
 : basic_operation<collection_t>
 {
-  template<typename Collection, typename Invocation>
+  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
   requires requires(Collection collection, std::size_t sz) {
     { collection.resize(sz) };
   }
@@ -2858,7 +2950,7 @@ struct collection_t
 
   // When we cannot resize the collection,
   // we'll need to read elements one-at-a-time and insert them.
-  template<typename Collection, typename Invocation>
+  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
   requires (!requires(Collection collection, std::size_t sz) {
         { collection.resize(sz) };
       })
@@ -2933,7 +3025,7 @@ struct collection_t
             .append(post_invocation<decltype(confirm_size_fn), 0>(std::move(confirm_size_fn))));
   }
 
-  template<typename Collection, typename Invocation>
+  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
   auto write(const Collection& collection, Invocation invocation, std::optional<std::size_t> max_size = std::nullopt) const {
     using size_type = typename Collection::size_type;
 
@@ -2947,9 +3039,12 @@ struct collection_t
         .append_block(operation_block<true>{}
             .append(pre_invocation<decltype(set_size_fn), 0>(std::move(set_size_fn))))
         .append_block(readwrite_temporary_variable<tuple_element_of_type<0, size_type>>.write(uint32_t{}))
-        .merge(fixed_collection_t{}.write(collection, std::move(invocation), max_size));
+        .append_block(fixed_collection_t{}.write(collection, std::move(invocation)));
   }
 };
+
+static_assert(invocation_for<decltype(collection_t{}(ascii_string_t{})), std::vector<std::string>>);
+static_assert(invocation_for<decltype(collection_t{}(ascii_string_t{}, 12)), std::vector<std::string>>);
 
 
 // Read/write a std::optional.
@@ -3038,6 +3133,8 @@ struct optional_t
   }
 };
 
+static_assert(invocation_for<decltype(optional_t{}(uint32_t{})), std::optional<int>>);
+
 // Skip reading/writing.
 struct skip_t
 : basic_operation<skip_t>
@@ -3052,6 +3149,9 @@ struct skip_t
     return unresolved_operation_block<true, std::tuple<>>{};
   }
 };
+
+static_assert(invocation_for<skip_t, int>);
+static_assert(invocation_for<skip_t, std::monostate>);
 
 
 } /* namespace operation */
