@@ -3135,6 +3135,7 @@ struct optional_t
 
 static_assert(invocation_for<decltype(optional_t{}(uint32_t{})), std::optional<int>>);
 
+
 // Skip reading/writing.
 struct skip_t
 : basic_operation<skip_t>
