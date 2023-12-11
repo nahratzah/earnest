@@ -3136,6 +3136,223 @@ struct optional_t
 static_assert(invocation_for<decltype(optional_t{}(uint32_t{})), std::optional<int>>);
 
 
+struct variant_t
+: basic_operation<variant_t>
+{
+  private:
+  template<std::uint32_t Discriminant, typename Op>
+  struct discriminant_t
+  : Op
+  {
+    using Op::Op;
+  };
+
+  template<typename T>
+  struct is_discriminant_t : std::false_type {};
+  template<std::uint32_t Discriminant, typename Op>
+  struct is_discriminant_t<discriminant_t<Discriminant, Op>> : std::true_type {};
+  template<typename T>
+  static inline constexpr bool is_discriminant = is_discriminant_t<T>::value;
+
+  template<std::uint32_t Discriminant, typename Op>
+  static constexpr auto figure_out_discriminant(
+      [[maybe_unused]] const discriminant_t<Discriminant, Op>& dop,
+      [[maybe_unused]] std::size_t fallback) noexcept -> std::size_t {
+    return Discriminant;
+  }
+
+  template<typename Op>
+  requires (!is_discriminant<std::remove_cvref_t<Op>>)
+  static constexpr auto figure_out_discriminant(
+      [[maybe_unused]] const Op& op,
+      std::size_t fallback) noexcept -> std::size_t {
+    return fallback;
+  }
+
+  // Constexpr expression to check if a sequence of std::size_t is unique.
+  // This specializations handles the case where there are no arguments.
+  static constexpr auto is_unique() noexcept -> bool {
+    return true;
+  }
+
+  // Constexpr expression to check if a sequence of std::size_t is unique.
+  // Bugs: this is quadratic complexity.
+  template<typename... Tail>
+  static constexpr auto is_unique(std::size_t x, Tail... tail) noexcept -> bool {
+    return ((x != tail) &&...&& is_unique(tail...));
+  }
+
+  // translate-discriminant does an in-place translation of the discriminant, to its variant-index.
+  template<std::size_t IndexOfValue0, std::size_t...> struct translate_discriminant;
+  // translate-discriminant, when it doesn't find a translation, will throw xdr-error.
+  template<std::size_t IndexOfValue0>
+  struct translate_discriminant<IndexOfValue0> {
+    auto operator()([[maybe_unused]] std::size_t discriminant) const -> std::size_t {
+      throw xdr_error("variant-discriminant not recognized");
+    }
+  };
+  // recursive implementation of translate-discriminant.
+  // If we find a match, we perform in-place translation of the discriminant.
+  template<std::size_t IndexOfValue0, std::size_t Value0, std::size_t... Tail>
+  struct translate_discriminant<IndexOfValue0, Value0, Tail...> {
+    auto operator()(std::size_t discriminant) const -> std::size_t {
+      if (discriminant == Value0) {
+        return IndexOfValue0;
+      } else {
+        return translate_discriminant<IndexOfValue0 + 1u, Tail...>{}(discriminant);
+      }
+    }
+  };
+
+  template<std::size_t... Values>
+  requires (is_unique(Values...))
+  struct discriminant_set {
+    static_assert(((Values < 0xffff'ffffU) &&...), "variant-indices must fit in a 32-bit unsigned integer");
+
+    // Retrieve the discriminant at position idx.
+    static constexpr auto get(std::size_t idx) -> std::uint32_t {
+      return std::array<std::size_t, sizeof...(Values)>{ Values... }.at(idx);
+    }
+
+    // Retrieve the index of the given discriminant.
+    static constexpr auto find_index_for(std::size_t discriminant) -> std::size_t {
+      return translate_discriminant<0, Values...>{}(discriminant);
+    }
+  };
+
+  template<typename... Tail>
+  static constexpr auto decide_on_extent(std::size_t extent0, Tail... extents) noexcept -> std::size_t {
+    if (((extent0 == extents) &&...))
+      return extent0;
+    else
+      return std::dynamic_extent;
+  }
+
+  public:
+  template<std::uint32_t Discriminant, typename Op>
+  auto discriminant(Op&& op) -> discriminant_t<Discriminant, std::remove_cvref_t<Op>> {
+    return discriminant_t<Discriminant, std::remove_cvref_t<Op>>(std::forward<Op>(op));
+  }
+
+  template<typename... T, typename... Invocations>
+  requires (sizeof...(T) == sizeof...(Invocations)) && (invocation_for<Invocations, T> &&...) && (sizeof...(T) > 0)
+  auto read(std::variant<T...>& v, Invocations... invocations) const {
+    return read_(std::index_sequence_for<T...>{}, v, std::make_tuple(std::move(invocations)...));
+  }
+
+  template<typename... T, typename... Invocations>
+  requires (sizeof...(T) == sizeof...(Invocations)) && (invocation_for<Invocations, T> &&...) && (sizeof...(T) > 0)
+  auto write(const std::variant<T...>& v, Invocations... invocations) const {
+    return write_(std::index_sequence_for<T...>{}, v, std::make_tuple(std::move(invocations)...));
+  }
+
+  private:
+  template<std::size_t Idx, typename FD, typename Variant, typename Invocations>
+  struct invocation_handler;
+
+  template<std::size_t Idx, typename FD, typename... T, typename... Invocations>
+  struct invocation_handler<Idx, FD, std::variant<T...>, std::tuple<Invocations...>> {
+    using variant_type = std::variant<T...>;
+    using invocations_type = std::tuple<Invocations...>;
+
+    static auto read(FD&& fd, variant_type& v, const invocations_type& invocations) {
+      return execution::just(std::move(fd))
+      | std::get<Idx>(invocations).read(v.template emplace<Idx>()).sender_chain();
+    }
+
+    static auto write(FD&& fd, const variant_type& v, const invocations_type& invocations) {
+      return execution::just(std::move(fd))
+      | std::get<Idx>(invocations).write(std::get<Idx>(v)).sender_chain();
+    }
+
+    template<typename SenderVariant>
+    static auto read_into_sender_variant(FD& fd, variant_type& v, const invocations_type& invocations) -> SenderVariant {
+      return SenderVariant(std::in_place_index<Idx>, invocation_handler::read(std::move(fd), v, invocations));
+    }
+
+    template<typename SenderVariant>
+    static auto write_into_sender_variant(FD& fd, const variant_type& v, const invocations_type& invocations) -> SenderVariant {
+      return SenderVariant(std::in_place_index<Idx>, invocation_handler::write(std::move(fd), v, invocations));
+    }
+  };
+
+  template<std::size_t... Idx, typename... T, typename... Invocations>
+  auto read_([[maybe_unused]] std::index_sequence<Idx...> indices, std::variant<T...>& v, std::tuple<Invocations...> invocations) const {
+    using d_set = discriminant_set<figure_out_discriminant(invocations, Idx)...>;
+    constexpr std::size_t nested_extent = decide_on_extent(decltype(std::get<Idx>(invocations).read(std::declval<T&>()))::extent...);
+
+    auto nested_operation = [&v, invocations]<typename FD>(FD& fd, std::size_t discriminant) {
+      using execution::just;
+      using execution::let_variant;
+
+      using nested_sender_variant = std::variant<
+          std::remove_cvref_t<decltype(
+              invocation_handler<Idx, FD, std::variant<T...>, std::tuple<Invocations...>>::read(
+                  std::declval<FD>(),
+                  std::declval<std::variant<T...>&>(),
+                  std::declval<const std::tuple<Invocations...>&>()))>...>;
+      using nested_sender_fn = nested_sender_variant (*)(FD&, std::variant<T...>&, const std::tuple<Invocations...>&);
+
+      auto functions = std::array<nested_sender_fn, sizeof...(Idx)>{
+        &invocation_handler<Idx, FD, std::variant<T...>, std::tuple<Invocations...>>::template read_into_sender_variant<nested_sender_variant>...
+      };
+
+      return just(std::move(fd), std::ref(v), invocations)
+      | let_variant(functions.at(discriminant));
+    };
+
+    auto translate_discriminant = [](std::uint32_t& discriminant) {
+      discriminant = d_set::find_index_for(discriminant);
+    };
+
+    return unresolved_operation_block<false, std::tuple<std::uint32_t>>{}
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::uint32_t>>(uint32_t{}).read())
+        .append_block(operation_block<false>{}
+            .append(post_invocation<decltype(translate_discriminant), 0>(std::move(translate_discriminant)))
+            .append_sequence(io_barrier{})
+            .append_sequence(manual_invocation<decltype(nested_operation), nested_extent, 0>(std::move(nested_operation))));
+  }
+
+  template<std::size_t... Idx, typename... T, typename... Invocations>
+  auto write_([[maybe_unused]] std::index_sequence<Idx...> indices, const std::variant<T...>& v, std::tuple<Invocations...> invocations) const {
+    using d_set = discriminant_set<figure_out_discriminant(invocations, Idx)...>;
+    constexpr std::size_t nested_extent = decide_on_extent(decltype(std::get<Idx>(invocations).write(std::declval<const T&>()))::extent...);
+
+    auto nested_operation = [&v, invocations]<typename FD>(FD& fd) {
+      using execution::just;
+      using execution::let_variant;
+
+      using nested_sender_variant = std::variant<
+          std::remove_cvref_t<decltype(
+              invocation_handler<Idx, FD, std::variant<T...>, std::tuple<Invocations...>>::write(
+                  std::declval<FD>(),
+                  std::declval<const std::variant<T...>&>(),
+                  std::declval<const std::tuple<Invocations...>&>()))>...>;
+      using nested_sender_fn = nested_sender_variant (*)(FD&, const std::variant<T...>&, const std::tuple<Invocations...>&);
+
+      auto functions = std::array<nested_sender_fn, sizeof...(Idx)>{
+        &invocation_handler<Idx, FD, std::variant<T...>, std::tuple<Invocations...>>::template write_into_sender_variant<nested_sender_variant>...
+      };
+
+      return just(std::move(fd), std::cref(v), invocations)
+      | let_variant(functions.at(v.index()));
+    };
+
+    auto set_discriminant = [&v](std::uint32_t& discriminant) {
+      if (v.valueless_by_exception()) throw std::bad_variant_access();
+      discriminant = d_set::get(v.index());
+    };
+
+    return unresolved_operation_block<true, std::tuple<std::uint32_t>>{}
+        .append_block(operation_block<true>{}
+            .append(pre_invocation<decltype(set_discriminant), 0>(std::move(set_discriminant))))
+        .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::uint32_t>>(uint32_t{}).write())
+        .append_block(operation_block<true>{}
+            .append_sequence(manual_invocation<decltype(nested_operation), nested_extent>(std::move(nested_operation))));
+  }
+};
+
+
 // Skip reading/writing.
 struct skip_t
 : basic_operation<skip_t>
@@ -3171,6 +3388,7 @@ inline constexpr operation::ascii_string_t       ascii_string{};
 inline constexpr operation::fixed_collection_t   fixed_collection{};
 inline constexpr operation::collection_t         collection{};
 inline constexpr operation::optional_t           optional{};
+inline constexpr operation::variant_t            variant{};
 inline constexpr operation::skip_t               skip{};
 
 
