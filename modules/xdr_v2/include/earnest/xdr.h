@@ -3139,14 +3139,22 @@ static_assert(invocation_for<decltype(optional_t{}(uint32_t{})), std::optional<i
 struct variant_t
 : basic_operation<variant_t>
 {
-  private:
   template<std::uint32_t Discriminant, typename Op>
   struct discriminant_t
   : Op
   {
-    using Op::Op;
+    static inline constexpr std::uint32_t discriminant_value = Discriminant;
+
+    explicit discriminant_t(const Op& op)
+    : Op(op)
+    {}
+
+    explicit discriminant_t(Op&& op)
+    : Op(std::move(op))
+    {}
   };
 
+  private:
   template<typename T>
   struct is_discriminant_t : std::false_type {};
   template<std::uint32_t Discriminant, typename Op>
@@ -3154,19 +3162,12 @@ struct variant_t
   template<typename T>
   static inline constexpr bool is_discriminant = is_discriminant_t<T>::value;
 
-  template<std::uint32_t Discriminant, typename Op>
-  static constexpr auto figure_out_discriminant(
-      [[maybe_unused]] const discriminant_t<Discriminant, Op>& dop,
-      [[maybe_unused]] std::size_t fallback) noexcept -> std::size_t {
-    return Discriminant;
-  }
-
   template<typename Op>
-  requires (!is_discriminant<std::remove_cvref_t<Op>>)
-  static constexpr auto figure_out_discriminant(
-      [[maybe_unused]] const Op& op,
-      std::size_t fallback) noexcept -> std::size_t {
-    return fallback;
+  static constexpr auto figure_out_discriminant([[maybe_unused]] std::size_t fallback) noexcept -> std::size_t {
+    if constexpr(is_discriminant<Op>)
+      return Op::discriminant_value;
+    else
+      return fallback;
   }
 
   // Constexpr expression to check if a sequence of std::size_t is unique.
@@ -3230,7 +3231,7 @@ struct variant_t
 
   public:
   template<std::uint32_t Discriminant, typename Op>
-  auto discriminant(Op&& op) -> discriminant_t<Discriminant, std::remove_cvref_t<Op>> {
+  auto discriminant(Op&& op) const -> discriminant_t<Discriminant, std::remove_cvref_t<Op>> {
     return discriminant_t<Discriminant, std::remove_cvref_t<Op>>(std::forward<Op>(op));
   }
 
@@ -3278,7 +3279,7 @@ struct variant_t
 
   template<std::size_t... Idx, typename... T, typename... Invocations>
   auto read_([[maybe_unused]] std::index_sequence<Idx...> indices, std::variant<T...>& v, std::tuple<Invocations...> invocations) const {
-    using d_set = discriminant_set<figure_out_discriminant(invocations, Idx)...>;
+    using d_set = discriminant_set<figure_out_discriminant<Invocations>(Idx)...>;
     constexpr std::size_t nested_extent = decide_on_extent(decltype(std::get<Idx>(invocations).read(std::declval<T&>()))::extent...);
 
     auto nested_operation = [&v, invocations]<typename FD>(FD& fd, std::size_t discriminant) {
@@ -3298,24 +3299,19 @@ struct variant_t
       };
 
       return just(std::move(fd), std::ref(v), invocations)
-      | let_variant(functions.at(discriminant));
-    };
-
-    auto translate_discriminant = [](std::uint32_t& discriminant) {
-      discriminant = d_set::find_index_for(discriminant);
+      | let_variant(functions.at(d_set::find_index_for(discriminant)));
     };
 
     return unresolved_operation_block<false, std::tuple<std::uint32_t>>{}
         .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::uint32_t>>(uint32_t{}).read())
         .append_block(operation_block<false>{}
-            .append(post_invocation<decltype(translate_discriminant), 0>(std::move(translate_discriminant)))
             .append_sequence(io_barrier{})
             .append_sequence(manual_invocation<decltype(nested_operation), nested_extent, 0>(std::move(nested_operation))));
   }
 
   template<std::size_t... Idx, typename... T, typename... Invocations>
   auto write_([[maybe_unused]] std::index_sequence<Idx...> indices, const std::variant<T...>& v, std::tuple<Invocations...> invocations) const {
-    using d_set = discriminant_set<figure_out_discriminant(invocations, Idx)...>;
+    using d_set = discriminant_set<figure_out_discriminant<Invocations>(Idx)...>;
     constexpr std::size_t nested_extent = decide_on_extent(decltype(std::get<Idx>(invocations).write(std::declval<const T&>()))::extent...);
 
     auto nested_operation = [&v, invocations]<typename FD>(FD& fd) {
