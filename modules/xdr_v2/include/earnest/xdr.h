@@ -3222,7 +3222,7 @@ struct variant_t
 
   template<typename... Tail>
   static constexpr auto decide_on_extent(std::size_t extent0, Tail... extents) noexcept -> std::size_t {
-    if (((extent0 == extents) &&...))
+    if (((extent0 == extents) &&...)) // llvm says I can remove the braces, but that's incorrect.
       return extent0;
     else
       return std::dynamic_extent;
