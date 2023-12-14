@@ -425,6 +425,14 @@ template<typename Tag, typename... Args>
 using tag_invoke_result_t = std::invoke_result_t<decltype(tag_invoke), Tag, Args...>;
 
 
+// Helper, that removes cvref from all types, before wrapping it in a tuple.
+template<template<typename...> class Tuple>
+struct remove_cvref_tuple_ {
+  template<typename... T>
+  using type = Tuple<std::remove_cvref_t<T>...>;
+};
+
+
 // This class tags any senders, that don't specify value_types/error_types/sends_done.
 class sender_base {
   protected:
@@ -506,14 +514,14 @@ struct _sender_traits_<S,
   //
   // Note: we deduplicate the types that'll be presented to the Variant.
   template<template<typename...> class Tuple, template<typename...> class Variant>
-  using value_types = typename S::template value_types<Tuple, _deduplicate<Variant>::template type>;
+  using value_types = typename S::template value_types<remove_cvref_tuple_<Tuple>::template type, _deduplicate<Variant>::template type>;
 
   // Define the error_types.
   // We use the ones exposed on the sender.
   //
   // Note: we deduplicate the types that'll be presented to the Variant.
   template<template<typename...> class Variant>
-  using error_types = typename S::template error_types<_deduplicate<Variant>::template type>;
+  using error_types = typename S::template error_types<remove_cvref_tuple_<_deduplicate<Variant>::template type>::template type>;
 
   // Declare if this sender can send a done-operation.
   // We expose the value on the sender.
