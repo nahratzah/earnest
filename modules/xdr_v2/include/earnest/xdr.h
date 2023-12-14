@@ -161,12 +161,27 @@ concept writable_object =
 namespace operation {
 
 
+template<bool IsConst, typename Temporaries, unresolved_operation_block_element<Temporaries>... Elements>
+class unresolved_operation_block;
+
+template<typename>
+struct is_unresolved_operation_block_ : std::false_type {};
+
+template<bool IsConst, typename Temporaries, unresolved_operation_block_element<Temporaries>... Elements>
+struct is_unresolved_operation_block_<unresolved_operation_block<IsConst, Temporaries, Elements...>>
+: std::true_type
+{};
+
+template<typename T>
+concept is_unresolved_operation_block = is_unresolved_operation_block_<T>::value;
+
+
 template<typename Invocation, typename T>
 concept read_invocation_for =
     std::copy_constructible<std::remove_cvref_t<Invocation>> &&
     requires(const std::remove_cvref_t<Invocation> invocation, T& v) {
       // Must have a read method.
-      { invocation.read(v) };
+      { invocation.read(v) } -> is_unresolved_operation_block;
       // Confirm extent is defined and is a constant-time expression.
       typename std::integral_constant<std::size_t, decltype(invocation.read(v))::extent>;
       // Confirm the invocation can produce a sender.
@@ -178,7 +193,7 @@ concept write_invocation_for =
     std::copy_constructible<std::remove_cvref_t<Invocation>> &&
     requires(const std::remove_cvref_t<Invocation> invocation, const T& const_v) {
       // Must have a write method.
-      { invocation.write(const_v) };
+      { invocation.write(const_v) } -> is_unresolved_operation_block;
       // Confirm extent is defined and is a constant-time expression.
       typename std::integral_constant<std::size_t, decltype(invocation.write(const_v))::extent>;
       // Confirm the invocation can produce a sender.
@@ -1573,16 +1588,6 @@ class operation_block<IsConst, 0> {
 };
 
 
-template<bool IsConst, typename Temporaries, unresolved_operation_block_element<Temporaries>... Elements>
-class unresolved_operation_block;
-
-template<typename T>
-struct is_unresolved_operation_block_ : std::false_type {};
-template<bool IsConst, typename Temporaries, typename... Elements>
-struct is_unresolved_operation_block_<unresolved_operation_block<IsConst, Temporaries, Elements...>> : std::true_type {};
-template<typename T>
-constexpr bool is_unresolved_operation_block = is_unresolved_operation_block_<std::remove_cvref_t<T>>::value;
-
 template<typename T>
 struct unresolved_operation_block_is_const_;
 template<bool IsConst, typename Temporaries, typename... Elements>
@@ -1737,57 +1742,60 @@ struct uint8_t
 {
   template<std::unsigned_integral T>
   auto read(T& v) const {
-    return operation_block<false>{}
-        .buffer<4>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  assert(tmpbuf.size() == 4);
-                  if (tmpbuf[0] != std::byte{0} ||
-                      tmpbuf[1] != std::byte{0} ||
-                      tmpbuf[2] != std::byte{0})
-                    throw xdr_error("integer overflow for 8-bit value");
-                  v = static_cast<std::uint8_t>(tmpbuf[3]);
-                }));
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .buffer<4>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      assert(tmpbuf.size() == 4);
+                      if (tmpbuf[0] != std::byte{0} ||
+                          tmpbuf[1] != std::byte{0} ||
+                          tmpbuf[2] != std::byte{0})
+                        throw xdr_error("integer overflow for 8-bit value");
+                      v = static_cast<std::uint8_t>(tmpbuf[3]);
+                    })));
   }
 
   template<std::unsigned_integral T>
   auto write(const T& v) const {
-    return operation_block<true>{}
-        .template buffer<4>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  if (v > std::numeric_limits<std::uint8_t>::max())
-                    throw xdr_error("integer overflow for 8-bit value");
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<4>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      if (v > std::numeric_limits<std::uint8_t>::max())
+                        throw xdr_error("integer overflow for 8-bit value");
 
-                  std::array<std::byte, 4> bytes{ std::byte{}, std::byte{}, std::byte{}, static_cast<std::byte>(static_cast<std::uint8_t>(v)) };
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      std::array<std::byte, 4> bytes{ std::byte{}, std::byte{}, std::byte{}, static_cast<std::byte>(static_cast<std::uint8_t>(v)) };
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 
   template<std::signed_integral T>
   auto read(T& v) const {
-    return operation_block<false>{}
-        .template buffer<4>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  std::uint32_t v32;
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .template buffer<4>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      std::uint32_t v32;
 
-                  const auto src = std::span<const std::byte, 4>(tmpbuf);
-                  const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(src.size() == dst.size());
-                  std::copy(src.begin(), src.end(), dst.begin());
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
+                      const auto src = std::span<const std::byte, 4>(tmpbuf);
+                      const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(src.size() == dst.size());
+                      std::copy(src.begin(), src.end(), dst.begin());
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
 
-                  if (v32 > std::numeric_limits<std::uint8_t>::max() || v32 > std::numeric_limits<T>::max())
-                    throw xdr_error("integer value too big to read");
-                  v = v32;
-                }));
+                      if (v32 > std::numeric_limits<std::uint8_t>::max() || v32 > std::numeric_limits<T>::max())
+                        throw xdr_error("integer value too big to read");
+                      v = v32;
+                    })));
   }
 
   template<std::signed_integral T>
@@ -1795,27 +1803,28 @@ struct uint8_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<true>{}
-        .template buffer<4>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  if (v < 0)
-                    throw xdr_error("integer value too small to write");
-                  if (v > std::numeric_limits<std::uint8_t>::max())
-                    throw xdr_error("integer value too big to write");
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<4>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      if (v < 0)
+                        throw xdr_error("integer value too small to write");
+                      if (v > std::numeric_limits<std::uint8_t>::max())
+                        throw xdr_error("integer value too big to write");
 
-                  std::uint32_t v32 = v;
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
+                      std::uint32_t v32 = v;
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
 
-                  auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 };
 
@@ -1836,56 +1845,59 @@ struct uint16_t
 {
   template<std::unsigned_integral T>
   auto read(T& v) const {
-    return operation_block<false>{}
-        .buffer<4>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  assert(tmpbuf.size() == 4);
-                  if (tmpbuf[0] != std::byte{0} ||
-                      tmpbuf[1] != std::byte{0})
-                    throw xdr_error("integer overflow for 16-bit value");
-                  v = 0x100u * static_cast<std::uint8_t>(tmpbuf[2]) + static_cast<std::uint8_t>(tmpbuf[3]);
-                }));
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .buffer<4>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      assert(tmpbuf.size() == 4);
+                      if (tmpbuf[0] != std::byte{0} ||
+                          tmpbuf[1] != std::byte{0})
+                        throw xdr_error("integer overflow for 16-bit value");
+                      v = 0x100u * static_cast<std::uint8_t>(tmpbuf[2]) + static_cast<std::uint8_t>(tmpbuf[3]);
+                    })));
   }
 
   template<std::unsigned_integral T>
   auto write(T& v) const {
-    return operation_block<true>{}
-        .template buffer<4>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  if (v > std::numeric_limits<std::uint16_t>::max())
-                    throw xdr_error("integer overflow for 16-bit value");
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<4>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      if (v > std::numeric_limits<std::uint16_t>::max())
+                        throw xdr_error("integer overflow for 16-bit value");
 
-                  std::array<std::byte, 4> bytes{ std::byte{}, std::byte{}, static_cast<std::byte>(static_cast<std::uint8_t>(v >> 8 & 0xffu)), static_cast<std::byte>(static_cast<std::uint8_t>(v & 0xffu)) };
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      std::array<std::byte, 4> bytes{ std::byte{}, std::byte{}, static_cast<std::byte>(static_cast<std::uint8_t>(v >> 8 & 0xffu)), static_cast<std::byte>(static_cast<std::uint8_t>(v & 0xffu)) };
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 
   template<std::signed_integral T>
   auto read(T& v) const {
-    return operation_block<false>{}
-        .template buffer<4>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  std::uint32_t v32;
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .template buffer<4>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      std::uint32_t v32;
 
-                  const auto src = std::span<const std::byte, 4>(tmpbuf);
-                  const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(src.size() == dst.size());
-                  std::copy(src.begin(), src.end(), dst.begin());
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
+                      const auto src = std::span<const std::byte, 4>(tmpbuf);
+                      const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(src.size() == dst.size());
+                      std::copy(src.begin(), src.end(), dst.begin());
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
 
-                  if (v32 > std::numeric_limits<std::uint16_t>::max() || v32 > std::numeric_limits<T>::max())
-                    throw xdr_error("integer value too big to read");
-                  v = v32;
-                }));
+                      if (v32 > std::numeric_limits<std::uint16_t>::max() || v32 > std::numeric_limits<T>::max())
+                        throw xdr_error("integer value too big to read");
+                      v = v32;
+                    })));
   }
 
   template<std::signed_integral T>
@@ -1893,27 +1905,28 @@ struct uint16_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<true>{}
-        .template buffer<4>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  if (v < 0)
-                    throw xdr_error("integer value too small to write");
-                  if (v > std::numeric_limits<std::uint16_t>::max())
-                    throw xdr_error("integer value too big to write");
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<4>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      if (v < 0)
+                        throw xdr_error("integer value too small to write");
+                      if (v > std::numeric_limits<std::uint16_t>::max())
+                        throw xdr_error("integer value too big to write");
 
-                  std::uint32_t v32 = v;
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
+                      std::uint32_t v32 = v;
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
 
-                  auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 };
 
@@ -1939,19 +1952,21 @@ struct uint32_t
         "implementation only knows little and big endian");
 
     if constexpr(std::endian::native == std::endian::big) {
-      return operation_block<false>{}
-          .append(span_reference<false, 4>(std::as_writable_bytes(std::span<T, 1>(&v, 1))));
+      return unresolved_operation_block<false, std::tuple<>>{}
+          .append_block(operation_block<false>{}
+              .append(span_reference<false, 4>(std::as_writable_bytes(std::span<T, 1>(&v, 1)))));
     } else {
-      return operation_block<false>{}
-          .append(span_reference<false, 4>(std::as_writable_bytes(std::span<T, 1>(&v, 1))))
-          .append(
-              post_invocation(
-                  [&v]() noexcept {
-                    v = (v & 0xff000000u) >> 24
-                      | (v & 0x00ff0000u) >>  8
-                      | (v & 0x0000ff00u) <<  8
-                      | (v & 0x000000ffu) << 24;
-                  }));
+      return unresolved_operation_block<false, std::tuple<>>{}
+          .append_block(operation_block<false>{}
+              .append(span_reference<false, 4>(std::as_writable_bytes(std::span<T, 1>(&v, 1))))
+              .append(
+                  post_invocation(
+                      [&v]() noexcept {
+                        v = (v & 0xff000000u) >> 24
+                          | (v & 0x00ff0000u) >>  8
+                          | (v & 0x0000ff00u) <<  8
+                          | (v & 0x000000ffu) << 24;
+                      })));
     }
   }
 
@@ -1962,22 +1977,24 @@ struct uint32_t
         "implementation only knows little and big endian");
 
     if constexpr(std::endian::native == std::endian::big) {
-      return operation_block<true>{}
-          .append(span_reference<true, 4>(std::as_bytes(std::span<T, 1>(&v, 1))));
+      return unresolved_operation_block<true, std::tuple<>>{}
+          .append_block(operation_block<true>{}
+              .append(span_reference<true, 4>(std::as_bytes(std::span<T, 1>(&v, 1)))));
     } else if constexpr(std::endian::native == std::endian::little) {
-      return operation_block<true>{}
-          .template buffer<4>(
-              pre_buffer_invocation(
-                  [&v](std::span<std::byte> tmpbuf) {
-                    const std::uint32_t x = (v & 0xff000000u) >> 24
-                                          | (v & 0x00ff0000u) >>  8
-                                          | (v & 0x0000ff00u) <<  8
-                                          | (v & 0x000000ffu) << 24;
+      return unresolved_operation_block<true, std::tuple<>>{}
+          .append_block(operation_block<true>{}
+              .template buffer<4>(
+                  pre_buffer_invocation(
+                      [&v](std::span<std::byte> tmpbuf) {
+                        const std::uint32_t x = (v & 0xff000000u) >> 24
+                                              | (v & 0x00ff0000u) >>  8
+                                              | (v & 0x0000ff00u) <<  8
+                                              | (v & 0x000000ffu) << 24;
 
-                    auto bytes = std::as_bytes(std::span<const std::uint32_t, 1>(&x, 1));
-                    assert(tmpbuf.size() == bytes.size());
-                    std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                  }));
+                        auto bytes = std::as_bytes(std::span<const std::uint32_t, 1>(&x, 1));
+                        assert(tmpbuf.size() == bytes.size());
+                        std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                      })));
     }
   }
 
@@ -1987,26 +2004,27 @@ struct uint32_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<false>{}
-        .template buffer<4>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  std::uint32_t v32;
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .template buffer<4>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      std::uint32_t v32;
 
-                  const auto src = std::span<const std::byte, 4>(tmpbuf);
-                  const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(src.size() == dst.size());
-                  std::copy(src.begin(), src.end(), dst.begin());
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
-                  if (v32 > std::numeric_limits<T>::max())
-                    throw xdr_error("integer value too big to read");
-                  v = v32;
-                }));
+                      const auto src = std::span<const std::byte, 4>(tmpbuf);
+                      const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(src.size() == dst.size());
+                      std::copy(src.begin(), src.end(), dst.begin());
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
+                      if (v32 > std::numeric_limits<T>::max())
+                        throw xdr_error("integer value too big to read");
+                      v = v32;
+                    })));
   }
 
   template<std::unsigned_integral T>
@@ -2015,22 +2033,23 @@ struct uint32_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<true>{}
-        .template buffer<4>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  std::uint32_t v32 = v;
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<4>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      std::uint32_t v32 = v;
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
 
-                  auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 
   template<std::unsigned_integral T>
@@ -2039,24 +2058,25 @@ struct uint32_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<false>{}
-        .template buffer<4>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  std::uint32_t v32;
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .template buffer<4>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      std::uint32_t v32;
 
-                  const auto src = std::span<const std::byte, 4>(tmpbuf);
-                  const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(src.size() == dst.size());
-                  std::copy(src.begin(), src.end(), dst.begin());
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
-                  v = v32;
-                }));
+                      const auto src = std::span<const std::byte, 4>(tmpbuf);
+                      const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(src.size() == dst.size());
+                      std::copy(src.begin(), src.end(), dst.begin());
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
+                      v = v32;
+                    })));
   }
 
   template<std::unsigned_integral T>
@@ -2065,50 +2085,52 @@ struct uint32_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<true>{}
-        .template buffer<4>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  if (v > std::numeric_limits<std::uint32_t>::max())
-                    throw xdr_error("integer value too big to write");
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<4>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      if (v > std::numeric_limits<std::uint32_t>::max())
+                        throw xdr_error("integer value too big to write");
 
-                  std::uint32_t v32 = v;
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
+                      std::uint32_t v32 = v;
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
 
-                  auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 
   template<std::signed_integral T>
   auto read(T& v) const {
-    return operation_block<false>{}
-        .template buffer<4>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  std::uint32_t v32;
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .template buffer<4>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      std::uint32_t v32;
 
-                  const auto src = std::span<const std::byte, 4>(tmpbuf);
-                  const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(src.size() == dst.size());
-                  std::copy(src.begin(), src.end(), dst.begin());
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
+                      const auto src = std::span<const std::byte, 4>(tmpbuf);
+                      const auto dst = std::as_writable_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(src.size() == dst.size());
+                      std::copy(src.begin(), src.end(), dst.begin());
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
 
-                  if (v32 > std::numeric_limits<T>::max())
-                    throw xdr_error("integer value too big to read");
-                  v = v32;
-                }));
+                      if (v32 > std::numeric_limits<T>::max())
+                        throw xdr_error("integer value too big to read");
+                      v = v32;
+                    })));
   }
 
   template<std::signed_integral T>
@@ -2116,27 +2138,28 @@ struct uint32_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<true>{}
-        .template buffer<4>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  if (v < 0)
-                    throw xdr_error("integer value too small to write");
-                  if (v > std::numeric_limits<std::uint32_t>::max())
-                    throw xdr_error("integer value too big to write");
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<4>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      if (v < 0)
+                        throw xdr_error("integer value too small to write");
+                      if (v > std::numeric_limits<std::uint32_t>::max())
+                        throw xdr_error("integer value too big to write");
 
-                  std::uint32_t v32 = v;
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v32 = (v32 & 0xff000000u) >> 24
-                        | (v32 & 0x00ff0000u) >>  8
-                        | (v32 & 0x0000ff00u) <<  8
-                        | (v32 & 0x000000ffu) << 24;
-                  }
+                      std::uint32_t v32 = v;
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v32 = (v32 & 0xff000000u) >> 24
+                            | (v32 & 0x00ff0000u) >>  8
+                            | (v32 & 0x0000ff00u) <<  8
+                            | (v32 & 0x000000ffu) << 24;
+                      }
 
-                  auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      auto bytes = std::as_bytes(std::span<std::uint32_t, 1>(&v32, 1));
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 };
 
@@ -2162,23 +2185,25 @@ struct uint64_t
         "implementation only knows little and big endian");
 
     if constexpr(std::endian::native == std::endian::big) {
-      return operation_block<false>{}
-          .append(span_reference<false, 8>(std::as_writable_bytes(std::span<T, 1>(&v, 1))));
+      return unresolved_operation_block<false, std::tuple<>>{}
+          .append_block(operation_block<false>{}
+              .append(span_reference<false, 8>(std::as_writable_bytes(std::span<T, 1>(&v, 1)))));
     } else {
-      return operation_block<false>{}
-          .append(span_reference<false, 8>(std::as_writable_bytes(std::span<T, 1>(&v, 1))))
-          .append(
-              post_invocation(
-                  [&v]() noexcept {
-                    v = (v & 0xff00000000000000ull) >> 56
-                      | (v & 0x00ff000000000000ull) >> 40
-                      | (v & 0x0000ff0000000000ull) >> 24
-                      | (v & 0x000000ff00000000ull) >>  8
-                      | (v & 0x00000000ff000000ull) <<  8
-                      | (v & 0x0000000000ff0000ull) << 24
-                      | (v & 0x000000000000ff00ull) << 40
-                      | (v & 0x00000000000000ffull) << 56;
-                  }));
+      return unresolved_operation_block<false, std::tuple<>>{}
+          .append_block(operation_block<false>{}
+              .append(span_reference<false, 8>(std::as_writable_bytes(std::span<T, 1>(&v, 1))))
+              .append(
+                  post_invocation(
+                      [&v]() noexcept {
+                        v = (v & 0xff00000000000000ull) >> 56
+                          | (v & 0x00ff000000000000ull) >> 40
+                          | (v & 0x0000ff0000000000ull) >> 24
+                          | (v & 0x000000ff00000000ull) >>  8
+                          | (v & 0x00000000ff000000ull) <<  8
+                          | (v & 0x0000000000ff0000ull) << 24
+                          | (v & 0x000000000000ff00ull) << 40
+                          | (v & 0x00000000000000ffull) << 56;
+                      })));
     }
   }
 
@@ -2189,26 +2214,28 @@ struct uint64_t
         "implementation only knows little and big endian");
 
     if constexpr(std::endian::native == std::endian::big) {
-      return operation_block<true>{}
-          .append(span_reference<true, 8>(std::as_bytes(std::span<T, 1>(&v, 1))));
+      return unresolved_operation_block<true, std::tuple<>>{}
+          .append_block(operation_block<true>{}
+              .append(span_reference<true, 8>(std::as_bytes(std::span<T, 1>(&v, 1)))));
     } else if constexpr(std::endian::native == std::endian::little) {
-      return operation_block<true>{}
-          .template buffer<8>(
-              pre_buffer_invocation(
-                  [&v](std::span<std::byte> tmpbuf) {
-                    const std::uint64_t x = (v & 0xff00000000000000ull) >> 56
-                                          | (v & 0x00ff000000000000ull) >> 40
-                                          | (v & 0x0000ff0000000000ull) >> 24
-                                          | (v & 0x000000ff00000000ull) >>  8
-                                          | (v & 0x00000000ff000000ull) <<  8
-                                          | (v & 0x0000000000ff0000ull) << 24
-                                          | (v & 0x000000000000ff00ull) << 40
-                                          | (v & 0x00000000000000ffull) << 56;
+      return unresolved_operation_block<true, std::tuple<>>{}
+          .append_block(operation_block<true>{}
+              .template buffer<8>(
+                  pre_buffer_invocation(
+                      [&v](std::span<std::byte> tmpbuf) {
+                        const std::uint64_t x = (v & 0xff00000000000000ull) >> 56
+                                              | (v & 0x00ff000000000000ull) >> 40
+                                              | (v & 0x0000ff0000000000ull) >> 24
+                                              | (v & 0x000000ff00000000ull) >>  8
+                                              | (v & 0x00000000ff000000ull) <<  8
+                                              | (v & 0x0000000000ff0000ull) << 24
+                                              | (v & 0x000000000000ff00ull) << 40
+                                              | (v & 0x00000000000000ffull) << 56;
 
-                    auto bytes = std::as_bytes(std::span<const std::uint64_t, 1>(&x, 1));
-                    assert(tmpbuf.size() == bytes.size());
-                    std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                  }));
+                        auto bytes = std::as_bytes(std::span<const std::uint64_t, 1>(&x, 1));
+                        assert(tmpbuf.size() == bytes.size());
+                        std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                      })));
     }
   }
 
@@ -2218,30 +2245,31 @@ struct uint64_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<false>{}
-        .template buffer<8>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  std::uint64_t v64;
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .template buffer<8>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      std::uint64_t v64;
 
-                  const auto src = std::span<const std::byte, 8>(tmpbuf);
-                  const auto dst = std::as_writable_bytes(std::span<std::uint64_t, 1>(&v64, 1));
-                  assert(src.size() == dst.size());
-                  std::copy(src.begin(), src.end(), dst.begin());
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v64 = (v64 & 0xff00000000000000ull) >> 56
-                        | (v64 & 0x00ff000000000000ull) >> 40
-                        | (v64 & 0x0000ff0000000000ull) >> 24
-                        | (v64 & 0x000000ff00000000ull) >>  8
-                        | (v64 & 0x00000000ff000000ull) <<  8
-                        | (v64 & 0x0000000000ff0000ull) << 24
-                        | (v64 & 0x000000000000ff00ull) << 40
-                        | (v64 & 0x00000000000000ffull) << 56;
-                  }
-                  if (v64 > std::numeric_limits<T>::max())
-                    throw xdr_error("integer value too big to read");
-                  v = v64;
-                }));
+                      const auto src = std::span<const std::byte, 8>(tmpbuf);
+                      const auto dst = std::as_writable_bytes(std::span<std::uint64_t, 1>(&v64, 1));
+                      assert(src.size() == dst.size());
+                      std::copy(src.begin(), src.end(), dst.begin());
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v64 = (v64 & 0xff00000000000000ull) >> 56
+                            | (v64 & 0x00ff000000000000ull) >> 40
+                            | (v64 & 0x0000ff0000000000ull) >> 24
+                            | (v64 & 0x000000ff00000000ull) >>  8
+                            | (v64 & 0x00000000ff000000ull) <<  8
+                            | (v64 & 0x0000000000ff0000ull) << 24
+                            | (v64 & 0x000000000000ff00ull) << 40
+                            | (v64 & 0x00000000000000ffull) << 56;
+                      }
+                      if (v64 > std::numeric_limits<T>::max())
+                        throw xdr_error("integer value too big to read");
+                      v = v64;
+                    })));
   }
 
   template<std::unsigned_integral T>
@@ -2250,26 +2278,27 @@ struct uint64_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<true>{}
-        .template buffer<8>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  std::uint64_t v64 = v;
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v64 = (v64 & 0xff00000000000000ull) >> 56
-                        | (v64 & 0x00ff000000000000ull) >> 40
-                        | (v64 & 0x0000ff0000000000ull) >> 24
-                        | (v64 & 0x000000ff00000000ull) >>  8
-                        | (v64 & 0x00000000ff000000ull) <<  8
-                        | (v64 & 0x0000000000ff0000ull) << 24
-                        | (v64 & 0x000000000000ff00ull) << 40
-                        | (v64 & 0x00000000000000ffull) << 56;
-                  }
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<8>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      std::uint64_t v64 = v;
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v64 = (v64 & 0xff00000000000000ull) >> 56
+                            | (v64 & 0x00ff000000000000ull) >> 40
+                            | (v64 & 0x0000ff0000000000ull) >> 24
+                            | (v64 & 0x000000ff00000000ull) >>  8
+                            | (v64 & 0x00000000ff000000ull) <<  8
+                            | (v64 & 0x0000000000ff0000ull) << 24
+                            | (v64 & 0x000000000000ff00ull) << 40
+                            | (v64 & 0x00000000000000ffull) << 56;
+                      }
 
-                  auto bytes = std::as_bytes(std::span<std::uint64_t, 1>(&v64, 1));
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      auto bytes = std::as_bytes(std::span<std::uint64_t, 1>(&v64, 1));
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 
   template<std::unsigned_integral T>
@@ -2278,28 +2307,29 @@ struct uint64_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<false>{}
-        .template buffer<8>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  std::uint64_t v64;
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .template buffer<8>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      std::uint64_t v64;
 
-                  const auto src = std::span<const std::byte, 8>(tmpbuf);
-                  const auto dst = std::as_writable_bytes(std::span<std::uint64_t, 1>(&v64, 1));
-                  assert(src.size() == dst.size());
-                  std::copy(src.begin(), src.end(), dst.begin());
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v64 = (v64 & 0xff00000000000000ull) >> 56
-                        | (v64 & 0x00ff000000000000ull) >> 40
-                        | (v64 & 0x0000ff0000000000ull) >> 24
-                        | (v64 & 0x000000ff00000000ull) >>  8
-                        | (v64 & 0x00000000ff000000ull) <<  8
-                        | (v64 & 0x0000000000ff0000ull) << 24
-                        | (v64 & 0x000000000000ff00ull) << 40
-                        | (v64 & 0x00000000000000ffull) << 56;
-                  }
-                  v = v64;
-                }));
+                      const auto src = std::span<const std::byte, 8>(tmpbuf);
+                      const auto dst = std::as_writable_bytes(std::span<std::uint64_t, 1>(&v64, 1));
+                      assert(src.size() == dst.size());
+                      std::copy(src.begin(), src.end(), dst.begin());
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v64 = (v64 & 0xff00000000000000ull) >> 56
+                            | (v64 & 0x00ff000000000000ull) >> 40
+                            | (v64 & 0x0000ff0000000000ull) >> 24
+                            | (v64 & 0x000000ff00000000ull) >>  8
+                            | (v64 & 0x00000000ff000000ull) <<  8
+                            | (v64 & 0x0000000000ff0000ull) << 24
+                            | (v64 & 0x000000000000ff00ull) << 40
+                            | (v64 & 0x00000000000000ffull) << 56;
+                      }
+                      v = v64;
+                    })));
   }
 
   template<std::unsigned_integral T>
@@ -2308,58 +2338,60 @@ struct uint64_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<true>{}
-        .template buffer<8>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  if (v > std::numeric_limits<std::uint64_t>::max())
-                    throw xdr_error("integer value too big to write");
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<8>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      if (v > std::numeric_limits<std::uint64_t>::max())
+                        throw xdr_error("integer value too big to write");
 
-                  std::uint64_t v64 = v;
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v64 = (v64 & 0xff00000000000000ull) >> 56
-                        | (v64 & 0x00ff000000000000ull) >> 40
-                        | (v64 & 0x0000ff0000000000ull) >> 24
-                        | (v64 & 0x000000ff00000000ull) >>  8
-                        | (v64 & 0x00000000ff000000ull) <<  8
-                        | (v64 & 0x0000000000ff0000ull) << 24
-                        | (v64 & 0x000000000000ff00ull) << 40
-                        | (v64 & 0x00000000000000ffull) << 56;
-                  }
+                      std::uint64_t v64 = v;
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v64 = (v64 & 0xff00000000000000ull) >> 56
+                            | (v64 & 0x00ff000000000000ull) >> 40
+                            | (v64 & 0x0000ff0000000000ull) >> 24
+                            | (v64 & 0x000000ff00000000ull) >>  8
+                            | (v64 & 0x00000000ff000000ull) <<  8
+                            | (v64 & 0x0000000000ff0000ull) << 24
+                            | (v64 & 0x000000000000ff00ull) << 40
+                            | (v64 & 0x00000000000000ffull) << 56;
+                      }
 
-                  auto bytes = std::as_bytes(std::span<std::uint64_t, 1>(&v64, 1));
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      auto bytes = std::as_bytes(std::span<std::uint64_t, 1>(&v64, 1));
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 
   template<std::signed_integral T>
   auto read(T& v) const {
-    return operation_block<false>{}
-        .template buffer<8>(
-            post_buffer_invocation(
-                [&v](std::span<const std::byte> tmpbuf) {
-                  std::uint64_t v64;
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .template buffer<8>(
+                post_buffer_invocation(
+                    [&v](std::span<const std::byte> tmpbuf) {
+                      std::uint64_t v64;
 
-                  const auto src = std::span<const std::byte, 8>(tmpbuf);
-                  const auto dst = std::as_writable_bytes(std::span<std::uint64_t, 1>(&v64, 1));
-                  assert(src.size() == dst.size());
-                  std::copy(src.begin(), src.end(), dst.begin());
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v64 = (v64 & 0xff00000000000000ull) >> 56
-                        | (v64 & 0x00ff000000000000ull) >> 40
-                        | (v64 & 0x0000ff0000000000ull) >> 24
-                        | (v64 & 0x000000ff00000000ull) >>  8
-                        | (v64 & 0x00000000ff000000ull) <<  8
-                        | (v64 & 0x0000000000ff0000ull) << 24
-                        | (v64 & 0x000000000000ff00ull) << 40
-                        | (v64 & 0x00000000000000ffull) << 56;
-                  }
+                      const auto src = std::span<const std::byte, 8>(tmpbuf);
+                      const auto dst = std::as_writable_bytes(std::span<std::uint64_t, 1>(&v64, 1));
+                      assert(src.size() == dst.size());
+                      std::copy(src.begin(), src.end(), dst.begin());
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v64 = (v64 & 0xff00000000000000ull) >> 56
+                            | (v64 & 0x00ff000000000000ull) >> 40
+                            | (v64 & 0x0000ff0000000000ull) >> 24
+                            | (v64 & 0x000000ff00000000ull) >>  8
+                            | (v64 & 0x00000000ff000000ull) <<  8
+                            | (v64 & 0x0000000000ff0000ull) << 24
+                            | (v64 & 0x000000000000ff00ull) << 40
+                            | (v64 & 0x00000000000000ffull) << 56;
+                      }
 
-                  if (v64 > std::numeric_limits<T>::max())
-                    throw xdr_error("integer value too big to read");
-                  v = v64;
-                }));
+                      if (v64 > std::numeric_limits<T>::max())
+                        throw xdr_error("integer value too big to read");
+                      v = v64;
+                    })));
   }
 
   template<std::signed_integral T>
@@ -2367,31 +2399,32 @@ struct uint64_t
     static_assert(std::endian::native == std::endian::big || std::endian::native == std::endian::little,
         "implementation only knows little and big endian");
 
-    return operation_block<true>{}
-        .template buffer<8>(
-            pre_buffer_invocation(
-                [&v](std::span<std::byte> tmpbuf) {
-                  if (v < 0)
-                    throw xdr_error("integer value too small to write");
-                  if (v > std::numeric_limits<std::uint64_t>::max())
-                    throw xdr_error("integer value too big to write");
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .template buffer<8>(
+                pre_buffer_invocation(
+                    [&v](std::span<std::byte> tmpbuf) {
+                      if (v < 0)
+                        throw xdr_error("integer value too small to write");
+                      if (v > std::numeric_limits<std::uint64_t>::max())
+                        throw xdr_error("integer value too big to write");
 
-                  std::uint64_t v64 = v;
-                  if constexpr(std::endian::native == std::endian::little) {
-                    v64 = (v64 & 0xff00000000000000ull) >> 56
-                        | (v64 & 0x00ff000000000000ull) >> 40
-                        | (v64 & 0x0000ff0000000000ull) >> 24
-                        | (v64 & 0x000000ff00000000ull) >>  8
-                        | (v64 & 0x00000000ff000000ull) <<  8
-                        | (v64 & 0x0000000000ff0000ull) << 24
-                        | (v64 & 0x000000000000ff00ull) << 40
-                        | (v64 & 0x00000000000000ffull) << 56;
-                  }
+                      std::uint64_t v64 = v;
+                      if constexpr(std::endian::native == std::endian::little) {
+                        v64 = (v64 & 0xff00000000000000ull) >> 56
+                            | (v64 & 0x00ff000000000000ull) >> 40
+                            | (v64 & 0x0000ff0000000000ull) >> 24
+                            | (v64 & 0x000000ff00000000ull) >>  8
+                            | (v64 & 0x00000000ff000000ull) <<  8
+                            | (v64 & 0x0000000000ff0000ull) << 24
+                            | (v64 & 0x000000000000ff00ull) << 40
+                            | (v64 & 0x00000000000000ffull) << 56;
+                      }
 
-                  auto bytes = std::as_bytes(std::span<std::uint64_t, 1>(&v64, 1));
-                  assert(tmpbuf.size() == bytes.size());
-                  std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
-                }));
+                      auto bytes = std::as_bytes(std::span<std::uint64_t, 1>(&v64, 1));
+                      assert(tmpbuf.size() == bytes.size());
+                      std::copy_n(bytes.begin(), bytes.size(), tmpbuf.begin());
+                    })));
   }
 };
 
@@ -2420,14 +2453,16 @@ struct manual_t {
 
   template<typename Fn>
   auto read(Fn&& fn) const {
-    return operation_block<false>{}
-        .append_sequence(manual_invocation(std::forward<Fn>(fn)));
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+        .append_sequence(manual_invocation(std::forward<Fn>(fn))));
   }
 
   template<typename Fn>
   auto write(Fn&& fn) const {
-    return operation_block<true>{}
-        .append_sequence(manual_invocation(std::forward<Fn>(fn)));
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+        .append_sequence(manual_invocation(std::forward<Fn>(fn))));
   }
 };
 
@@ -2444,30 +2479,32 @@ struct padding_t
   };
 
   auto read(value& v) const {
-    return operation_block<false>{}
-        .append(dynamic_span_reference(
-                [&v]() {
-                  if (v.len > v.buf.size()) throw std::logic_error("xdr: incorrect padding instruction");
-                  return std::span<std::byte>(v.buf.data(), v.buf.size()).subspan(0, v.len);
-                }))
-        .append(
-            post_invocation(
-                [&v]() {
-                  if (std::any_of(v.buf.begin(), v.buf.end(),
-                          [](std::byte b) {
-                            return b != std::byte{0};
-                          }))
-                    throw xdr_error("padding with non-zeroed bytes");
-                }));
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .append(dynamic_span_reference(
+                    [&v]() {
+                      if (v.len > v.buf.size()) throw std::logic_error("xdr: incorrect padding instruction");
+                      return std::span<std::byte>(v.buf.data(), v.buf.size()).subspan(0, v.len);
+                    }))
+            .append(
+                post_invocation(
+                    [&v]() {
+                      if (std::any_of(v.buf.begin(), v.buf.end(),
+                              [](std::byte b) {
+                                return b != std::byte{0};
+                              }))
+                        throw xdr_error("padding with non-zeroed bytes");
+                    })));
   }
 
   auto write(const value& v) const {
-    return operation_block<true>{}
-        .append(dynamic_span_reference(
-                [&v]() {
-                  if (v.len > v.buf.size()) throw std::logic_error("xdr: incorrect padding instruction");
-                  return std::span<const std::byte>(v.buf.data(), v.buf.size()).subspan(0, v.len);
-                }));
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .append(dynamic_span_reference(
+                    [&v]() {
+                      if (v.len > v.buf.size()) throw std::logic_error("xdr: incorrect padding instruction");
+                      return std::span<const std::byte>(v.buf.data(), v.buf.size()).subspan(0, v.len);
+                    })));
   }
 };
 
@@ -2945,7 +2982,7 @@ struct collection_t
         .append_block(operation_block<false>{}
             .append(post_invocation<decltype(apply_size_fn), 0>(std::move(apply_size_fn)))
             .append_sequence(io_barrier{}))
-        .append_block(fixed_collection_t{}.read(collection, std::move(invocation)));
+        .merge(fixed_collection_t{}.read(collection, std::move(invocation)));
   }
 
   // When we cannot resize the collection,
@@ -3039,7 +3076,7 @@ struct collection_t
         .append_block(operation_block<true>{}
             .append(pre_invocation<decltype(set_size_fn), 0>(std::move(set_size_fn))))
         .append_block(readwrite_temporary_variable<tuple_element_of_type<0, size_type>>.write(uint32_t{}))
-        .append_block(fixed_collection_t{}.write(collection, std::move(invocation)));
+        .merge(fixed_collection_t{}.write(collection, std::move(invocation)));
   }
 };
 
