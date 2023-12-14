@@ -1444,7 +1444,7 @@ class operation_block {
 
   auto sender_chain() && {
     return execution::then(
-        [tmpbuf=std::move(this->tmpbuf)]<typename FD, typename Temporaries = std::nullptr_t>(FD&& fd, Temporaries* temporaries /* XXX */ = nullptr) mutable {
+        [tmpbuf=std::move(this->tmpbuf)]<typename FD, typename Temporaries>(FD&& fd, Temporaries* temporaries) mutable {
           return make_state_(std::forward<FD>(fd), std::move(tmpbuf).get_data(), temporaries);
         })
     | std::move(sequences).apply(
@@ -1533,7 +1533,10 @@ class operation_block<IsConst, 0> {
   operation_block() = default;
 
   auto sender_chain() && {
-    return execution::noop();
+    return execution::then(
+        []<typename FD, typename Temporaries>(FD&& fd, Temporaries* temporaries) -> decltype(auto) {
+          return std::forward<FD>(fd);
+        });
   }
 
   template<typename Temporaries>
@@ -1618,11 +1621,17 @@ class unresolved_operation_block<IsConst, std::tuple<Temporaries...>, Elements..
   auto sender_chain() && {
     if constexpr(std::is_same_v<temporaries, std::tuple<>>) {
       temporaries no_temporaries;
-      return std::move(*this).resolve(no_temporaries).sender_chain();
+      return execution::lazy_then(
+          []<typename FD>(FD&& fd) {
+            std::tuple<>* no_temporaries = nullptr;
+            return std::tuple<FD, temporaries*>(std::forward<FD>(fd), no_temporaries);
+          })
+      | execution::lazy_explode_tuple()
+      | std::move(*this).resolve(no_temporaries).sender_chain();
     } else {
       return execution::lazy_then(
           []<typename FD>(FD&& fd) -> std::tuple<FD, temporaries> {
-            return std::make_tuple(std::forward<FD>(fd), temporaries{});
+            return std::tuple<FD, temporaries>(std::forward<FD>(fd), temporaries{});
           })
       | execution::lazy_explode_tuple()
       | execution::lazy_let_value(
