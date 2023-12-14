@@ -11,6 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include <earnest/xdr.h>
+#include <earnest/xdr_v2.h>
 
 namespace earnest {
 
@@ -36,6 +37,16 @@ struct file_id {
   auto operator==(const file_id& y) const noexcept -> bool = default;
 
   auto to_string() const -> std::string;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, file_id& fid) {
+    return xdr_v2::ascii_string.read(fid.ns)
+    | xdr_v2::ascii_string.read(fid.filename);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const file_id& fid) {
+    return xdr_v2::ascii_string.write(fid.ns)
+    | xdr_v2::ascii_string.write(fid.filename);
+  }
 
   std::string ns; // Namespace in which the file is located.
   std::string filename; // Name of the file.

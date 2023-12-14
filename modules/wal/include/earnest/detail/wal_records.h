@@ -7,6 +7,7 @@
 #include <earnest/fd.h>
 #include <earnest/file_id.h>
 #include <earnest/xdr.h>
+#include <earnest/xdr_v2.h>
 
 namespace earnest::detail {
 
@@ -31,6 +32,14 @@ struct wal_record_end_of_records {
   static constexpr std::uint32_t opcode = 0;
 
   auto operator<=>(const wal_record_end_of_records& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_end_of_records& r) {
+    return xdr_v2::skip.read(r);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_end_of_records& r) {
+    return xdr_v2::skip.write(r);
+  }
 };
 template<> struct record_write_type_<wal_record_end_of_records> { using type = wal_record_end_of_records; };
 
@@ -44,6 +53,14 @@ struct wal_record_noop {
   static constexpr std::uint32_t opcode = 1;
 
   auto operator<=>(const wal_record_noop& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_noop& r) {
+    return xdr_v2::skip.read(r);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_noop& r) {
+    return xdr_v2::skip.write(r);
+  }
 };
 template<> struct record_write_type_<wal_record_noop> { using type = wal_record_noop; };
 
@@ -59,6 +76,48 @@ struct wal_record_skip32 {
   std::uint32_t bytes;
 
   auto operator<=>(const wal_record_skip32& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_skip32& r) {
+    return xdr_v2::uint32.read(r.bytes)
+    | xdr_v2::manual.read(
+        [&r](auto& stream) {
+          if constexpr(requires { stream.skip(r.bytes); }) {
+            stream.skip(r.bytes);
+            return execution::just(std::move(stream));
+          } else {
+            return execution::just(std::string(r.bytes, '\0'))
+            | execution::lazy_let_value(
+                [&stream](auto& s) {
+                  return execution::io::lazy_read(stream, std::as_writable_bytes(std::span<char>(s.data(), s.size())))
+                  | execution::lazy_then(
+                      [&stream]([[maybe_unused]] std::size_t bytes) {
+                        return std::move(stream);
+                      });
+                });
+          }
+        });
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_skip32& r) {
+    return xdr_v2::uint32.write(r.bytes)
+    | xdr_v2::manual.write(
+        [&r](auto& stream) {
+          if constexpr(requires { stream.skip(r.bytes); }) {
+            stream.skip(r.bytes);
+            return execution::just(std::move(stream));
+          } else {
+            return execution::just(std::string(r.bytes, '\0'))
+            | execution::lazy_let_value(
+                [&stream](auto& s) {
+                  return execution::io::lazy_write(stream, std::as_bytes(std::span<char>(s.data(), s.size())))
+                  | execution::lazy_then(
+                      [&stream]([[maybe_unused]] std::size_t bytes) {
+                        return std::move(stream);
+                      });
+                });
+          }
+        });
+  }
 };
 template<> struct record_write_type_<wal_record_skip32> { using type = wal_record_skip32; };
 
@@ -68,6 +127,48 @@ struct wal_record_skip64 {
   std::uint64_t bytes;
 
   auto operator<=>(const wal_record_skip64& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_skip64& r) {
+    return xdr_v2::uint64.read(r.bytes)
+    | xdr_v2::manual.read(
+        [&r](auto& stream) {
+          if constexpr(requires { stream.skip(r.bytes); }) {
+            stream.skip(r.bytes);
+            return execution::just(std::move(stream));
+          } else {
+            return execution::just(std::string(r.bytes, '\0'))
+            | execution::lazy_let_value(
+                [&stream](auto& s) {
+                  return execution::io::lazy_read(stream, std::as_writable_bytes(std::span<char>(s.data(), s.size())))
+                  | execution::lazy_then(
+                      [&stream]([[maybe_unused]] std::size_t bytes) {
+                        return std::move(stream);
+                      });
+                });
+          }
+        });
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_skip64& r) {
+    return xdr_v2::uint64.write(r.bytes)
+    | xdr_v2::manual.write(
+        [&r](auto& stream) {
+          if constexpr(requires { stream.skip(r.bytes); }) {
+            stream.skip(r.bytes);
+            return execution::just(std::move(stream));
+          } else {
+            return execution::just(std::string(r.bytes, '\0'))
+            | execution::lazy_let_value(
+                [&stream](auto& s) {
+                  return execution::io::lazy_write(stream, std::as_bytes(std::span<char>(s.data(), s.size())))
+                  | execution::lazy_then(
+                      [&stream]([[maybe_unused]] std::size_t bytes) {
+                        return std::move(stream);
+                      });
+                });
+          }
+        });
+  }
 };
 template<> struct record_write_type_<wal_record_skip64> { using type = wal_record_skip64; };
 
@@ -150,6 +251,14 @@ struct wal_record_seal {
   static constexpr std::uint32_t opcode = 4;
 
   auto operator<=>(const wal_record_seal& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_seal& r) {
+    return xdr_v2::skip.read(r);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_seal& r) {
+    return xdr_v2::skip.write(r);
+  }
 };
 template<> struct record_write_type_<wal_record_seal> { using type = wal_record_seal; };
 
@@ -166,6 +275,14 @@ struct wal_record_wal_archived {
   std::uint64_t sequence;
 
   auto operator<=>(const wal_record_wal_archived& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_wal_archived& r) {
+    return xdr_v2::uint64.read(r.sequence);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_wal_archived& r) {
+    return xdr_v2::uint64.write(r.sequence);
+  }
 };
 template<> struct record_write_type_<wal_record_wal_archived> { using type = wal_record_wal_archived; };
 
@@ -182,6 +299,14 @@ struct wal_record_rollover_intent {
   std::string filename;
 
   auto operator<=>(const wal_record_rollover_intent& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_rollover_intent& r) {
+    return xdr_v2::ascii_string.read(r.filename);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_rollover_intent& r) {
+    return xdr_v2::ascii_string.write(r.filename);
+  }
 };
 template<> struct record_write_type_<wal_record_rollover_intent> { using type = wal_record_rollover_intent; };
 
@@ -198,6 +323,14 @@ struct wal_record_rollover_ready {
   std::string filename;
 
   auto operator<=>(const wal_record_rollover_ready& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_rollover_ready& r) {
+    return xdr_v2::ascii_string.read(r.filename);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_rollover_ready& r) {
+    return xdr_v2::ascii_string.write(r.filename);
+  }
 };
 template<> struct record_write_type_<wal_record_rollover_ready> { using type = wal_record_rollover_ready; };
 
@@ -213,6 +346,14 @@ struct wal_record_create_file {
   file_id file;
 
   auto operator<=>(const wal_record_create_file& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_create_file& r) {
+    return xdr_v2::identity.read(r.file);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_create_file& r) {
+    return xdr_v2::identity.write(r.file);
+  }
 };
 template<> struct record_write_type_<wal_record_create_file> { using type = wal_record_create_file; };
 
@@ -228,6 +369,14 @@ struct wal_record_erase_file {
   file_id file;
 
   auto operator<=>(const wal_record_erase_file& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_erase_file& r) {
+    return xdr_v2::identity.read(r.file);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_erase_file& r) {
+    return xdr_v2::identity.write(r.file);
+  }
 };
 template<> struct record_write_type_<wal_record_erase_file> { using type = wal_record_erase_file; };
 
@@ -244,6 +393,16 @@ struct wal_record_truncate_file {
   std::uint64_t new_size;
 
   auto operator<=>(const wal_record_truncate_file& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_truncate_file& r) {
+    return xdr_v2::identity.read(r.file)
+    | xdr_v2::uint64.read(r.new_size);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_truncate_file& r) {
+    return xdr_v2::identity.write(r.file)
+    | xdr_v2::uint64.write(r.new_size);
+  }
 };
 template<> struct record_write_type_<wal_record_truncate_file> { using type = wal_record_truncate_file; };
 
@@ -261,6 +420,12 @@ struct wal_record_modify_file_write32 {
   file_id file;
   std::uint64_t file_offset;
   std::vector<std::byte> data;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_modify_file_write32& r) {
+    return xdr_v2::byte_string.write(r.data)
+    | xdr_v2::identity.write(r.file)
+    | xdr_v2::uint64.write(r.file_offset);
+  }
 };
 
 template<typename Executor, typename Reactor = aio::reactor>
@@ -275,6 +440,19 @@ struct wal_record_modify_file32 {
   std::shared_ptr<const fd<Executor, Reactor>> wal_file;
 
   auto operator<=>(const wal_record_modify_file32& y) const noexcept = default;
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_modify_file32& r) {
+    return xdr_v2::uint32.read(r.wal_len)
+    | xdr_v2::manual.read(
+        [&r](auto& stream) {
+          r.wal_offset = stream.position();
+          stream.skip(r.wal_len);
+          stream.skip((0u - r.wal_len) % 4u); // Skip padding.
+          return execution::just(std::move(stream));
+        })
+    | xdr_v2::identity.read(r.file)
+    | xdr_v2::uint64.read(r.file_offset);
+  }
 };
 
 template<typename Executor, typename Reactor> struct record_write_type_<wal_record_modify_file32<Executor, Reactor>> { using type = wal_record_modify_file_write32; };
@@ -369,6 +547,20 @@ struct wal_record_variant
   friend inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_variant& v) {
     return std::move(x) & v.decoder_();
   }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_variant& v) {
+    return xdr_variant_defn().read(v);
+  }
+
+  private:
+  static auto xdr_variant_defn() {
+    return xdr_variant_defn(std::make_index_sequence<std::variant_size_v<wal_record_variant_<Executor, Reactor>>>{});
+  }
+
+  template<std::size_t... Idx>
+  static auto xdr_variant_defn([[maybe_unused]] std::index_sequence<Idx...> indices) {
+    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_<Executor, Reactor>>::opcode>(xdr_identity)...);
+  }
 };
 
 // This type simply wraps the underlying std::variant.
@@ -408,6 +600,20 @@ struct wal_record_write_variant
   template<typename... X>
   friend inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_write_variant& v) {
     return std::move(x) & v.encoder_();
+  }
+
+  friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_write_variant& v) {
+    return xdr_variant_defn().write(v);
+  }
+
+  private:
+  static auto xdr_variant_defn() {
+    return xdr_variant_defn(std::make_index_sequence<std::variant_size_v<wal_record_variant_<Executor, Reactor>>>{});
+  }
+
+  template<std::size_t... Idx>
+  static auto xdr_variant_defn([[maybe_unused]] std::index_sequence<Idx...> indices) {
+    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_<Executor, Reactor>>::opcode>(xdr_identity)...);
   }
 };
 

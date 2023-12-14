@@ -51,11 +51,23 @@
 #include <earnest/execution_util.h>
 #include <earnest/execution_io.h>
 
-namespace earnest::xdr {
+namespace earnest::xdr_v2 {
 
 
-class reader;
-class writer;
+struct reader_t {
+  template<typename T>
+  auto operator()(T& v) const noexcept(execution::nothrow_tag_invocable<reader_t, T&>) -> execution::tag_invoke_result_t<reader_t, T&> {
+    return execution::tag_invoke(*this, v);
+  }
+};
+struct writer_t {
+  template<typename T>
+  auto operator()(const T& v) const noexcept(execution::nothrow_tag_invocable<writer_t, const T&>) -> execution::tag_invoke_result_t<writer_t, const T&> {
+    return execution::tag_invoke(*this, v);
+  }
+};
+inline constexpr reader_t reader{};
+inline constexpr writer_t writer{};
 
 
 class xdr_error
@@ -63,6 +75,9 @@ class xdr_error
 {
   using std::runtime_error::runtime_error;
 };
+
+
+namespace operation {
 
 
 template<typename T>
@@ -138,27 +153,10 @@ concept unresolved_operation_block_element =
     };
 
 template<typename T>
-concept read_operation =
-    true; // XXX
+concept readable_object = execution::tag_invocable<reader_t, std::remove_cvref_t<T>&>;
 
 template<typename T>
-concept write_operation =
-    true; // XXX
-
-template<typename T>
-concept readable_object =
-    requires(reader r, T& v) {
-      { r & v } -> read_operation;
-    };
-
-template<typename T>
-concept writable_object =
-    requires(writer w, const T& v) {
-      { w & v } -> write_operation;
-    };
-
-
-namespace operation {
+concept writable_object = execution::tag_invocable<writer_t, const std::remove_cvref_t<T>&>;
 
 
 template<bool IsConst, typename Temporaries, unresolved_operation_block_element<Temporaries>... Elements>
@@ -252,7 +250,9 @@ struct io_barrier {
   auto buffer_shift([[maybe_unused]] std::size_t) noexcept {}
 
   template<std::size_t N>
-  auto temporaries_shift() noexcept {}
+  auto temporaries_shift() noexcept -> io_barrier&& {
+    return std::move(*this);
+  }
 
   template<bool IsConst>
   auto make_sender_chain() {
@@ -360,7 +360,7 @@ class pre_invocation {
 
   template<std::size_t N>
   auto temporaries_shift() && {
-    return pre_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
+    return pre_invocation<Fn, (TemporariesIndices + N)...>(std::move(fn));
   }
 
   private:
@@ -387,7 +387,7 @@ class post_invocation {
 
   template<std::size_t N>
   auto temporaries_shift() && {
-    return post_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
+    return post_invocation<Fn, (TemporariesIndices + N)...>(std::move(fn));
   }
 
   private:
@@ -1697,6 +1697,12 @@ class unresolved_operation_block<IsConst, std::tuple<Temporaries...>, Elements..
 };
 
 
+template<is_unresolved_operation_block X, is_unresolved_operation_block Y>
+auto operator|(X&& x, Y&& y) {
+  return std::forward<X>(x).merge(std::forward<Y>(y));
+}
+
+
 template<typename Op, typename... Options>
 class operation_with_options {
   public:
@@ -2693,7 +2699,7 @@ struct constant_t {
 
 template<typename S, std::size_t ElementSize>
 concept string =
-    std::integral<typename std::remove_cvref_t<S>::value_type> &&
+    (std::integral<typename std::remove_cvref_t<S>::value_type> || std::same_as<std::byte, typename std::remove_cvref_t<S>::value_type>) &&
     (sizeof(typename std::remove_cvref_t<S>::value_type) == ElementSize) &&
     requires(S s) {
       { s.data() } -> std::convertible_to<const typename std::remove_cvref_t<S>::value_type*>;
@@ -3414,6 +3420,24 @@ static_assert(invocation_for<skip_t, int>);
 static_assert(invocation_for<skip_t, std::monostate>);
 
 
+// Identity conversion.
+struct identity_t
+: basic_operation<identity_t>
+{
+  template<readable_object T>
+  auto read(T& v) const {
+    return unresolved_operation_block<false, std::tuple<>>{}
+    | reader(v);
+  }
+
+  template<writable_object T>
+  auto write(T& v) const {
+    return unresolved_operation_block<true, std::tuple<>>{}
+    | writer(v);
+  }
+};
+
+
 } /* namespace operation */
 
 
@@ -3432,6 +3456,7 @@ inline constexpr operation::collection_t         collection{};
 inline constexpr operation::optional_t           optional{};
 inline constexpr operation::variant_t            variant{};
 inline constexpr operation::skip_t               skip{};
+inline constexpr operation::identity_t           identity{};
 
 
 } /* namespace earnest::xdr */

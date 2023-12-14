@@ -25,7 +25,7 @@ target_sources(wal
 
 find_package(Boost REQUIRED)
 target_include_directories(wal INTERFACE ${Boost_INCLUDE_DIR})
-target_link_libraries(wal INTERFACE asio asio_util xdr io util spdlog::spdlog)
+target_link_libraries(wal INTERFACE asio asio_util xdr io util spdlog::spdlog xdr_v2)
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wal_file_entry_test_tmpdir")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wal_file_test_tmpdir")
