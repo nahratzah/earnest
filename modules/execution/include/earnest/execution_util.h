@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -925,7 +926,7 @@ struct noop_t {
     return _generic_adapter(*this);
   }
 };
-inline constexpr noop_t noop;
+inline constexpr noop_t noop{};
 
 
 // An adapter that turns an exception-pointer holding a std::system_error,
@@ -1372,7 +1373,345 @@ struct let_variant_t {
     return sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>(std::forward<S>(s), std::forward<Fn>(fn));
   }
 };
-inline constexpr let_variant_t let_variant;
+inline constexpr let_variant_t let_variant{};
+
+
+template<typename ValueTypes, typename ErrorTypes = std::variant<std::exception_ptr>, bool SendsDone = true>
+struct type_erased_sender;
+
+// We declare as many types as we can outside the type_erased_sender_t,
+// so we can share types across implementations.
+struct type_erased_sender_base_ {
+  template<typename... T>
+  class receiver_intf_for_values {
+    static_assert((std::same_as<T, std::remove_cvref_t<T>> &&...)); // We want regular types, not references, nor const/volatile types.
+    template<typename ReceiverIntf> friend class receiver_wrapper_t;
+
+    public:
+    template<typename Derived, typename CombinedInterfaceType> class impl;
+
+    virtual ~receiver_intf_for_values() = default;
+
+    friend auto tag_invoke([[maybe_unused]] set_value_t tag, receiver_intf_for_values&& self, T... v) noexcept -> void {
+      std::move(self).set_value(std::move(v)...);
+    }
+
+    private:
+    virtual void set_value(T... v) && noexcept = 0;
+  };
+
+  template<typename Tuple>
+  struct receiver_intf_for_tuple_;
+
+  template<typename... T>
+  struct receiver_intf_for_tuple_<std::tuple<T...>> {
+    using type = receiver_intf_for_values<T...>;
+  };
+
+  template<typename Tuple>
+  using receiver_intf_for_tuple = typename receiver_intf_for_tuple_<Tuple>::type;
+
+  template<typename Error>
+  class receiver_intf_for_error {
+    template<typename ReceiverIntf> friend class receiver_wrapper_t;
+
+    public:
+    template<typename Derived, typename CombinedInterfaceType> class impl;
+
+    virtual ~receiver_intf_for_error() = default;
+
+    friend auto tag_invoke([[maybe_unused]] set_error_t tag, receiver_intf_for_error&& self, Error error) noexcept -> void {
+      std::move(self).set_error(std::move(error));
+    }
+
+    private:
+    virtual void set_error(Error error) && noexcept = 0;
+  };
+
+  template<bool SendsDone>
+  class receiver_intf_for_done {
+    template<typename ReceiverIntf> friend class receiver_wrapper_t;
+
+    public:
+    template<typename Derived, typename CombinedInterfaceType> class impl;
+
+    virtual ~receiver_intf_for_done() = default;
+
+    friend auto tag_invoke([[maybe_unused]] set_done_t tag, receiver_intf_for_done&& self) noexcept -> void {
+      std::move(self).set_done();
+    }
+
+    protected:
+    virtual void set_done() && noexcept = 0;
+  };
+
+  template<typename ReceiverIntf>
+  class receiver_wrapper_t {
+    public:
+    explicit receiver_wrapper_t(ReceiverIntf* r) noexcept
+    : r(r)
+    {}
+
+    receiver_wrapper_t(const receiver_wrapper_t&) = delete;
+
+    receiver_wrapper_t(receiver_wrapper_t&& other) noexcept
+    : r(std::exchange(other.r, nullptr))
+    {}
+
+    template<typename... T>
+    friend auto tag_invoke(set_value_t tag, receiver_wrapper_t&& self, T&&... v) {
+      tag(std::move(*self.r), std::forward<T>(v)...);
+    }
+
+    template<typename Error>
+    friend auto tag_invoke(set_error_t tag, receiver_wrapper_t&& self, Error&& error) noexcept {
+      tag(std::move(*self.r), std::forward<Error>(error));
+    }
+
+    friend auto tag_invoke(set_done_t tag, receiver_wrapper_t&& self) noexcept {
+      tag(std::move(*self.r));
+    }
+
+    private:
+    ReceiverIntf *r;
+  };
+
+  class operation_state_intf
+  {
+    public:
+    template<typed_sender Sender, receiver Receiver> class impl;
+
+    virtual ~operation_state_intf() = default;
+
+    virtual void start() noexcept = 0;
+  };
+
+  template<typename ReceiverIntf>
+  class sender_intf {
+    public:
+    template<typed_sender SenderImpl> class impl;
+
+    virtual ~sender_intf() = default;
+
+    virtual auto connect(ReceiverIntf* r) && -> std::unique_ptr<operation_state_intf> = 0;
+  };
+
+  template<receiver Receiver>
+  class operation_state
+  : public operation_state_base_
+  {
+    public:
+    template<typename ReceiverIntf>
+    explicit operation_state(sender_intf<ReceiverIntf>&& s, Receiver&& r) noexcept
+    : r(std::move(r)),
+      impl(std::move(s).connect(&this->r))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, operation_state& self) noexcept -> void {
+      assert(self.impl != nullptr);
+      self.impl->start();
+    }
+
+    private:
+    Receiver r;
+    std::unique_ptr<operation_state_intf> impl;
+  };
+
+  template<typename ValuesTuple> struct rebind_values_tuple;
+
+  template<typename... T>
+  struct rebind_values_tuple<std::tuple<T...>> {
+    template<template<typename...> class Tuple>
+    using type = Tuple<T...>;
+  };
+};
+
+template<typename... T>
+template<typename Derived, typename CombinedInterfaceType>
+class type_erased_sender_base_::receiver_intf_for_values<T...>::impl
+: public virtual CombinedInterfaceType
+{
+  public:
+  ~impl() override = default;
+
+  private:
+  void set_value(T... v) && noexcept override final {
+    assert(dynamic_cast<Derived*>(this) != nullptr);
+    try {
+      std::move(static_cast<Derived&>(*this)).set_value_impl(std::move(v)...);
+    } catch (...) {
+      std::move(static_cast<Derived&>(*this)).set_error_impl(std::current_exception());
+    }
+  }
+};
+
+template<typename Error>
+template<typename Derived, typename CombinedInterfaceType>
+class type_erased_sender_base_::receiver_intf_for_error<Error>::impl
+: public virtual CombinedInterfaceType
+{
+  public:
+  ~impl() override = default;
+
+  private:
+  void set_error(Error error) && noexcept override final {
+    assert(dynamic_cast<Derived*>(this) != nullptr);
+    std::move(static_cast<Derived&>(*this)).set_error_impl(std::move(error));
+  }
+};
+
+template<bool SendsDone>
+template<typename Derived, typename CombinedInterfaceType>
+class type_erased_sender_base_::receiver_intf_for_done<SendsDone>::impl
+: public virtual CombinedInterfaceType
+{
+  public:
+  ~impl() override = default;
+
+  private:
+  void set_done() && noexcept override final {
+    assert(dynamic_cast<Derived*>(this) != nullptr);
+    if constexpr(SendsDone) {
+      std::move(static_cast<Derived&>(*this)).set_done_impl();
+    } else {
+      // We must implement the sends-done interface.
+      // But if the interface declares no done-signal to be sent,
+      // we'll trip undefined behaviour.
+#if __cpp_lib_unreachable >= 202202L
+      std::unreachable();
+#else
+      std::abort();
+#endif
+    }
+  }
+};
+
+template<typename ReceiverIntf>
+template<typed_sender SenderImpl>
+class type_erased_sender_base_::sender_intf<ReceiverIntf>::impl
+: public sender_intf
+{
+  public:
+  explicit impl(SenderImpl&& sender_impl)
+  : sender_impl(std::move(sender_impl))
+  {}
+
+  auto connect(ReceiverIntf* r) && -> std::unique_ptr<operation_state_intf> override {
+    return std::make_unique<operation_state_intf::impl<SenderImpl, receiver_wrapper_t<ReceiverIntf>>>(
+        std::move(sender_impl),
+        receiver_wrapper_t<ReceiverIntf>(r));
+  }
+
+  private:
+  SenderImpl sender_impl;
+};
+
+template<typed_sender Sender, receiver Receiver>
+class type_erased_sender_base_::operation_state_intf::impl
+: public operation_state_intf
+{
+  private:
+  using opstate_type = std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>;
+
+  public:
+  explicit impl(Sender&& s, Receiver&& r)
+  : opstate(execution::connect(std::move(s), std::move(r)))
+  {}
+
+  ~impl() override = default;
+
+  void start() noexcept override {
+    execution::start(opstate);
+  }
+
+  private:
+  opstate_type opstate;
+};
+
+template<typename... ValueTypes, typename... ErrorTypes, bool SendsDone>
+class type_erased_sender<std::variant<ValueTypes...>, std::variant<ErrorTypes...>, SendsDone> {
+  public:
+  template<template<typename...> class Tuple, template<typename...> class Variant>
+  using value_types = Variant<typename type_erased_sender_base_::rebind_values_tuple<ValueTypes>::template type<Tuple>...>;
+
+  template<template<typename...> class Variant>
+  using error_types = Variant<std::exception_ptr, ErrorTypes...>;
+
+  static inline constexpr bool sends_done = SendsDone;
+
+  private:
+  class receiver_intf
+  : public type_erased_sender_base_::receiver_intf_for_tuple<ValueTypes>...,
+    public type_erased_sender_base_::receiver_intf_for_error<ErrorTypes>...,
+    public type_erased_sender_base_::receiver_intf_for_done<SendsDone>
+  {
+    public:
+    virtual ~receiver_intf() = default;
+
+    template<receiver Receiver>
+    class impl
+    : public virtual receiver_intf,
+      public type_erased_sender_base_::receiver_intf_for_tuple<ValueTypes>::template impl<impl<Receiver>, receiver_intf>...,
+      public type_erased_sender_base_::receiver_intf_for_error<ErrorTypes>::template impl<impl<Receiver>, receiver_intf>...,
+      public type_erased_sender_base_::receiver_intf_for_done<SendsDone>::template impl<impl<Receiver>, receiver_intf>
+    {
+      public:
+      explicit impl(Receiver&& r)
+      : r(std::move(r))
+      {}
+
+      ~impl() override = default;
+
+      template<typename... T>
+      auto set_value_impl(T&&... v) && {
+        execution::set_value(std::move(r), std::forward<T>(v)...);
+      }
+
+      template<typename E>
+      auto set_error_impl(E&& e) && noexcept {
+        execution::set_error(std::move(r), std::forward<E>(e));
+      }
+
+      auto set_done_impl() && noexcept {
+        execution::set_done(std::move(r));
+      }
+
+      private:
+      Receiver r;
+    };
+  };
+
+  using sender_intf = type_erased_sender_base_::sender_intf<receiver_intf>;
+
+  template<typename Receiver>
+  using operation_state = type_erased_sender_base_::operation_state<typename receiver_intf::template impl<Receiver>>;
+
+  public:
+  template<typename Impl> // Impl should be a typed_sender, but if I enforce it, the compiler says I'm recursing the move-constructible concept.
+                          // I don't understand why it says that.
+  explicit type_erased_sender(Impl&& impl)
+  : impl(std::make_unique<typename sender_intf::template impl<std::remove_cvref_t<Impl>>>(std::forward<Impl>(impl)))
+  {}
+
+  type_erased_sender(const type_erased_sender&) = delete;
+  type_erased_sender(type_erased_sender&&) noexcept = default;
+
+  template<receiver Receiver>
+  friend auto tag_invoke([[maybe_unused]] connect_t tag, type_erased_sender&& self, Receiver&& r) -> operation_state<std::remove_cvref_t<Receiver>> {
+    return operation_state<std::remove_cvref_t<Receiver>>(
+        std::move(*self.impl),
+        typename receiver_intf::template impl<Receiver>(std::forward<Receiver>(r)));
+  }
+
+  private:
+  std::unique_ptr<sender_intf> impl;
+};
+
+template<typed_sender Sender>
+type_erased_sender(Sender&&) -> type_erased_sender<
+    typename sender_traits<std::remove_cvref_t<Sender>>::template value_types<std::tuple, std::variant>,
+    typename sender_traits<std::remove_cvref_t<Sender>>::template error_types<std::variant>,
+    sender_traits<std::remove_cvref_t<Sender>>::sends_done>;
 
 
 } /* inline namespace extensions */

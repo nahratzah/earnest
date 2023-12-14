@@ -138,3 +138,19 @@ TEST(let_variant) {
       std::string("bla bla chocoladevla"),
       std::get<0>(std::get<std::tuple<std::string>>(x)));
 }
+
+TEST(type_erased_sender) {
+  using traits = sender_traits<decltype(type_erased_sender(just(2, 3, 4)))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<int, int, int>>,
+      traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<std::exception_ptr>,
+      traits::error_types<std::variant>>);
+  static_assert(traits::sends_done == false);
+
+  auto [x, y, z] = sync_wait(type_erased_sender(just(2, 3, 4))).value();
+  CHECK_EQUAL(2, x);
+  CHECK_EQUAL(3, y);
+  CHECK_EQUAL(4, z);
+}
