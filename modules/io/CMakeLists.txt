@@ -7,28 +7,25 @@ mark_as_advanced(IO_VERSION_MAJOR)
 mark_as_advanced(IO_VERSION_MINOR)
 mark_as_advanced(IO_VERSION)
 
-add_library(io SHARED)
+add_library(io INTERFACE)
 set_property(TARGET io PROPERTY VERSION ${IO_VERSION})
-target_compile_features(io PUBLIC cxx_std_17)
+target_compile_features(io INTERFACE cxx_std_17)
 target_sources(io
     PUBLIC
     FILE_SET HEADERS
     BASE_DIRS include
     FILES include/earnest/fd.h include/earnest/dir.h)
-target_sources(io
-    PRIVATE
-    src/dir.cc)
 
 find_package(Boost REQUIRED)
-target_include_directories(io PUBLIC ${Boost_INCLUDE_DIR})
-target_link_libraries(io PUBLIC asio asio_util asio_aio)
+target_include_directories(io INTERFACE ${Boost_INCLUDE_DIR})
+target_link_libraries(io INTERFACE asio asio_util asio_aio execution)
 
 include (CheckFunctionExists)
 if (NOT WIN32)
   CHECK_FUNCTION_EXISTS (mkstemp HAS_MKSTEMP)
   mark_as_advanced (HAS_MKSTEMP)
   if (HAS_MKSTEMP)
-    target_compile_definitions(io PRIVATE HAS_MKSTEMP)
+    target_compile_definitions(io INTERFACE HAS_MKSTEMP)
   else ()
     message (WARNING "no mkstemp() function found")
   endif ()

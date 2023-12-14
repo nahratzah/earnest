@@ -1,6 +1,7 @@
-#ifndef EARNEST_DIR_H
-#define EARNEST_DIR_H
+#pragma once
 
+#include <cassert>
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <iterator>
@@ -8,32 +9,19 @@
 #include <system_error>
 #include <utility>
 
-#ifdef _MSC_VER
-# include <Ntifs.h>
-#else
-# include <dirent.h>
-#endif
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace earnest {
 
 
 class dir {
   public:
-  using native_handle_type =
-#ifdef WIN32
-      HANDLE
-#else
-      int
-#endif
-      ;
+  using native_handle_type = int;
 
-  static inline constexpr native_handle_type invalid_native_handle =
-#ifdef WIN32
-      INVALID_HANDLE_VALUE
-#else
-      -1
-#endif
-      ;
+  static inline constexpr native_handle_type invalid_native_handle = -1;
 
   class entry;
   class iterator;
@@ -46,8 +34,23 @@ class dir {
   : handle_(handle)
   {}
 
-  dir(const dir& other);
-  auto operator=(const dir& other) -> dir&;
+  dir(const dir& other)
+  : dir()
+  {
+    if (other.handle_ != invalid_native_handle) {
+      handle_ = ::dup(other.handle_);
+      if (handle_ == -1) [[unlikely]]
+        throw std::system_error(std::error_code(errno, std::generic_category()));
+    }
+  }
+
+  auto operator=(const dir& other) -> dir& {
+    using std::swap;
+
+    dir copy = other;
+    swap(handle_, copy.handle_);
+    return *this;
+  }
 
   dir(dir&& other) noexcept
   : handle_(std::exchange(other.handle_, invalid_native_handle))
@@ -163,12 +166,88 @@ class dir {
   auto end() const -> iterator;
 
   private:
-  static auto open_(const std::filesystem::path& dirname, std::error_code& ec) -> dir;
-  static auto open_(const dir& parent, const std::filesystem::path& dirname, std::error_code& ec) -> dir;
-  static auto create_(const std::filesystem::path& dirname, std::error_code& ec) -> dir;
-  static auto create_(const dir& parent, const std::filesystem::path& dirname, std::error_code& ec) -> dir;
-  auto close_() -> std::error_code;
-  auto erase_(const std::filesystem::path& name) -> std::error_code;
+  static auto open_(const std::filesystem::path& dirname, std::error_code& ec) -> dir {
+    ec.clear();
+
+    int fl = O_DIRECTORY | O_RDONLY;
+#ifdef O_CLOEXEC
+    fl |= O_CLOEXEC;
+#endif
+
+    dir d;
+    d.handle_ = ::open(dirname.c_str(), fl);
+    if (d.handle_ == -1) ec = std::error_code(errno, std::generic_category());
+    return d;
+  }
+
+  static auto open_(const dir& parent, const std::filesystem::path& dirname, std::error_code& ec) -> dir {
+    dir d;
+
+    if (!parent) {
+      ec = std::make_error_code(std::errc::bad_file_descriptor);
+      return d;
+    }
+
+    ec.clear();
+
+    int fl = O_DIRECTORY | O_RDONLY;
+#ifdef O_CLOEXEC
+    fl |= O_CLOEXEC;
+#endif
+
+    d.handle_ = ::openat(parent.handle_, dirname.c_str(), fl);
+    if (d.handle_ == -1) ec = std::error_code(errno, std::generic_category());
+    return d;
+  }
+
+  static auto create_(const std::filesystem::path& dirname, std::error_code& ec) -> dir {
+    dir d;
+
+    ec.clear();
+
+    if (::mkdir(dirname.c_str(), S_IRWXU|S_IRWXG|S_IRWXO) != 0)
+      ec = std::error_code(errno, std::generic_category());
+    else
+      d = open_(dirname, ec);
+    return d;
+  }
+
+  static auto create_(const dir& parent, const std::filesystem::path& dirname, std::error_code& ec) -> dir {
+    dir d;
+
+    if (!parent) {
+      ec = std::make_error_code(std::errc::bad_file_descriptor);
+      return d;
+    }
+
+    ec.clear();
+
+    if (::mkdirat(parent.handle_, dirname.c_str(), S_IRWXU|S_IRWXG|S_IRWXO) != 0)
+      ec = std::error_code(errno, std::generic_category());
+    else
+      d = open_(parent, dirname, ec);
+    return d;
+  }
+
+  auto close_() -> std::error_code {
+    if (handle_ == invalid_native_handle) return {};
+
+    if (::close(handle_) != 0) return std::error_code(errno, std::generic_category());
+    handle_ = invalid_native_handle;
+    return {};
+  }
+
+  auto erase_(const std::filesystem::path& name) -> std::error_code {
+    if (handle_ == invalid_native_handle)
+      return std::make_error_code(std::errc::bad_file_descriptor);
+
+    struct stat sb;
+    if (::fstatat(handle_, name.c_str(), &sb, AT_SYMLINK_NOFOLLOW) != 0)
+      return std::error_code(errno, std::generic_category());
+    if (::unlinkat(handle_, name.c_str(), S_ISDIR(sb.st_mode) ? AT_REMOVEDIR : 0) != 0)
+      return std::error_code(errno, std::generic_category());
+    return {};
+  }
 
   native_handle_type handle_;
 };
@@ -242,23 +321,33 @@ class dir::iterator {
   constexpr iterator() noexcept = default;
 
   private:
-  explicit iterator(const dir& d);
+  explicit iterator(const dir& d)
+  : iterator()
+  {
+    // The `dup` system call will have the duplicated file descriptor share its
+    // position with the original file descriptor. This means that moving this
+    // iterator would move all iterators that currently exist.
+    // We want iterators to be independent, so we require an independent copy
+    // of the descriptor. We achieve that by opening the same directory.
+    dir fd_copy;
+    fd_copy.open(d, ".");
+
+    // Now move the handle to the iterator.
+    handle_ = ::fdopendir(fd_copy.handle_);
+    if (handle_ == nullptr) throw std::system_error(std::error_code(errno, std::generic_category()), "fdopendir");
+    fd_copy.handle_ = invalid_native_handle; // Claim for ourselves.
+
+    // Load the `begin()` state.
+    query_();
+  }
 
   public:
   iterator(const iterator& other) = delete;
 
-#ifdef _MSC_VER
-  iterator(iterator&& other) noexcept
-  : handle_(std::exchange(other.handle_, invalid_native_handle)),
-    fdi_(std::move(other.fdi_)),
-    fdi_extra_bytes_(std::exchange(other.fdi_extra_bytes_, 0))
-  {}
-#else
   iterator(iterator&& other) noexcept
   : handle_(std::exchange(other.handle_, nullptr)),
     dp_(std::exchange(other.dp_, nullptr))
   {}
-#endif
 
   ~iterator() {
     close_();
@@ -269,32 +358,41 @@ class dir::iterator {
   auto operator=(iterator&& other) noexcept -> iterator& {
     using std::swap;
 
-#ifdef _MSC_VER
-    swap(handle_, other.handle_);
-    swap(fdi_, other.fdi_);
-    swap(fdi_extra_bytes_, other.fdi_extra_bytes_);
-#else
     swap(handle_, other.handle_);
     swap(dp_, other.dp_);
-#endif
 
     other.close_();
     return *this;
   }
 
-  auto operator*() const -> entry;
+  auto operator*() const -> entry {
+    struct ::stat sb;
+    if (::fstatat(dirfd(handle_), dp_->d_name, &sb, AT_SYMLINK_NOFOLLOW) != 0)
+      throw std::system_error(std::error_code(errno, std::generic_category()), "fstatat");
+
+    entry e;
+    e.path_.assign(dp_->d_name);
+    e.file_size_ = sb.st_size;
+    e.hard_link_count_ = sb.st_nlink;
+    e.exists_ = true;
+    e.is_block_file_ = S_ISBLK(sb.st_mode);
+    e.is_character_file_ = S_ISCHR(sb.st_mode);
+    e.is_directory_ = S_ISDIR(sb.st_mode);
+    e.is_fifo_ = S_ISFIFO(sb.st_mode);
+    e.is_regular_file_ = S_ISREG(sb.st_mode);
+    e.is_socket_ = S_ISSOCK(sb.st_mode);
+    e.is_symlink_ = S_ISLNK(sb.st_mode);
+    e.is_other_ = e.exists_ && !e.is_block_file_ && !e.is_character_file_ && !e.is_directory_ && !e.is_fifo_ && !e.is_regular_file_ && !e.is_socket_ && !e.is_symlink_;
+    return e;
+  }
 
   auto operator++() -> iterator& {
-    query_(false);
+    query_();
     return *this;
   }
 
   auto operator==(const iterator& other) const noexcept -> bool {
-#ifdef _MSC_VER
-    return handle_ == invalid_native_handle && other.handle_ == invalid_native_handle;
-#else
     return handle_ == nullptr && other.handle_ == nullptr;
-#endif
   }
 
   auto operator!=(const iterator& other) const noexcept -> bool {
@@ -302,21 +400,20 @@ class dir::iterator {
   }
 
   private:
-  void close_() noexcept;
-  void query_(bool first);
+  void close_() noexcept {
+    if (handle_ != nullptr) ::closedir(handle_);
+    handle_ = nullptr;
+  }
 
-#ifdef _MSC_VER
-  auto new_io_status_block_(std::size_t extra_bytes = 8) -> std::unique_ptr<IO_STATUS_BLOCK, up_free_>;
-#endif
+  void query_() {
+    assert(handle_ != nullptr);
 
-#ifdef _MSC_VER
-  native_handle_type handle_ = invalid_native_handle;
-  std::unique_ptr<FILE_DIRECTORY_INFORMATION, up_free_> fdi_;
-  std::size_t fdi_extra_bytes_ = 0;
-#else
+    dp_ = ::readdir(handle_);
+    if (dp_ == nullptr) close_();
+  }
+
   DIR* handle_ = nullptr;
   struct dirent* dp_ = nullptr;
-#endif
 };
 
 
@@ -330,5 +427,3 @@ inline auto dir::end() const -> iterator {
 
 
 } /* namespace earnest */
-
-#endif /* EARNEST_DIR_H */

@@ -1,12 +1,7 @@
 #ifndef EARNEST_FD_H
 #define EARNEST_FD_H
 
-#ifndef WIN32
-# include <cerrno>
-# include <unistd.h>
-# include <sys/file.h>
-#endif
-
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -15,15 +10,19 @@
 #include <type_traits>
 #include <utility>
 
+#include <sys/file.h>
+#include <unistd.h>
+
 #include <asio/async_result.hpp>
 #include <asio/buffer.hpp>
 #include <asio/execution_context.hpp>
 #include <asio/executor.hpp>
 #include <asio/read_at.hpp>
 
-#include <earnest/open_mode.h>
-#include <earnest/dir.h>
 #include <earnest/detail/aio/reactor.h>
+#include <earnest/dir.h>
+#include <earnest/open_mode.h>
+#include <earnest/execution_io.h>
 
 namespace earnest {
 
@@ -39,29 +38,17 @@ class fd {
   public:
   using executor_type = Executor;
   using lowest_layer_type = fd;
-  using size_type = std::uint64_t;
-  using offset_type = size_type;
+  using offset_type = ::earnest::execution::io::offset_type;
+  using size_type = offset_type;
 
   using open_mode = earnest::open_mode;
   static inline constexpr open_mode READ_ONLY = open_mode::READ_ONLY;
   static inline constexpr open_mode WRITE_ONLY = open_mode::WRITE_ONLY;
   static inline constexpr open_mode READ_WRITE = open_mode::READ_WRITE;
 
-  using native_handle_type =
-#ifdef WIN32
-      HANDLE
-#else
-      int
-#endif
-      ;
+  using native_handle_type = int;
 
-  static inline constexpr native_handle_type invalid_native_handle =
-#ifdef WIN32
-      INVALID_HANDLE_VALUE
-#else
-      -1
-#endif
-      ;
+  static inline constexpr native_handle_type invalid_native_handle = -1;
 
   template<typename OtherExecutor>
   struct rebind_executor {
@@ -222,6 +209,14 @@ class fd {
         token, data_only);
   }
 
+  friend auto tag_invoke(execution::io::lazy_datasync_ec_t tag, fd& self) {
+    return tag(self.handle_);
+  }
+
+  friend auto tag_invoke(execution::io::lazy_sync_ec_t tag, fd& self) {
+    return tag(self.handle_);
+  }
+
   auto size() const -> size_type {
     std::error_code ec;
     size_type sz = size(ec);
@@ -245,6 +240,10 @@ class fd {
     ec.clear();
 
     if (::ftruncate(handle_, sz)) ec.assign(errno, std::generic_category());
+  }
+
+  friend auto tag_invoke(execution::io::lazy_truncate_ec_t tag, fd& self, offset_type len) {
+    return tag(self.handle_, len);
   }
 
   void cancel() {
@@ -496,6 +495,16 @@ restart:
   template<typename Buffers>
   auto write_some_at(offset_type offset, Buffers&& mb, std::error_code& ec) {
     return aio_.write_some_at(handle_, offset, std::forward<Buffers>(mb), ec);
+  }
+
+  template<typename Buffers>
+  friend auto tag_invoke(execution::io::lazy_read_some_at_ec_t tag, const fd& self, offset_type offset, Buffers&& buffers) {
+    return tag(self.handle_, offset, std::forward<Buffers>(buffers));
+  }
+
+  template<typename Buffers>
+  friend auto tag_invoke(execution::io::lazy_write_some_at_ec_t tag, fd& self, offset_type offset, Buffers&& buffers) {
+    return tag(self.handle_, offset, std::forward<Buffers>(buffers));
   }
 
   template<typename Collection>

@@ -2493,4 +2493,240 @@ struct truncate_t {
 inline constexpr truncate_t truncate{};
 
 
+struct lazy_datasync_ec_t {
+  template<typename FD>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd) const
+  -> typed_sender decltype(auto) {
+    return execution::tag_invoke(*this, std::forward<FD>(fd));
+  }
+
+  private:
+  template<receiver_of<> Receiver>
+  class opstate
+  : public operation_state_base_
+  {
+    public:
+    explicit opstate(int fd, Receiver&& r)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : fd(fd),
+      r(std::move(r))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
+      if (::fdatasync(self.fd) == -1) {
+        execution::set_error(std::move(self.r), std::error_code(errno, std::generic_category()));
+      } else {
+        try {
+          execution::set_value(std::move(self.r));
+        } catch (...) {
+          execution::set_error(std::move(self.r), std::current_exception());
+        }
+      }
+    }
+
+    private:
+    int fd;
+    Receiver r;
+  };
+
+  class sender_impl {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<>>;
+
+    template<template<typename...> class Variant>
+    using error_types = Variant<std::exception_ptr, std::error_code>;
+
+    static inline constexpr bool sends_done = false;
+
+    explicit sender_impl(int fd) noexcept
+    : fd(fd)
+    {}
+
+    // Only permit move operations.
+    sender_impl(sender_impl&&) = default;
+    sender_impl(const sender_impl&) = delete;
+
+    template<receiver_of<> Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(std::is_nothrow_constructible_v<
+        opstate<std::remove_cvref_t<Receiver>>,
+        int, offset_type, Receiver>)
+    -> opstate<std::remove_cvref_t<Receiver>> {
+      return opstate<std::remove_cvref_t<Receiver>>(self.fd, std::forward<Receiver>(r));
+    }
+
+    private:
+    int fd;
+  };
+
+  public:
+  auto operator()(int fd) const
+  -> sender_impl {
+    return sender_impl(fd);
+  }
+};
+inline constexpr lazy_datasync_ec_t lazy_datasync_ec{};
+
+
+struct lazy_datasync_t {
+  template<typename FD>
+  auto operator()(FD&& fd) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_datasync_t, FD>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd));
+    } else {
+      return lazy_datasync_ec(std::forward<FD>(fd))
+      | ec_to_exception();
+    }
+  }
+};
+inline constexpr lazy_datasync_t lazy_datasync{};
+
+
+struct datasync_ec_t {
+  template<typename FD>
+  auto operator()(FD&& fd) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<datasync_ec_t, FD>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd));
+    else
+      return lazy_datasync_ec(std::forward<FD>(fd));
+  }
+};
+inline constexpr datasync_ec_t datasync_ec{};
+
+
+struct datasync_t {
+  template<typename FD>
+  auto operator()(FD&& fd) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<datasync_t, FD>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd));
+    else
+      return lazy_datasync(std::forward<FD>(fd));
+  }
+};
+inline constexpr datasync_t datasync{};
+
+
+struct lazy_sync_ec_t {
+  template<typename FD>
+  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  auto operator()(FD&& fd) const
+  -> typed_sender decltype(auto) {
+    return execution::tag_invoke(*this, std::forward<FD>(fd));
+  }
+
+  private:
+  template<receiver_of<> Receiver>
+  class opstate
+  : public operation_state_base_
+  {
+    public:
+    explicit opstate(int fd, Receiver&& r)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : fd(fd),
+      r(std::move(r))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
+      if (::fsync(self.fd) == -1) {
+        execution::set_error(std::move(self.r), std::error_code(errno, std::generic_category()));
+      } else {
+        try {
+          execution::set_value(std::move(self.r));
+        } catch (...) {
+          execution::set_error(std::move(self.r), std::current_exception());
+        }
+      }
+    }
+
+    private:
+    int fd;
+    Receiver r;
+  };
+
+  class sender_impl {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<>>;
+
+    template<template<typename...> class Variant>
+    using error_types = Variant<std::exception_ptr, std::error_code>;
+
+    static inline constexpr bool sends_done = false;
+
+    explicit sender_impl(int fd) noexcept
+    : fd(fd)
+    {}
+
+    // Only permit move operations.
+    sender_impl(sender_impl&&) = default;
+    sender_impl(const sender_impl&) = delete;
+
+    template<receiver_of<> Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(std::is_nothrow_constructible_v<
+        opstate<std::remove_cvref_t<Receiver>>,
+        int, offset_type, Receiver>)
+    -> opstate<std::remove_cvref_t<Receiver>> {
+      return opstate<std::remove_cvref_t<Receiver>>(self.fd, std::forward<Receiver>(r));
+    }
+
+    private:
+    int fd;
+  };
+
+  public:
+  auto operator()(int fd) const
+  -> sender_impl {
+    return sender_impl(fd);
+  }
+};
+inline constexpr lazy_sync_ec_t lazy_sync_ec{};
+
+
+struct lazy_sync_t {
+  template<typename FD>
+  auto operator()(FD&& fd) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<lazy_sync_t, FD>) {
+      return execution::tag_invoke(*this, std::forward<FD>(fd));
+    } else {
+      return lazy_sync_ec(std::forward<FD>(fd))
+      | ec_to_exception();
+    }
+  }
+};
+inline constexpr lazy_sync_t lazy_sync{};
+
+
+struct sync_ec_t {
+  template<typename FD>
+  auto operator()(FD&& fd) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<sync_ec_t, FD>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd));
+    else
+      return lazy_sync_ec(std::forward<FD>(fd));
+  }
+};
+inline constexpr sync_ec_t sync_ec{};
+
+
+struct sync_t {
+  template<typename FD>
+  auto operator()(FD&& fd) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<sync_t, FD>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd));
+    else
+      return lazy_sync(std::forward<FD>(fd));
+  }
+};
+inline constexpr sync_t sync{};
+
+
 } /* namespace earnest::execution::io */
