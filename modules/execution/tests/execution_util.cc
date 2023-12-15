@@ -182,12 +182,8 @@ TEST(validation) {
       | validation(vfn)
       | lazy_upon_error(
           [](auto err) {
-            if constexpr(std::is_same_v<test_error, decltype(err)>) {
-              return 5;
-            } else {
-              CHECK(false);
-              return 0;
-            }
+            CHECK((std::is_same_v<test_error, decltype(err)>));
+            return 5;
           })).value();
   CHECK_EQUAL(5, y); // Confirms that the error was received.
 }
