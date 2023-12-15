@@ -3438,6 +3438,70 @@ struct identity_t
 };
 
 
+struct tuple_t
+: basic_operation<tuple_t>
+{
+  private:
+  template<typename>
+  static constexpr auto make_identity() {
+    return identity_t{};
+  }
+
+  public:
+  template<typename... T>
+  requires (sizeof...(T) > 0)
+  auto read(std::tuple<T...>& v) const {
+    return this->read(v, make_identity<T>()...);
+  }
+
+  template<typename... T, typename... Invocation>
+  requires (sizeof...(T) == sizeof...(Invocation))
+  auto read(std::tuple<T...>& v, Invocation... invocation) const {
+    return read_(std::index_sequence_for<T...>{}, v, std::move(invocation)...);
+  }
+
+  template<typename... T>
+  requires (sizeof...(T) > 0)
+  auto write(const std::tuple<T...>& v) const {
+    return this->write(v, make_identity<T>()...);
+  }
+
+  template<typename... T, typename... Invocation>
+  requires (sizeof...(T) == sizeof...(Invocation))
+  auto write(const std::tuple<T...>& v, Invocation... invocation) const {
+    return write_(std::index_sequence_for<T...>{}, v, std::move(invocation)...);
+  }
+
+  private:
+  template<std::size_t... Idx, typename... T, typename... Invocation>
+  auto read_([[maybe_unused]] std::index_sequence<Idx...> indices, std::tuple<T...>& v, Invocation... invocation) {
+    return (unresolved_operation_block<false, std::tuple<>>{} |...| invocation.read(std::get<Idx>(v)));
+  }
+
+  template<std::size_t... Idx, typename... T, typename... Invocation>
+  auto write_([[maybe_unused]] std::index_sequence<Idx...> indices, const std::tuple<T...>& v, Invocation... invocation) {
+    return (unresolved_operation_block<true, std::tuple<>>{} |...| invocation.write(std::get<Idx>(v)));
+  }
+};
+
+
+struct pair_t
+: basic_operation<tuple_t>
+{
+  template<typename T, typename U, typename FirstInvocation = identity_t, typename SecondInvocation = identity_t>
+  auto read(std::pair<T, U>& v, FirstInvocation first_invocation = FirstInvocation{}, SecondInvocation second_invocation = SecondInvocation{}) const {
+    return first_invocation.read(v.first)
+    | second_invocation.read(v.second);
+  }
+
+  template<typename T, typename U, typename FirstInvocation = identity_t, typename SecondInvocation = identity_t>
+  auto write(const std::pair<T, U>& v, FirstInvocation first_invocation = FirstInvocation{}, SecondInvocation second_invocation = SecondInvocation{}) const {
+    return first_invocation.write(v.first)
+    | second_invocation.write(v.second);
+  }
+};
+
+
 } /* namespace operation */
 
 
@@ -3457,6 +3521,8 @@ inline constexpr operation::optional_t           optional{};
 inline constexpr operation::variant_t            variant{};
 inline constexpr operation::skip_t               skip{};
 inline constexpr operation::identity_t           identity{};
+inline constexpr operation::tuple_t              tuple{};
+inline constexpr operation::pair_t               pair{};
 
 
 } /* namespace earnest::xdr */
