@@ -3627,6 +3627,40 @@ struct validation_t {
 };
 
 
+// This type indicates we want a read/write operation that takes a file-descriptor from the value-type.
+struct no_fd_t {};
+
+// Write operation.
+struct write_t {
+  template<typename FD, typename T, write_invocation_for<T> Invocation = identity_t>
+  requires (!std::same_as<std::remove_cvref_t<FD>, no_fd_t>)
+  auto operator()(FD&& fd, const T& v, Invocation invocation = Invocation{}) const {
+    return execution::just(std::forward<FD>(fd))
+    | (*this)(no_fd_t{}, v, std::move(invocation));
+  }
+
+  template<typename T, write_invocation_for<T> Invocation = identity_t>
+  auto operator()([[maybe_unused]] no_fd_t fd, const T& v, Invocation invocation = Invocation{}) const {
+    return invocation.write(v).sender_chain();
+  }
+};
+
+// Read operation.
+struct read_t {
+  template<typename FD, typename T, read_invocation_for<T> Invocation = identity_t>
+  requires (!std::same_as<std::remove_cvref_t<FD>, no_fd_t>)
+  auto operator()(FD&& fd, T& v, Invocation invocation = Invocation{}) const {
+    return execution::just(std::forward<FD>(fd))
+    | (*this)(no_fd_t{}, v, std::move(invocation));
+  }
+
+  template<typename T, read_invocation_for<T> Invocation = identity_t>
+  auto operator()([[maybe_unused]] no_fd_t fd, T& v, Invocation invocation = Invocation{}) const {
+    return invocation.read(v).sender_chain();
+  }
+};
+
+
 } /* namespace operation */
 
 
@@ -3649,6 +3683,10 @@ inline constexpr operation::identity_t           identity{};
 inline constexpr operation::tuple_t              tuple{};
 inline constexpr operation::pair_t               pair{};
 inline constexpr operation::validation_t         validation{};
+
+inline constexpr operation::no_fd_t              no_fd{}; // Indicate you don't want to bind a file-descriptor to a read/write operation.
+inline constexpr operation::read_t               read{};
+inline constexpr operation::write_t              write{};
 
 
 } /* namespace earnest::xdr */
