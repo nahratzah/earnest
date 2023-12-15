@@ -1714,5 +1714,215 @@ type_erased_sender(Sender&&) -> type_erased_sender<
     sender_traits<std::remove_cvref_t<Sender>>::sends_done>;
 
 
+// Validation sender.
+//
+// The `Pred' must be an invocable. It'll be invoked with the sender-args.
+// Upon invocation, it must return an `std::optional<ErrorType>'.
+// If the optional holds a value, that value will be propagated as the error-outcome.
+// Otherwise, the original arguments will be passed on.
+//
+// The arguments are passed in by const-reference.
+struct lazy_validation_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S, typename Pred>
+  constexpr auto operator()(S&& s, Pred&& pred) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const lazy_validation_t&>(), std::declval<S>(), std::declval<Pred>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s), std::forward<Pred>(pred));
+  }
+
+  template<typename Pred>
+  constexpr auto operator()(Pred&& pred) const
+  noexcept(noexcept(_generic_adapter(std::declval<const lazy_validation_t&>(), std::declval<Pred>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Pred>(pred));
+  }
+
+  private:
+  // Helper, that'll assert if something is an optional.
+  template<typename>
+  struct is_an_optional_ : std::false_type {};
+  template<typename T>
+  struct is_an_optional_<std::optional<T>> : std::true_type {};
+
+  template<typename T>
+  static inline constexpr bool is_an_optional = is_an_optional_<T>::value;
+
+  // The receiver used by the validation operation.
+  //
+  // It basically executes `Pred(sender-values...)', and if the outcome is an empty optional,
+  // it'll invoke the next receiver with the same sender-values.
+  // Otherwise, it'll discard the values and send the optional's value as an error instead.
+  template<receiver Receiver, typename Pred>
+  class wrapped_receiver
+  : public _generic_receiver_wrapper<Receiver, set_value_t>
+  {
+    public:
+    wrapped_receiver(Receiver&& r, Pred&& pred)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver> && std::is_nothrow_move_constructible_v<Pred>)
+    : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
+      pred(std::move(pred))
+    {}
+
+    template<typename... Args>
+    friend auto tag_invoke([[maybe_unused]] set_value_t, wrapped_receiver&& self, Args&&... args) {
+      auto opt_error = std::invoke(std::move(self.pred), std::as_const(args)...);
+      static_assert(is_an_optional<decltype(opt_error)>, "predicate must return an std::optional<error-type>");
+
+      if constexpr(is_an_optional<decltype(opt_error)>) { // If you don't provide an optional, the following code might produce errors.
+                                                          // Those errors would be noisy.
+                                                          // So we'll disable this code, in the hopes the above static_assert will stand out.
+        if (!opt_error.has_value())
+          ::earnest::execution::set_value(std::move(self.r), std::forward<Args>(args)...);
+        else
+          ::earnest::execution::set_error(std::move(self.r), *std::move(opt_error));
+      }
+    }
+
+    private:
+    [[no_unique_address]] Pred pred;
+  };
+
+  // Forward-declare the sender-impl, so we can refer to it in sender-types.
+  template<sender Sender, typename Pred> class sender_impl;
+
+  // Sender-types, for untyped senders.
+  template<sender Sender, typename Pred>
+  struct sender_types_for_impl
+  : _generic_sender_wrapper<sender_impl<Sender, Pred>, Sender, connect_t, get_completion_scheduler_t<set_error_t>>
+  {
+    // Inherit all constructors.
+    using _generic_sender_wrapper<sender_impl<Sender, Pred>, Sender, connect_t, get_completion_scheduler_t<set_error_t>>::_generic_sender_wrapper;
+  };
+
+  // Helper type that figures out the type of an error, when the predicate is invoked with arguments.
+  template<typename Pred>
+  struct figure_out_error_types {
+    template<typename... Args>
+    using result_type = std::invoke_result_t<Pred&&, const Args&...>;
+
+    template<typename... Args>
+    requires (is_an_optional<result_type<Args...>>)
+    using type = typename result_type<Args...>::value_type;
+  };
+
+  // Sender-types for typed senders.
+  // We inherit all the existing types, and merely add an error type.
+  template<typed_sender Sender, typename Pred>
+  struct sender_types_for_impl<Sender, Pred>
+  : _generic_sender_wrapper<sender_impl<Sender, Pred>, Sender, connect_t, get_completion_scheduler_t<set_error_t>>
+  {
+    private:
+    // Figure out newly-introduced error types.
+    // `_type_appender<E1, E2, E3, ...>'
+    using new_error_types = sender_traits<Sender>::template value_types<
+        figure_out_error_types<Pred>::template type,
+        _type_appender>;
+
+    public:
+    // Inherit all constructors.
+    using _generic_sender_wrapper<sender_impl<Sender, Pred>, Sender, connect_t, get_completion_scheduler_t<set_error_t>>::_generic_sender_wrapper;
+
+    // Error-types is the union of existing error types,
+    // and all the new error types.
+    template<template<typename...> class Variant>
+    using error_types = typename _type_appender<>::merge<
+            new_error_types,                                                     // The introduced error type:
+                                                                                 // `_type_appender<dereferenced-validation-return-type>',
+            typename sender_traits<Sender>::template error_types<_type_appender> // and all existing errors: `_type_appender<E1, E2, ...>'
+        >::                                                                      // all merged together:
+                                                                                 // `_type_appender<factory-return-type, E1, E2, ...>'
+        template type<Variant>;                                                  // And then given to the variant:
+                                                                                 // `Variant<factory-return-type, E1, E2, ...>'
+  };
+
+  // Implementation of the validation sender.
+  //
+  // This has an associated sender, but no final receiver yet.
+  template<sender Sender, typename Pred>
+  class sender_impl
+  : public sender_types_for_impl<Sender, Pred>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    template<typename Sender_, typename Pred_>
+    requires std::constructible_from<Sender, Sender_> && std::constructible_from<Pred, Pred_>
+    constexpr sender_impl(Sender_&& s, Pred_&& pred)
+    noexcept(std::is_nothrow_constructible_v<Sender, Sender_> && std::is_nothrow_constructible_v<Pred, Pred_>)
+    : sender_types_for_impl<Sender, Pred>(std::forward<Sender_>(s)),
+      pred(std::forward<Pred_>(pred))
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
+    noexcept(noexcept(
+            ::earnest::execution::connect(
+                std::declval<Sender>(),
+                wrapped_receiver<std::remove_cvref_t<Receiver>, Pred>(std::declval<Receiver>(), std::declval<Pred>()))))
+    -> operation_state decltype(auto) {
+      return ::earnest::execution::connect(
+          std::move(self.s),
+          wrapped_receiver<std::remove_cvref_t<Receiver>, Pred>(std::forward<Receiver>(r), std::move(self.pred)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Pred>, OtherSender, Pred>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Pred> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Pred>(std::forward<OtherSender>(other_sender), std::move(pred));
+    }
+
+    [[no_unique_address]] Pred pred;
+  };
+
+  template<sender S, typename Pred>
+  constexpr auto default_impl(S&& s, Pred&& pred) const
+  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Pred>>, S, Pred>)
+  -> sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Pred>> {
+    return sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Pred>>(std::forward<S>(s), std::forward<Pred>(pred));
+  }
+};
+inline constexpr lazy_validation_t lazy_validation{};
+
+
+// Validation sender.
+//
+// The `Pred' must be an invocable. It'll be invoked with the sender-args.
+// Upon invocation, it must return an `std::optional<ErrorType>'.
+// If the optional holds a value, that value will be propagated as the error-outcome.
+// Otherwise, the original arguments will be passed on.
+//
+// The arguments are passed in by const-reference.
+struct validation_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S, typename Pred>
+  constexpr auto operator()(S&& s, Pred&& pred) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const validation_t&>(), std::declval<S>(), std::declval<Pred>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s), std::forward<Pred>(pred));
+  }
+
+  template<typename Pred>
+  constexpr auto operator()(Pred&& pred) const
+  noexcept(noexcept(_generic_adapter(std::declval<const validation_t&>(), std::declval<Pred>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Pred>(pred));
+  }
+
+  private:
+  template<sender S, typename Pred>
+  constexpr auto default_impl(S&& s, Pred&& pred) const
+  noexcept(noexcept(execution::lazy_validation(std::declval<Pred>())))
+  -> sender decltype(auto) {
+    return execution::lazy_validation(std::forward<S>(s), std::forward<Pred>(pred));
+  }
+};
+inline constexpr validation_t validation{};
+
+
 } /* inline namespace extensions */
 } /* namespace earnest::execution */

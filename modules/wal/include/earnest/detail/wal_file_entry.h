@@ -4,8 +4,10 @@
 #include <concepts>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <ranges>
 #include <scoped_allocator>
+#include <system_error>
 #include <tuple>
 #include <type_traits>
 
@@ -23,7 +25,9 @@
 #include <earnest/detail/wal_records.h>
 #include <earnest/dir.h>
 #include <earnest/fd.h>
+#include <earnest/wal_error.h>
 #include <earnest/xdr.h>
+#include <earnest/xdr_v2.h>
 
 namespace earnest::detail {
 
@@ -98,6 +102,7 @@ class wal_file_entry
   auto state() const noexcept -> wal_file_entry_state { return state_; }
 
   private:
+  struct xdr_header_invocation;
   auto header_reader_();
   auto header_writer_() const;
 
@@ -280,6 +285,39 @@ class wal_file_entry
   fanout_barrier<executor_type, allocator_type> seal_barrier_;
 
   const std::shared_ptr<spdlog::logger> logger = get_wal_logger();
+};
+
+template<typename Executor, typename Allocator>
+struct wal_file_entry<Executor, Allocator>::xdr_header_invocation {
+  auto read(wal_file_entry& self) const {
+    using namespace std::literals;
+
+    return xdr_v2::constant.read("\013\013earnest.wal"s, xdr_v2::fixed_byte_string)
+    | xdr_v2::uint32.read(self.version)
+    | xdr_v2::validation.read(
+        [&self]() -> std::optional<std::error_code> {
+          if (self.version <= max_version)
+            return std::nullopt;
+          else
+            return make_error_code(wal_errc::bad_version);
+        })
+    | xdr_v2::uint64.read(self.sequence);
+  }
+
+  auto write(const wal_file_entry& self) const {
+    using namespace std::literals;
+
+    return xdr_v2::constant.write("\013\013earnest.wal"s, xdr_v2::fixed_byte_string)
+    | xdr_v2::validation.write(
+        [&self]() -> std::optional<std::error_code> {
+          if (self.version <= max_version)
+            return std::nullopt;
+          else
+            return make_error_code(wal_errc::bad_version);
+        })
+    | xdr_v2::uint32.write(self.version)
+    | xdr_v2::uint64.write(self.sequence);
+  }
 };
 
 

@@ -154,3 +154,40 @@ TEST(type_erased_sender) {
   CHECK_EQUAL(3, y);
   CHECK_EQUAL(4, z);
 }
+
+TEST(validation) {
+  class test_error {};
+  auto vfn = [](int i) -> std::optional<test_error> {
+    if (i == 4)
+      return test_error{};
+    else
+      return std::nullopt;
+  };
+
+  using traits = sender_traits<decltype(just(4) | validation(vfn))>;
+  static_assert(std::is_same_v<
+      std::variant<std::tuple<int>>,
+      traits::value_types<std::tuple, std::variant>>);
+  static_assert(std::is_same_v<
+      std::variant<test_error, std::exception_ptr>,
+      traits::error_types<std::variant>>);
+  static_assert(traits::sends_done == false);
+
+  auto [x] = sync_wait(just(0) | validation(vfn)).value(); // no error
+  CHECK_EQUAL(0, x);
+
+  // Input 4, and if there is a test_error, transform it into 5.
+  auto [y] = sync_wait(
+      just(4)
+      | validation(vfn)
+      | lazy_upon_error(
+          [](auto err) {
+            if constexpr(std::is_same_v<test_error, decltype(err)>) {
+              return 5;
+            } else {
+              CHECK(false);
+              return 0;
+            }
+          })).value();
+  CHECK_EQUAL(5, y); // Confirms that the error was received.
+}

@@ -275,11 +275,14 @@ class pre_buffer_invocation {
   : fn(fn)
   {}
 
-  template<typename State>
-  auto operator()(State& st) && -> void {
-    assert(st.shared_buf().size() >= off + len);
-    assert(len != 0);
-    std::invoke(std::move(fn), st.shared_buf().subspan(off, len), st.template get_temporary<TemporariesIndices>()...);
+  auto operator()() && {
+    return execution::lazy_then(
+        [self=std::move(*this)]<typename State>(State st) mutable -> State {
+          assert(st.shared_buf().size() >= self.off + self.len);
+          assert(self.len != 0);
+          std::invoke(std::move(self.fn), st.shared_buf().subspan(self.off, self.len), st.template get_temporary<TemporariesIndices>()...);
+          return st;
+        });
   }
 
   auto buffer_shift(std::size_t increase) noexcept -> void {
@@ -314,11 +317,14 @@ class post_buffer_invocation {
   : fn(fn)
   {}
 
-  template<typename State>
-  auto operator()(State& st) && -> void {
-    assert(st.shared_buf().size() >= off + len);
-    assert(len != 0);
-    std::invoke(std::move(fn), st.shared_buf().subspan(off, len), st.template get_temporary<TemporariesIndices>()...);
+  auto operator()() && {
+    return execution::lazy_then(
+        [self=std::move(*this)]<typename State>(State st) mutable -> State {
+          assert(st.shared_buf().size() >= self.off + self.len);
+          assert(self.len != 0);
+          std::invoke(std::move(self.fn), st.shared_buf().subspan(self.off, self.len), st.template get_temporary<TemporariesIndices>()...);
+          return st;
+        });
   }
 
   auto buffer_shift(std::size_t increase) noexcept -> void {
@@ -351,9 +357,12 @@ class pre_invocation {
   : fn(fn)
   {}
 
-  template<typename State>
-  auto operator()(State& st) && -> void {
-    std::invoke(std::move(fn), st.template get_temporary<TemporariesIndices>()...);
+  auto operator()() && {
+    return execution::lazy_then(
+        [self=std::move(*this)]<typename State>(State st) mutable -> State {
+          std::invoke(std::move(self.fn), st.template get_temporary<TemporariesIndices>()...);
+          return st;
+        });
   }
 
   auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
@@ -378,9 +387,12 @@ class post_invocation {
   : fn(fn)
   {}
 
-  template<typename State>
-  auto operator()(State& st) && -> void {
-    std::invoke(std::move(fn), st.template get_temporary<TemporariesIndices>()...);
+  auto operator()() && {
+    return execution::lazy_then(
+        [self=std::move(*this)]<typename State>(State st) mutable -> State {
+          std::invoke(std::move(self.fn), st.template get_temporary<TemporariesIndices>()...);
+          return st;
+        });
   }
 
   auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
@@ -392,6 +404,68 @@ class post_invocation {
 
   private:
   Fn fn;
+};
+
+template<typename Pred, std::size_t... TemporariesIndices>
+class pre_validation {
+  public:
+  explicit pre_validation(Pred&& pred)
+  noexcept(std::is_nothrow_move_constructible_v<Pred>)
+  : pred(std::move(pred))
+  {}
+
+  explicit pre_validation(const Pred& pred)
+  noexcept(std::is_nothrow_copy_constructible_v<Pred>)
+  : pred(pred)
+  {}
+
+  auto operator()() && {
+    return execution::lazy_validation(
+        [pred=std::move(pred)]<typename State>(const State& st) mutable -> State {
+          return std::invoke(std::move(pred), st.template get_temporary<TemporariesIndices>()...);
+        });
+  }
+
+  auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
+
+  template<std::size_t N>
+  auto temporaries_shift() && {
+    return pre_validation<Pred, (TemporariesIndices + N)...>(std::move(pred));
+  }
+
+  private:
+  Pred pred;
+};
+
+template<typename Pred, std::size_t... TemporariesIndices>
+class post_validation {
+  public:
+  explicit post_validation(Pred&& pred)
+  noexcept(std::is_nothrow_move_constructible_v<Pred>)
+  : pred(std::move(pred))
+  {}
+
+  explicit post_validation(const Pred& pred)
+  noexcept(std::is_nothrow_copy_constructible_v<Pred>)
+  : pred(pred)
+  {}
+
+  auto operator()() && {
+    return execution::lazy_validation(
+        [pred=std::move(pred)]<typename State>(const State& st) mutable -> State {
+          return std::invoke(std::move(pred), st.template get_temporary<TemporariesIndices>()...);
+        });
+  }
+
+  auto buffer_shift([[maybe_unused]] std::size_t increase) noexcept -> void {}
+
+  template<std::size_t N>
+  auto temporaries_shift() && {
+    return post_validation<Pred, (TemporariesIndices + N)...>(std::move(pred));
+  }
+
+  private:
+  Pred pred;
 };
 
 // Refers to space in the temporary buffer.
@@ -864,6 +938,30 @@ class operation_sequence<std::tuple<>, std::tuple<>, std::tuple<>> {
         std::forward_as_tuple(std::move(op)));
   }
 
+  template<typename Pred, std::size_t... TemporariesIndices>
+  auto append_operation(pre_validation<Pred, TemporariesIndices...>&& op) && {
+    using result_type = operation_sequence<
+        std::tuple<pre_validation<Pred, TemporariesIndices...>>,
+        std::tuple<>,
+        std::tuple<>>;
+    return result_type(
+        std::forward_as_tuple(std::move(op)),
+        std::tuple<>(),
+        std::tuple<>());
+  }
+
+  template<typename Pred, std::size_t... TemporariesIndices>
+  auto append_operation(post_validation<Pred, TemporariesIndices...>&& op) && {
+    using result_type = operation_sequence<
+        std::tuple<>,
+        std::tuple<>,
+        std::tuple<post_validation<Pred, TemporariesIndices...>>>;
+    return result_type(
+        std::tuple<>(),
+        std::tuple<>(),
+        std::forward_as_tuple(std::move(op)));
+  }
+
   template<bool IsConst, std::size_t Extent = std::dynamic_extent>
   auto append_operation(temporary_buffer_reference<IsConst, Extent>&& op) && {
     using result_type = operation_sequence<
@@ -995,15 +1093,7 @@ class operation_sequence<
   auto make_sender_chain() && {
     return std::apply(
         [](auto&&... x) {
-          if constexpr(sizeof...(x) == 0) {
-            return execution::noop();
-          } else {
-            return execution::lazy_then(
-                [...x=std::move(x)](auto st) mutable {
-                  (std::invoke(std::move(x), st), ...);
-                  return st;
-                });
-          }
+          return (execution::noop() |...| std::invoke(std::move(x)));
         },
         std::move(pre_invocations))
     | std::apply(
@@ -1017,15 +1107,7 @@ class operation_sequence<
         std::move(buffers))
     | std::apply(
         [](auto&&... x) {
-          if constexpr(sizeof...(x) == 0) {
-            return execution::noop();
-          } else {
-            return execution::lazy_then(
-                [...x=std::move(x)](auto st) mutable {
-                  (std::invoke(std::move(x), st), ...);
-                  return st;
-                });
-          }
+          return (execution::noop() |...| std::invoke(std::move(x)));
         },
         std::move(post_invocations));
   }
@@ -1103,7 +1185,7 @@ class operation_sequence<
   template<typename Fn, std::size_t... TemporariesIndices>
   auto append_operation(pre_buffer_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
-        std::tuple<PreInvocationOperations..., pre_buffer_invocation<Fn>>,
+        std::tuple<PreInvocationOperations..., pre_buffer_invocation<Fn, TemporariesIndices...>>,
         std::tuple<BufferOperations...>,
         std::tuple<PostInvocationOperations...>>;
     return result_type(
@@ -1117,7 +1199,7 @@ class operation_sequence<
     using result_type = operation_sequence<
         std::tuple<PreInvocationOperations...>,
         std::tuple<BufferOperations...>,
-        std::tuple<PostInvocationOperations..., post_buffer_invocation<Fn>>>;
+        std::tuple<PostInvocationOperations..., post_buffer_invocation<Fn, TemporariesIndices...>>>;
     return result_type(
         std::move(pre_invocations),
         std::move(buffers),
@@ -1127,7 +1209,7 @@ class operation_sequence<
   template<typename Fn, std::size_t... TemporariesIndices>
   auto append_operation(pre_invocation<Fn, TemporariesIndices...>&& op) && {
     using result_type = operation_sequence<
-        std::tuple<PreInvocationOperations..., pre_invocation<Fn>>,
+        std::tuple<PreInvocationOperations..., pre_invocation<Fn, TemporariesIndices...>>,
         std::tuple<BufferOperations...>,
         std::tuple<PostInvocationOperations...>>;
     return result_type(
@@ -1141,7 +1223,31 @@ class operation_sequence<
     using result_type = operation_sequence<
         std::tuple<PreInvocationOperations...>,
         std::tuple<BufferOperations...>,
-        std::tuple<PostInvocationOperations..., post_invocation<Fn>>>;
+        std::tuple<PostInvocationOperations..., post_invocation<Fn, TemporariesIndices...>>>;
+    return result_type(
+        std::move(pre_invocations),
+        std::move(buffers),
+        std::tuple_cat(std::move(post_invocations), std::forward_as_tuple(std::move(op))));
+  }
+
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(pre_validation<Fn, TemporariesIndices...>&& op) && {
+    using result_type = operation_sequence<
+        std::tuple<PreInvocationOperations..., pre_validation<Fn>>,
+        std::tuple<BufferOperations...>,
+        std::tuple<PostInvocationOperations...>>;
+    return result_type(
+        std::tuple_cat(std::move(pre_invocations), std::forward_as_tuple(std::move(op))),
+        std::move(buffers),
+        std::move(post_invocations));
+  }
+
+  template<typename Fn, std::size_t... TemporariesIndices>
+  auto append_operation(post_validation<Fn, TemporariesIndices...>&& op) && {
+    using result_type = operation_sequence<
+        std::tuple<PreInvocationOperations...>,
+        std::tuple<BufferOperations...>,
+        std::tuple<PostInvocationOperations..., post_validation<Fn, TemporariesIndices...>>>;
     return result_type(
         std::move(pre_invocations),
         std::move(buffers),
@@ -3502,6 +3608,25 @@ struct pair_t
 };
 
 
+// Check a predicate.
+// If the predicate doesn't hold, use an error-factory to create an error type.
+struct validation_t {
+  template<std::invocable Pred>
+  auto read(Pred&& pred) const {
+    return unresolved_operation_block<false, std::tuple<>>{}
+        .append_block(operation_block<false>{}
+            .append(pre_validation(std::forward<Pred>(pred))));
+  }
+
+  template<std::invocable Pred>
+  auto write(Pred&& pred) const {
+    return unresolved_operation_block<true, std::tuple<>>{}
+        .append_block(operation_block<true>{}
+            .append(pre_validation(std::forward<Pred>(pred))));
+  }
+};
+
+
 } /* namespace operation */
 
 
@@ -3523,6 +3648,7 @@ inline constexpr operation::skip_t               skip{};
 inline constexpr operation::identity_t           identity{};
 inline constexpr operation::tuple_t              tuple{};
 inline constexpr operation::pair_t               pair{};
+inline constexpr operation::validation_t         validation{};
 
 
 } /* namespace earnest::xdr */
