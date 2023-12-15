@@ -13,6 +13,8 @@
 #include <asio/io_context.hpp>
 #include <earnest/detail/byte_stream.h>
 
+template<typename Executor, typename Allocator = std::allocator<std::byte>>
+using byte_stream = earnest::detail::byte_stream<Executor, Allocator>;
 
 TEST(read_variant) {
   asio::io_context ioctx;

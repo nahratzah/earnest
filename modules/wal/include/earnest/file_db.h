@@ -346,7 +346,7 @@ class file_db
         [](std::shared_ptr<file_db> fdb) {
           return asio::async_initiate<decltype(asio::deferred), void(std::error_code, byte_vector, std::shared_ptr<file_db>)>(
               [](auto handler, std::shared_ptr<file_db> fdb) {
-                auto stream_ptr = std::make_unique<byte_stream<executor_type>>(fdb->get_executor());
+                auto stream_ptr = std::make_unique<detail::byte_stream<executor_type>>(fdb->get_executor());
                 auto& stream_ref = *stream_ptr;
                 async_write(
                     stream_ref,
@@ -797,7 +797,7 @@ class file_db
           return f_pair.first;
         });
 
-    auto stream = std::allocate_shared<byte_stream<executor_type>>(get_allocator(), get_executor(), get_allocator());
+    auto stream = std::allocate_shared<detail::byte_stream<executor_type>>(get_allocator(), get_executor(), get_allocator());
     return async_write(
         *stream,
         xdr_writer<>() & xdr_constant(std::move(ns_map)),

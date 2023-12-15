@@ -5,6 +5,8 @@
 #include <asio/io_context.hpp>
 #include <earnest/detail/byte_stream.h>
 
+template<typename Executor, typename Allocator = std::allocator<std::byte>>
+using byte_stream = earnest::detail::byte_stream<Executor, Allocator>;
 
 #define READ_TEST_INT(TYPE, BITS)                                                                  \
 TEST(read_##TYPE##BITS) {                                                                          \

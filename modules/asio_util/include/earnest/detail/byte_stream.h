@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <optional>
 #include <system_error>
 #include <type_traits>
 #include <utility>
@@ -14,6 +15,12 @@
 #include <asio/buffer.hpp>
 #include <asio/error.hpp>
 #include <asio/post.hpp>
+
+#include <earnest/execution.h>
+#include <earnest/execution_io.h>
+#include <earnest/execution_util.h>
+
+namespace earnest::detail {
 
 template<typename Executor, typename Allocator = std::allocator<std::byte>>
 class byte_stream {
@@ -65,6 +72,80 @@ class byte_stream {
 
   auto data() && noexcept -> std::vector<std::byte, allocator_type>&& {
     return std::move(data_);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_some_ec_t tag, byte_stream& self, std::span<std::byte> buf) {
+    return execution::just(std::move(buf))
+    | execution::lazy_then(
+        [&self](std::span<std::byte> buf) {
+          const auto bytes = std::min(self.data_.size(), buf.size());
+          std::copy(self.data_.begin(), self.data_.begin() + bytes, buf.begin());
+          self.data_.erase(self.data_.begin(), self.data_.begin() + bytes);
+          return bytes;
+        })
+    | execution::lazy_validation(
+        [bufsize=buf.size()](std::size_t bytes) -> std::optional<std::error_code> {
+          if (bufsize != 0 && bytes == 0)
+            return make_error_code(asio::stream_errc::eof);
+          else
+            return std::nullopt;
+        });
+  }
+
+  template<execution::io::mutable_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_some_ec_t tag, byte_stream& self, Buffers&& buffers) {
+    return execution::just(std::forward<Buffers>(buffers))
+    | execution::lazy_then(
+        [&self](auto&& buffers) {
+          std::size_t bytes = 0;
+          for (std::span<std::byte> buf : buffers) {
+            const auto rlen = std::min(self.data_.size(), buf.size());
+            std::copy(self.data_.begin(), self.data_.begin() + rlen, buf.begin());
+            self.data_.erase(self.data_.begin(), self.data_.begin() + rlen);
+            bytes += rlen;
+            if (rlen < buf.size()) return std::make_tuple(bytes, true);
+          }
+          return std::make_tuple(bytes, false);
+        })
+    | execution::explode_tuple()
+    | execution::lazy_validation(
+        [](std::size_t bytes, bool underflow) -> std::optional<std::error_code> {
+          if (underflow && bytes == 0)
+            return make_error_code(asio::stream_errc::eof);
+          else
+            return std::nullopt;
+        })
+    | execution::lazy_then(
+        [](std::size_t bytes, [[maybe_unused]] bool underflow) -> std::size_t {
+          return bytes;
+        });
+  }
+
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_some_ec_t tag, byte_stream& self, std::span<const std::byte> buf) {
+    return execution::just(std::move(buf))
+    | execution::lazy_then(
+        [&self](std::span<const std::byte> buf) {
+          const auto orig_size = self.data_.size();
+          self.data_.resize(orig_size + buf.size());
+          std::copy(buf.begin(), buf.end(), self.data_.begin() + orig_size);
+          return buf.size();
+        });
+  }
+
+  template<execution::io::const_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_some_ec_t tag, byte_stream& self, Buffers&& buffers) {
+    return execution::just(std::forward<Buffers>(buffers))
+    | execution::lazy_then(
+        [&self](auto&& buffers) {
+          std::size_t bytes = 0;
+          for (std::span<const std::byte> buf : buffers) {
+            const auto orig_size = self.data_.size();
+            self.data_.resize(orig_size + buf.size());
+            std::copy(buf.begin(), buf.end(), self.data_.begin() + orig_size);
+            bytes += buf.size();
+          }
+          return bytes;
+        });
   }
 
   template<typename MB>
@@ -185,3 +266,5 @@ class byte_stream {
   Executor ex_;
   std::vector<std::byte, allocator_type> data_;
 };
+
+} /* namespace earnest::detail */
