@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <concepts>
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -10,11 +11,13 @@
 #include <system_error>
 #include <tuple>
 #include <type_traits>
+#include <vector>
 
 #include <asio/buffer.hpp>
 #include <asio/strand.hpp>
 
 #include <earnest/detail/buffered_readstream_adapter.h>
+#include <earnest/detail/byte_stream.h>
 #include <earnest/detail/fanout.h>
 #include <earnest/detail/fanout_barrier.h>
 #include <earnest/detail/move_only_function.h>
@@ -114,10 +117,76 @@ class wal_file_entry
 
   auto decorate_(variant_type& v) const -> void;
 
+  // XDR-invocation for write_records_to_buffer_.
+  struct xdr_invocation_ {
+    explicit xdr_invocation_(write_record_with_offset_vector& wrwo_vec) noexcept
+    : wrwo_vec(wrwo_vec)
+    {}
+
+    auto write(const write_variant_type& r) const {
+      return xdr_v2::manual.write(
+          [&r, self=*this](auto& stream) {
+            self.update_wrwo_vec(stream, r);
+            return execution::just(std::move(stream));
+          })
+      | xdr_v2::identity.write(r);
+    }
+
+    private:
+    template<typename Ex, typename Alloc>
+    auto update_wrwo_vec(const byte_stream<Ex, Alloc>& stream, const write_variant_type& r) const -> void {
+      wrwo_vec.push_back({
+            .record=r,
+            .offset=stream.data().size(),
+          });
+    }
+
+    template<typename T>
+    auto update_wrwo_vec(const std::reference_wrapper<T>& stream, const write_variant_type& r) const -> void {
+      update_wrwo_vec(stream.get(), r);
+    }
+
+    write_record_with_offset_vector& wrwo_vec;
+  };
+
   template<typename CompletionToken>
-  auto write_records_to_buffer_(write_records_vector&& records, CompletionToken&& token) const;
-  template<typename State>
-  static auto write_records_to_buffer_iter_(std::unique_ptr<State> state_ptr, typename write_records_vector::const_iterator b, typename write_records_vector::const_iterator e, std::error_code ec) -> void;
+  auto write_records_to_buffer_(write_records_vector&& records, CompletionToken&& token) const {
+    using byte_vector = std::vector<std::byte, rebind_alloc<std::byte>>;
+    using byte_stream = byte_stream<executor_type, rebind_alloc<std::byte>>;
+    static_assert(xdr_v2::operation::writable_object<write_variant_type>);
+
+    return asio::async_initiate<CompletionToken, void(std::error_code, byte_vector, write_record_with_offset_vector)>(
+        [](auto completion_handler, auto records, auto ex, auto alloc) {
+          execution::start_detached(
+              execution::just(
+                  byte_stream(ex, alloc),
+                  write_record_with_offset_vector(alloc),
+                  std::move(records))
+              | execution::lazy_let_value(
+                  [](auto& fd, auto& wrwo_vec, auto& records) {
+                    return xdr_v2::write(std::ref(fd), records, xdr_v2::fixed_collection(xdr_invocation_(wrwo_vec)))
+                    | execution::lazy_then(
+                        [&wrwo_vec](byte_stream& fd) {
+                          return std::make_tuple(std::move(fd).data(), std::move(wrwo_vec));
+                        })
+                    | execution::lazy_explode_tuple();
+                  })
+              | execution::lazy_then(
+                  [](auto bytes, auto wrwo_vec) {
+                    return std::make_tuple(std::error_code{}, std::move(bytes), std::move(wrwo_vec));
+                  })
+              | execution::lazy_upon_error(
+                  [alloc](auto err) -> std::tuple<std::error_code, byte_vector, write_record_with_offset_vector> {
+                    if constexpr(std::same_as<std::exception_ptr, decltype(err)>)
+                      std::rethrow_exception(err);
+                    else
+                      return std::make_tuple(std::error_code{}, byte_vector(alloc), write_record_with_offset_vector(alloc));
+                  })
+              | execution::lazy_explode_tuple()
+              | execution::lazy_then(completion_handler_fun(std::move(completion_handler), ex)));
+        },
+        token, std::move(records), get_executor(), get_allocator());
+  }
 
   public:
   template<typename CompletionToken>

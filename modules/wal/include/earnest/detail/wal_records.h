@@ -613,13 +613,12 @@ struct wal_record_write_variant
 
   template<std::size_t... Idx>
   static auto xdr_variant_defn([[maybe_unused]] std::index_sequence<Idx...> indices) {
-    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_<Executor, Reactor>>::opcode>(xdr_identity)...);
+    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_<Executor, Reactor>>::opcode>(xdr_v2::identity)...);
   }
 };
 
 template<typename Executor, typename Reactor>
-struct record_write_type_<wal_record_variant<Executor, Reactor>>
-{
+struct record_write_type_<wal_record_variant<Executor, Reactor>> {
   using type = wal_record_write_variant<Executor, Reactor>;
 };
 

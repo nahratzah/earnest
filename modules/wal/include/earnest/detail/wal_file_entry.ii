@@ -182,58 +182,6 @@ inline auto wal_file_entry<Executor, Allocator>::decorate_(variant_type& v) cons
 
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
-inline auto wal_file_entry<Executor, Allocator>::write_records_to_buffer_(write_records_vector&& records, CompletionToken&& token) const {
-  using byte_vector = std::vector<std::byte, rebind_alloc<std::byte>>;
-  using byte_stream = byte_stream<executor_type, rebind_alloc<std::byte>>;
-
-  return asio::async_initiate<CompletionToken, void(std::error_code, byte_vector, write_record_with_offset_vector)>(
-      [](auto completion_handler, write_records_vector&& records, std::shared_ptr<const wal_file_entry> wf) {
-        auto ex = asio::make_work_guard(asio::get_associated_executor(completion_handler, wf->get_executor()));
-
-        auto state_ptr = std::make_unique<std::tuple<byte_stream, write_records_vector, decltype(completion_handler), decltype(ex), write_record_with_offset_vector>>(
-            byte_stream(wf->get_executor(), wf->get_allocator()),
-            std::move(records),
-            std::move(completion_handler),
-            std::move(ex),
-            wf->get_allocator());
-        auto& state_ref = *state_ptr;
-
-        write_records_to_buffer_iter_(std::move(state_ptr),
-            std::get<1>(state_ref).begin(), std::get<1>(state_ref).end(), std::error_code());
-      },
-      token, std::move(records), this->shared_from_this());
-}
-
-template<typename Executor, typename Allocator>
-template<typename State>
-inline auto wal_file_entry<Executor, Allocator>::write_records_to_buffer_iter_(std::unique_ptr<State> state_ptr, typename write_records_vector::const_iterator b, typename write_records_vector::const_iterator e, std::error_code ec) -> void {
-  if (b == e || ec) { // Invoke completion handler.
-    auto ex = std::get<3>(*state_ptr).get_executor();
-    auto alloc = asio::get_associated_allocator(std::get<2>(*state_ptr));
-    ex.post(
-        [state_ptr=std::move(state_ptr), ec]() mutable {
-          std::invoke(std::get<2>(*state_ptr), ec, std::get<0>(std::move(*state_ptr)).data(), std::get<4>(std::move(*state_ptr)));
-        },
-        alloc);
-    return;
-  }
-
-  auto& stream = std::get<0>(*state_ptr);
-  std::get<4>(*state_ptr).push_back({
-        .record=*b,
-        .offset=stream.data().size(),
-      });
-
-  async_write(
-      stream,
-      ::earnest::xdr_writer<>() & *b,
-      [state_ptr=std::move(state_ptr), b=std::next(b), e](std::error_code ec) mutable {
-        write_records_to_buffer_iter_(std::move(state_ptr), b, e, ec);
-      });
-}
-
-template<typename Executor, typename Allocator>
-template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token) {
   using pos_stream = positional_stream_adapter<fd_type&>; // XXX replace with buffered positional stream
 

@@ -266,6 +266,13 @@ template<typename Fn, std::size_t... TemporariesIndices>
 class pre_buffer_invocation {
   template<bool, std::size_t, operation_block_element...> friend class operation_block;
 
+  private:
+  explicit pre_buffer_invocation(Fn&& fn, std::size_t off, std::size_t len) noexcept(std::is_nothrow_move_constructible_v<Fn>)
+  : fn(std::move(fn)),
+    off(off),
+    len(len)
+  {}
+
   public:
   explicit pre_buffer_invocation(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
   : fn(std::move(fn))
@@ -291,7 +298,7 @@ class pre_buffer_invocation {
 
   template<std::size_t N>
   auto temporaries_shift() && {
-    return pre_buffer_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
+    return pre_buffer_invocation<Fn, TemporariesIndices + N...>(std::move(fn), off, len);
   }
 
   private:
@@ -307,6 +314,13 @@ class pre_buffer_invocation {
 template<typename Fn, std::size_t... TemporariesIndices>
 class post_buffer_invocation {
   template<bool, std::size_t, operation_block_element...> friend class operation_block;
+
+  private:
+  explicit post_buffer_invocation(Fn&& fn, std::size_t off, std::size_t len) noexcept(std::is_nothrow_move_constructible_v<Fn>)
+  : fn(std::move(fn)),
+    off(off),
+    len(len)
+  {}
 
   public:
   explicit post_buffer_invocation(Fn&& fn) noexcept(std::is_nothrow_move_constructible_v<Fn>)
@@ -333,7 +347,7 @@ class post_buffer_invocation {
 
   template<std::size_t N>
   auto temporaries_shift() && {
-    return post_buffer_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
+    return post_buffer_invocation<Fn, TemporariesIndices + N...>(std::move(fn), off, len);
   }
 
   private:
@@ -3005,7 +3019,7 @@ static_assert(invocation_for<decltype(ascii_string_t{}(12)), std::vector<std::ui
 struct fixed_collection_t
 : basic_operation<fixed_collection_t>
 {
-  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
+  template<typename Collection, read_invocation_for<typename Collection::value_type> Invocation>
   auto read(Collection& collection, Invocation invocation) const {
     return manual_t{}.read(
         [&collection, invocation=std::move(invocation)](auto& fd) {
@@ -3041,7 +3055,7 @@ struct fixed_collection_t
         });
   }
 
-  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
+  template<typename Collection, write_invocation_for<typename Collection::value_type> Invocation>
   auto write(const Collection& collection, Invocation invocation) const {
     return manual_t{}.write(
         [&collection, invocation=std::move(invocation)](auto& fd) {
@@ -3085,7 +3099,7 @@ static_assert(invocation_for<decltype(fixed_collection_t{}(ascii_string_t{}(12))
 struct collection_t
 : basic_operation<collection_t>
 {
-  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
+  template<typename Collection, read_invocation_for<typename Collection::value_type> Invocation>
   requires requires(Collection collection, std::size_t sz) {
     { collection.resize(sz) };
   }
@@ -3108,7 +3122,7 @@ struct collection_t
 
   // When we cannot resize the collection,
   // we'll need to read elements one-at-a-time and insert them.
-  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
+  template<typename Collection, read_invocation_for<typename Collection::value_type> Invocation>
   requires (!requires(Collection collection, std::size_t sz) {
         { collection.resize(sz) };
       })
@@ -3183,7 +3197,7 @@ struct collection_t
             .append(post_invocation<decltype(confirm_size_fn), 0>(std::move(confirm_size_fn))));
   }
 
-  template<typename Collection, invocation_for<typename Collection::value_type> Invocation>
+  template<typename Collection, write_invocation_for<typename Collection::value_type> Invocation>
   auto write(const Collection& collection, Invocation invocation, std::optional<std::size_t> max_size = std::nullopt) const {
     using size_type = typename Collection::size_type;
 
@@ -3394,13 +3408,13 @@ struct variant_t
   }
 
   template<typename... T, typename... Invocations>
-  requires (sizeof...(T) == sizeof...(Invocations)) && (invocation_for<Invocations, T> &&...) && (sizeof...(T) > 0)
+  requires (sizeof...(T) == sizeof...(Invocations)) && (read_invocation_for<Invocations, T> &&...) && (sizeof...(T) > 0)
   auto read(std::variant<T...>& v, Invocations... invocations) const {
     return read_(std::index_sequence_for<T...>{}, v, std::make_tuple(std::move(invocations)...));
   }
 
   template<typename... T, typename... Invocations>
-  requires (sizeof...(T) == sizeof...(Invocations)) && (invocation_for<Invocations, T> &&...) && (sizeof...(T) > 0)
+  requires (sizeof...(T) == sizeof...(Invocations)) && (write_invocation_for<Invocations, T> &&...) && (sizeof...(T) > 0)
   auto write(const std::variant<T...>& v, Invocations... invocations) const {
     return write_(std::index_sequence_for<T...>{}, v, std::make_tuple(std::move(invocations)...));
   }
@@ -3437,7 +3451,7 @@ struct variant_t
 
   template<std::size_t... Idx, typename... T, typename... Invocations>
   auto read_([[maybe_unused]] std::index_sequence<Idx...> indices, std::variant<T...>& v, std::tuple<Invocations...> invocations) const {
-    using d_set = discriminant_set<figure_out_discriminant<Invocations>(Idx)...>;
+    using d_set = discriminant_set<figure_out_discriminant<std::remove_cvref_t<Invocations>>(Idx)...>;
     constexpr std::size_t nested_extent = decide_on_extent(decltype(std::get<Idx>(invocations).read(std::declval<T&>()))::extent...);
 
     auto nested_operation = [&v, invocations]<typename FD>(FD& fd, std::size_t discriminant) {
@@ -3469,7 +3483,7 @@ struct variant_t
 
   template<std::size_t... Idx, typename... T, typename... Invocations>
   auto write_([[maybe_unused]] std::index_sequence<Idx...> indices, const std::variant<T...>& v, std::tuple<Invocations...> invocations) const {
-    using d_set = discriminant_set<figure_out_discriminant<Invocations>(Idx)...>;
+    using d_set = discriminant_set<figure_out_discriminant<std::remove_cvref_t<Invocations>>(Idx)...>;
     constexpr std::size_t nested_extent = decide_on_extent(decltype(std::get<Idx>(invocations).write(std::declval<const T&>()))::extent...);
 
     auto nested_operation = [&v, invocations]<typename FD>(FD& fd) {
@@ -3537,7 +3551,7 @@ struct identity_t
   }
 
   template<writable_object T>
-  auto write(T& v) const {
+  auto write(const T& v) const {
     return unresolved_operation_block<true, std::tuple<>>{}
     | writer(v);
   }

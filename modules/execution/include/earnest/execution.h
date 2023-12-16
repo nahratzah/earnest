@@ -983,7 +983,7 @@ class _generic_adapter_t
 // Pipe operation on an adapter: `... | _const generic_adapter_t&`
 template<sender Sender, typename Tag, typename... Args>
 constexpr auto operator|(Sender&& s, const _generic_adapter_t<Tag, Args...>& adapter)
-noexcept(noexcept(std::declval<const _generic_adapter_t<Tag, Args...>&>()(std::declval<Sender>())))
+noexcept(std::is_nothrow_invocable_v<const _generic_adapter_t<Tag, Args...>&, Sender>)
 -> decltype(auto) {
   return adapter(std::forward<Sender>(s));
 }
@@ -991,7 +991,7 @@ noexcept(noexcept(std::declval<const _generic_adapter_t<Tag, Args...>&>()(std::d
 // Pipe operation on an adapter: `... | _generic_adapter_t&`
 template<sender Sender, typename Tag, typename... Args>
 constexpr auto operator|(Sender&& s, _generic_adapter_t<Tag, Args...>& adapter)
-noexcept(noexcept(std::declval<_generic_adapter_t<Tag, Args...>&>()(std::declval<Sender>())))
+noexcept(std::is_nothrow_invocable_v<_generic_adapter_t<Tag, Args...>&, Sender>)
 -> decltype(auto) {
   return adapter(std::forward<Sender>(s));
 }
@@ -999,7 +999,7 @@ noexcept(noexcept(std::declval<_generic_adapter_t<Tag, Args...>&>()(std::declval
 // Pipe operation on an adapter: `... | _generic_adapter_t&&`
 template<sender Sender, typename Tag, typename... Args>
 constexpr auto operator|(Sender&& s, _generic_adapter_t<Tag, Args...>&& adapter)
-noexcept(noexcept(std::declval<_generic_adapter_t<Tag, Args...>>()(std::declval<Sender>())))
+noexcept(std::is_nothrow_invocable_v<_generic_adapter_t<Tag, Args...>, Sender>)
 -> decltype(std::declval<_generic_adapter_t<Tag, Args...>>()(std::declval<Sender>())) {
   return std::move(adapter)(std::forward<Sender>(s));
 }
