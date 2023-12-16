@@ -148,6 +148,82 @@ class byte_stream {
         });
   }
 
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_ec_t tag, byte_stream& self, std::span<std::byte> buf, std::optional<std::size_t> minbytes) {
+    return execution::just(buf)
+    | execution::lazy_then(
+        [&self](std::span<std::byte> buf) {
+          const auto bytes = std::min(self.data_.size(), buf.size());
+          std::copy(self.data_.begin(), self.data_.begin() + bytes, buf.begin());
+          self.data_.erase(self.data_.begin(), self.data_.begin() + bytes);
+          return bytes;
+        })
+    | execution::lazy_validation(
+        [minsize=minbytes.value_or(buf.size())](std::size_t bytes) -> std::optional<std::error_code> {
+          if (bytes < minsize)
+            return make_error_code(asio::stream_errc::eof);
+          else
+            return std::nullopt;
+        });
+  }
+
+  template<execution::io::mutable_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_ec_t tag, byte_stream& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
+    return execution::just(std::forward<Buffers>(buffers))
+    | execution::lazy_then(
+        [&self](auto&& buffers) {
+          std::size_t bytes = 0;
+          for (std::span<std::byte> buf : buffers) {
+            const auto rlen = std::min(self.data_.size(), buf.size());
+            std::copy(self.data_.begin(), self.data_.begin() + rlen, buf.begin());
+            self.data_.erase(self.data_.begin(), self.data_.begin() + rlen);
+            bytes += rlen;
+            if (rlen < buf.size()) return std::make_tuple(bytes, true);
+          }
+          return std::make_tuple(bytes, false);
+        })
+    | execution::explode_tuple()
+    | execution::lazy_validation(
+        [minbytes](std::size_t bytes, bool underflow) -> std::optional<std::error_code> {
+          if (minbytes.has_value() ? bytes < *minbytes : underflow)
+            return make_error_code(asio::stream_errc::eof);
+          else
+            return std::nullopt;
+        })
+    | execution::lazy_then(
+        [](std::size_t bytes, [[maybe_unused]] bool underflow) -> std::size_t {
+          return bytes;
+        });
+  }
+
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_ec_t tag, byte_stream& self, std::span<const std::byte> buf, [[maybe_unused]] std::optional<std::size_t> minbytes) {
+    // We don't need to validate minbytes, since we always write everything.
+    return execution::just(std::move(buf))
+    | execution::lazy_then(
+        [&self](std::span<const std::byte> buf) {
+          const auto orig_size = self.data_.size();
+          self.data_.resize(orig_size + buf.size());
+          std::copy(buf.begin(), buf.end(), self.data_.begin() + orig_size);
+          return buf.size();
+        });
+  }
+
+  template<execution::io::const_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_ec_t tag, byte_stream& self, Buffers&& buffers, [[maybe_unused]] std::optional<std::size_t> minbytes) {
+    // We don't need to validate minbytes, since we always write everything.
+    return execution::just(std::forward<Buffers>(buffers))
+    | execution::lazy_then(
+        [&self](auto&& buffers) {
+          std::size_t bytes = 0;
+          for (std::span<const std::byte> buf : buffers) {
+            const auto orig_size = self.data_.size();
+            self.data_.resize(orig_size + buf.size());
+            std::copy(buf.begin(), buf.end(), self.data_.begin() + orig_size);
+            bytes += buf.size();
+          }
+          return bytes;
+        });
+  }
+
   template<typename MB>
   auto read_some(MB mb, std::error_code& ec) -> std::size_t {
     ec.clear();
