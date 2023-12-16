@@ -16,6 +16,7 @@ target_sources(execution_test PRIVATE
 	tests/execution.cc
 	tests/execution_util.cc
 	tests/execution_io.cc
+	tests/strand.cc
 	tests/temporary_file.cc
 	tests/main.cc)
 add_test(NAME execution COMMAND execution_test)
