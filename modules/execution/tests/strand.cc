@@ -17,6 +17,17 @@ TEST(strand) {
   CHECK_EQUAL(1, x);
 }
 
+TEST(strand_running_in_this_thread) {
+  strand<> s;
+  CHECK(!s.running_in_this_thread());
+  auto sch = s.scheduler(fake_scheduler<false>{});
+
+  auto [x] = sync_wait(
+      schedule(sch)
+      | then([&s]() noexcept { CHECK(s.running_in_this_thread()); return 1; })).value();
+  CHECK_EQUAL(1, x);
+}
+
 TEST(strand_scheduler_equality) {
   strand<> s;
   CHECK(s.scheduler(fake_scheduler<false>{}) == s.scheduler(fake_scheduler<false>{}));

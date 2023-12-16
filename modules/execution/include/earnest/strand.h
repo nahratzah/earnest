@@ -13,47 +13,6 @@ namespace earnest::execution {
 inline namespace extensions {
 
 
-// Common-base for strands.
-//
-// Provides the `running_in_this_thread' function.
-//
-// Because strands can be nested, we store the thread-ID of the active usage in the strand.
-// (This also makes the implementation somewhat robust against coroutines. Note that the
-// `running_in_this_thread' method won't work properly if you use co-routines that are thread-hopping.)
-class strand_base_ {
-  protected:
-  strand_base_() = default;
-  strand_base_(const strand_base_&) = delete;
-  strand_base_(strand_base_&&) = delete;
-  ~strand_base_() = default;
-
-  public:
-  auto running_in_this_thread() const noexcept -> bool {
-    return active_thread_ == std::this_thread::get_id();
-  }
-
-  protected:
-  class active_thread_updater {
-    public:
-    explicit active_thread_updater(strand_base_& self)
-    : self(self)
-    {
-      self.active_thread_ = std::this_thread::get_id();
-    }
-
-    ~active_thread_updater() {
-      self.active_thread_ = std::thread::id{};
-    }
-
-    private:
-    strand_base_& self;
-  };
-
-  private:
-  std::thread::id active_thread_{};
-};
-
-
 // A strand ensures no two functions can be running at the same time.
 // (It sorta pretends to be a single thread. Or like a critical-section.)
 //
@@ -73,10 +32,12 @@ class strand_base_ {
 // Because strand-schedulers are scheduler-wrappers, they can wrap other strand-schedulers.
 // If you do this, be very careful you don't get deadlocked. A useful approach is to consider
 // strands as-if they are mutexes, and to maintain lock-leveling.
+//
+// Because strands can be nested, we store the thread-ID of the active usage in the strand.
+// (This also makes the implementation somewhat robust against coroutines. Note that the
+// `running_in_this_thread' method won't work properly if you use co-routines that are thread-hopping.)
 template<typename Alloc = std::allocator<std::byte>>
-class strand
-: private strand_base_
-{
+class strand {
   public:
   // Strands use an allocator.
   using allocator_type = Alloc;
@@ -103,6 +64,7 @@ class strand
     private:
     // Receiver that we attach to the nested scheduler.
     // This receiver:
+    // - sets the active-thread (so that `running_in_this_thread()' works as intended)
     // - forwards the set-value/set-error/set-done signals.
     // - and after each of those, releases the strand (permitting the next thread to start).
     class scheduler_receiver {
@@ -113,32 +75,26 @@ class strand
 
       template<typename... Args>
       friend auto tag_invoke([[maybe_unused]] set_value_t tag, scheduler_receiver&& self, Args&&... args) noexcept -> void {
-        { // Limit scope of the active-thread-updater.
-          strand_base_::active_thread_updater atu{self.state.s};
-          try {
-            execution::set_value(std::move(self.state.r), std::forward<Args>(args)...);
-          } catch (...) {
-            execution::set_error(std::move(self.state.r), std::current_exception());
-          }
+        self.state.s.mark_running();
+        try {
+          execution::set_value(std::move(self.state.r), std::forward<Args>(args)...);
+        } catch (...) {
+          execution::set_error(std::move(self.state.r), std::current_exception());
         }
-        self.state.release(); // Release. Since this starts a new sender, the active-thread-updater _must not_ be running.
+        self.state.release();
       }
 
       template<typename Error>
       friend auto tag_invoke([[maybe_unused]] set_error_t tag, scheduler_receiver&& self, Error&& error) noexcept -> void {
-        { // Limit scope of the active-thread-updater.
-          strand_base_::active_thread_updater atu(self.state.s);
-          execution::set_error(std::move(self.state.r), std::forward<Error>(error));
-        }
-        self.state.release(); // Release. Since this starts a new sender, the active-thread-updater _must not_ be running.
+        self.state.s.mark_running();
+        execution::set_error(std::move(self.state.r), std::forward<Error>(error));
+        self.state.release();
       }
 
       friend auto tag_invoke([[maybe_unused]] set_done_t tag, scheduler_receiver&& self) noexcept -> void {
-        { // Limit scope of the active-thread-updater.
-          strand_base_::active_thread_updater atu(self.state.s);
-          execution::set_done(std::move(self.state.r));
-        }
-        self.state.release(); // Release. Since this starts a new sender, the active-thread-updater _must not_ be running.
+        self.state.s.mark_running();
+        execution::set_done(std::move(self.state.r));
+        self.state.release();
       }
 
       private:
@@ -269,7 +225,10 @@ class strand
   }
 #endif
 
-  using strand_base_::running_in_this_thread;
+  auto running_in_this_thread() const noexcept -> bool {
+    std::lock_guard lck{mtx};
+    return active_thread_ == std::this_thread::get_id();
+  }
 
   // Adapt an existing scheduler, so that its scheduled tasks run on this strand.
   template<typename UnderlyingSched>
@@ -280,7 +239,7 @@ class strand
   }
 
   private:
-  auto run_or_enqueue(entry&& e) {
+  auto run_or_enqueue(entry&& e) -> void {
     std::unique_lock lck{mtx};
     if (engaged) {
       q.push(std::move(e));
@@ -296,6 +255,7 @@ class strand
   auto release() noexcept -> void {
     std::unique_lock lck{mtx};
     assert(engaged);
+    active_thread_ = std::thread::id{}; // Clear the active-thread-ID
     if (q.empty()) {
       engaged = false;
     } else {
@@ -308,9 +268,15 @@ class strand
     }
   }
 
-  std::mutex mtx;
+  auto mark_running() noexcept -> void {
+    std::lock_guard lck{mtx};
+    active_thread_ = std::this_thread::get_id();
+  }
+
+  mutable std::mutex mtx;
   bool engaged = false;
   queue_type q;
+  std::thread::id active_thread_{};
 };
 
 
