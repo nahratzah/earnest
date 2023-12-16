@@ -7,6 +7,9 @@
 
 #include <asio/async_result.hpp>
 
+#include <earnest/execution.h>
+#include <earnest/execution_io.h>
+
 #include "completion_wrapper.h"
 
 namespace earnest::detail {
@@ -82,6 +85,54 @@ class positional_stream_adapter {
     pos_ += bytes;
   }
 
+  template<execution::io::mutable_buffers Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_some_ec_t tag, positional_stream_adapter& self, Buffers&& buffers) {
+    return execution::io::lazy_read_some_at_ec(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers))
+    | execution::lazy_then(self.position_updater_cb());
+  }
+
+  template<execution::io::const_buffers Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_some_ec_t tag, positional_stream_adapter& self, Buffers&& buffers) {
+    return execution::io::lazy_write_some_at_ec(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers))
+    | execution::lazy_then(self.position_updater_cb());
+  }
+
+  template<execution::io::mutable_buffers Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_some_t tag, positional_stream_adapter& self, Buffers&& buffers) {
+    return execution::io::lazy_read_some_at(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers))
+    | execution::lazy_then(self.position_updater_cb());
+  }
+
+  template<execution::io::const_buffers Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_some_t tag, positional_stream_adapter& self, Buffers&& buffers) {
+    return execution::io::lazy_write_some_at(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers))
+    | execution::lazy_then(self.position_updater_cb());
+  }
+
+  template<execution::io::mutable_buffers Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_ec_t tag, positional_stream_adapter& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
+    return execution::io::lazy_read_at_ec(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
+    | execution::lazy_then(self.position_updater_cb());
+  }
+
+  template<execution::io::const_buffers Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_ec_t tag, positional_stream_adapter& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
+    return execution::io::lazy_write_at_ec(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
+    | execution::lazy_then(self.position_updater_cb());
+  }
+
+  template<execution::io::mutable_buffers Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_t tag, positional_stream_adapter& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
+    return execution::io::lazy_read_at(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
+    | execution::lazy_then(self.position_updater_cb());
+  }
+
+  template<execution::io::const_buffers Buffers>
+  friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_t tag, positional_stream_adapter& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
+    return execution::io::lazy_write_at(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
+    | execution::lazy_then(self.position_updater_cb());
+  }
+
   template<typename ConstBufferSequence>
   auto write_some(const ConstBufferSequence& buffers) -> std::size_t {
     std::size_t sz = next_layer_.write_some_at(pos_, buffers);
@@ -145,6 +196,13 @@ class positional_stream_adapter {
   }
 
   private:
+  auto position_updater_cb() {
+    return [this](std::size_t sz) noexcept -> std::size_t {
+      this->pos_ += sz;
+      return sz;
+    };
+  }
+
   offset_type pos_ = 0;
   AsyncRandomAccessDevice next_layer_;
 };
