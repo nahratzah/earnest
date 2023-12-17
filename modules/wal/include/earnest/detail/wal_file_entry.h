@@ -149,43 +149,51 @@ class wal_file_entry
     write_record_with_offset_vector& wrwo_vec;
   };
 
+  auto write_records_to_buffer_(write_records_vector&& records) const {
+    using byte_vector = std::vector<std::byte, rebind_alloc<std::byte>>;
+    using byte_stream = byte_stream<executor_type, rebind_alloc<std::byte>>;
+    using namespace execution;
+
+    return just(
+        byte_stream(get_executor(), get_allocator()),
+        write_record_with_offset_vector(get_allocator()),
+        std::move(records))
+    | let_value(
+        [](auto& fd, auto& wrwo_vec, auto& records) {
+          return xdr_v2::write(std::ref(fd), records, xdr_v2::fixed_collection(xdr_invocation_(wrwo_vec)))
+          | then(
+              [&wrwo_vec](byte_stream& fd) {
+                return std::make_tuple(std::move(fd).data(), std::move(wrwo_vec));
+              })
+          | explode_tuple();
+        });
+  }
+
   template<typename CompletionToken>
   auto write_records_to_buffer_(write_records_vector&& records, CompletionToken&& token) const {
     using byte_vector = std::vector<std::byte, rebind_alloc<std::byte>>;
     using byte_stream = byte_stream<executor_type, rebind_alloc<std::byte>>;
-    static_assert(xdr_v2::operation::writable_object<write_variant_type>);
+    using namespace execution;
 
     return asio::async_initiate<CompletionToken, void(std::error_code, byte_vector, write_record_with_offset_vector)>(
-        [](auto completion_handler, auto records, auto ex, auto alloc) {
-          execution::start_detached(
-              execution::just(
-                  byte_stream(ex, alloc),
-                  write_record_with_offset_vector(alloc),
-                  std::move(records))
-              | execution::lazy_let_value(
-                  [](auto& fd, auto& wrwo_vec, auto& records) {
-                    return xdr_v2::write(std::ref(fd), records, xdr_v2::fixed_collection(xdr_invocation_(wrwo_vec)))
-                    | execution::lazy_then(
-                        [&wrwo_vec](byte_stream& fd) {
-                          return std::make_tuple(std::move(fd).data(), std::move(wrwo_vec));
-                        })
-                    | execution::lazy_explode_tuple();
-                  })
-              | execution::lazy_then(
+        [](auto completion_handler, std::shared_ptr<const wal_file_entry> wf, auto records) {
+          start_detached(
+              wf->write_records_to_buffer_(std::move(records))
+              | then(
                   [](auto bytes, auto wrwo_vec) {
                     return std::make_tuple(std::error_code{}, std::move(bytes), std::move(wrwo_vec));
                   })
-              | execution::lazy_upon_error(
-                  [alloc](auto err) -> std::tuple<std::error_code, byte_vector, write_record_with_offset_vector> {
+              | upon_error(
+                  [alloc=wf->get_allocator()](auto err) -> std::tuple<std::error_code, byte_vector, write_record_with_offset_vector> {
                     if constexpr(std::same_as<std::exception_ptr, decltype(err)>)
                       std::rethrow_exception(err);
                     else
                       return std::make_tuple(std::error_code{}, byte_vector(alloc), write_record_with_offset_vector(alloc));
                   })
-              | execution::lazy_explode_tuple()
-              | execution::lazy_then(completion_handler_fun(std::move(completion_handler), ex)));
+              | explode_tuple()
+              | then(completion_handler_fun(std::move(completion_handler), wf->get_executor())));
         },
-        token, std::move(records), get_executor(), get_allocator());
+        token, this->shared_from_this(), std::move(records));
   }
 
   public:
