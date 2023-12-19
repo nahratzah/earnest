@@ -1255,7 +1255,7 @@ struct let_variant_t {
     opstate(Sender&& sender, Fn&& fn, Receiver&& r)
     : parent(execution::connect(std::move(sender), accepting_receiver(*this))),
       fn(fn),
-      r(r)
+      r(std::move(r))
     {}
 
     friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
