@@ -87,49 +87,49 @@ class positional_stream_adapter {
 
   template<execution::io::mutable_buffers Buffers>
   friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_some_ec_t tag, positional_stream_adapter& self, Buffers&& buffers) {
-    return execution::io::lazy_read_some_at_ec(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers))
+    return execution::io::lazy_read_some_at_ec(self.next_layer_, self.pos_, std::forward<Buffers>(buffers))
     | execution::lazy_then(self.position_updater_cb());
   }
 
   template<execution::io::const_buffers Buffers>
   friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_some_ec_t tag, positional_stream_adapter& self, Buffers&& buffers) {
-    return execution::io::lazy_write_some_at_ec(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers))
+    return execution::io::lazy_write_some_at_ec(self.next_layer_, self.pos_, std::forward<Buffers>(buffers))
     | execution::lazy_then(self.position_updater_cb());
   }
 
   template<execution::io::mutable_buffers Buffers>
   friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_some_t tag, positional_stream_adapter& self, Buffers&& buffers) {
-    return execution::io::lazy_read_some_at(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers))
+    return execution::io::lazy_read_some_at(self.next_layer_, self.pos_, std::forward<Buffers>(buffers))
     | execution::lazy_then(self.position_updater_cb());
   }
 
   template<execution::io::const_buffers Buffers>
   friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_some_t tag, positional_stream_adapter& self, Buffers&& buffers) {
-    return execution::io::lazy_write_some_at(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers))
+    return execution::io::lazy_write_some_at(self.next_layer_, self.pos_, std::forward<Buffers>(buffers))
     | execution::lazy_then(self.position_updater_cb());
   }
 
   template<execution::io::mutable_buffers Buffers>
   friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_ec_t tag, positional_stream_adapter& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
-    return execution::io::lazy_read_at_ec(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
+    return execution::io::lazy_read_at_ec(self.next_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
     | execution::lazy_then(self.position_updater_cb());
   }
 
   template<execution::io::const_buffers Buffers>
   friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_ec_t tag, positional_stream_adapter& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
-    return execution::io::lazy_write_at_ec(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
+    return execution::io::lazy_write_at_ec(self.next_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
     | execution::lazy_then(self.position_updater_cb());
   }
 
   template<execution::io::mutable_buffers Buffers>
   friend auto tag_invoke([[maybe_unused]] execution::io::lazy_read_t tag, positional_stream_adapter& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
-    return execution::io::lazy_read_at(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
+    return execution::io::lazy_read_at(self.next_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
     | execution::lazy_then(self.position_updater_cb());
   }
 
   template<execution::io::const_buffers Buffers>
   friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_t tag, positional_stream_adapter& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
-    return execution::io::lazy_write_at(self.nest_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
+    return execution::io::lazy_write_at(self.next_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
     | execution::lazy_then(self.position_updater_cb());
   }
 

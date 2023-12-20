@@ -1,19 +1,19 @@
 #pragma once
 
-#include <chrono>
-#include <cstdint>
+#include <exception>
+#include <memory>
 #include <mutex>
 #include <system_error>
 #include <type_traits>
 #include <utility>
+#include <variant>
+#include <vector>
 
-#include <asio/error.hpp>
-#include <asio/steady_timer.hpp>
+#include <asio.hpp>
 #include <spdlog/sinks/null_sink.h>
 #include <spdlog/spdlog.h>
 
-#include <earnest/detail/fanout.h>
-#include <earnest/detail/move_only_function.h>
+#include <earnest/detail/completion_handler_fun.h>
 #include <earnest/execution.h>
 #include <earnest/execution_io.h>
 #include <earnest/execution_util.h>
@@ -32,11 +32,10 @@ class wal_flusher {
   class sender_impl;
 
   public:
-  using executor_type = typename std::remove_cvref_t<AsyncFlushable>::executor_type;
+  using executor_type [[deprecated]] = typename std::remove_cvref_t<AsyncFlushable>::executor_type;
   using allocator_type = Allocator;
 
   private:
-  using fanout_type = fanout<executor_type, void(std::error_code)>;
   template<typename T> using allocator_type_for = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
 
   public:
@@ -60,6 +59,7 @@ class wal_flusher {
    * another operation requests a flush.
    */
   template<typename CompletionToken>
+  [[deprecated]]
   auto async_flush(bool data_only, CompletionToken&& token, bool delay_start = false) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
         [this](auto handler, bool data_only, bool delay_start) -> void {

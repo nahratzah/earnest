@@ -497,12 +497,12 @@ restart:
     return aio_.write_some_at(handle_, offset, std::forward<Buffers>(mb), ec);
   }
 
-  template<typename Buffers>
+  template<execution::io::mutable_buffers Buffers>
   friend auto tag_invoke(execution::io::lazy_read_some_at_ec_t tag, const fd& self, offset_type offset, Buffers&& buffers) {
     return tag(self.handle_, offset, std::forward<Buffers>(buffers));
   }
 
-  template<typename Buffers>
+  template<execution::io::const_buffers Buffers>
   friend auto tag_invoke(execution::io::lazy_write_some_at_ec_t tag, fd& self, offset_type offset, Buffers&& buffers) {
     return tag(self.handle_, offset, std::forward<Buffers>(buffers));
   }

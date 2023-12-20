@@ -199,8 +199,128 @@ class wal_file_entry
   public:
   template<typename CompletionToken>
   auto async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token);
+
+  auto async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence)
+  -> execution::type_erased_sender<
+      std::variant<std::tuple<std::shared_ptr<wal_file_entry>>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false>
+  {
+    using type_erased_sender = execution::type_erased_sender<
+        std::variant<std::tuple<std::shared_ptr<wal_file_entry>>>,
+        std::variant<std::exception_ptr, std::error_code>,
+        false>;
+    using namespace execution;
+    using pos_stream = positional_stream_adapter<fd_type&>;
+
+    return just(this->shared_from_this(), d, name, sequence)
+    | validation(
+        [](const std::shared_ptr<wal_file_entry>& wf,
+            [[maybe_unused]] const dir& d,
+            const std::filesystem::path& name,
+            [[maybe_unused]] std::uint_fast64_t sequence) -> std::optional<std::exception_ptr> {
+          if (name.has_parent_path()) return std::make_exception_ptr(std::runtime_error("wal file must be a filename"));
+          if (wf->file.is_open()) return std::make_exception_ptr(std::logic_error("wal is already open"));
+          return std::nullopt;
+        })
+    | validation(
+        [](const std::shared_ptr<wal_file_entry>& wf,
+            [[maybe_unused]] const dir& d,
+            [[maybe_unused]] const std::filesystem::path& name,
+            [[maybe_unused]] std::uint_fast64_t sequence) -> std::optional<std::error_code> {
+          if (wf->state_ != wal_file_entry_state::uninitialized) return make_error_code(wal_errc::bad_state);
+          return std::nullopt;
+        })
+    | then(
+        [](std::shared_ptr<wal_file_entry> wf,
+            [[maybe_unused]] const dir& d,
+            [[maybe_unused]] const std::filesystem::path& name,
+            [[maybe_unused]] std::uint_fast64_t sequence) {
+          wf->state_ = wal_file_entry_state::opening;
+          std::error_code ec;
+          wf->file.create(d, name, ec);
+          return std::make_tuple(ec, wf, name, sequence);
+        })
+    | explode_tuple()
+    | validation(
+        [](std::error_code ec, [[maybe_unused]] const std::shared_ptr<wal_file_entry>& wf, [[maybe_unused]] const std::filesystem::path& name, [[maybe_unused]] std::uint_fast64_t sequence) -> std::optional<std::error_code> {
+          if (ec) return ec;
+          return std::nullopt;
+        })
+    | then(
+        []([[maybe_unused]] std::error_code ec, std::shared_ptr<wal_file_entry> wf, const std::filesystem::path& name, std::uint_fast64_t sequence) {
+          return std::make_tuple(wf, name, sequence);
+        })
+    | explode_tuple()
+    | validation(
+        [](const std::shared_ptr<wal_file_entry>& wf, [[maybe_unused]] const std::filesystem::path& name, [[maybe_unused]] std::uint_fast64_t sequence) -> std::optional<std::error_code> {
+          std::error_code ec;
+          wf->file.ftrylock(ec);
+          if (ec) return ec;
+          return std::nullopt;
+        })
+    | then(
+        [](std::shared_ptr<wal_file_entry> wf, std::filesystem::path name, std::uint_fast64_t sequence) {
+          wf->name = name;
+          wf->version = max_version;
+          wf->sequence = sequence;
+          return wf;
+        })
+    | let_value(
+        [](std::shared_ptr<wal_file_entry>& wf) -> sender_of<std::shared_ptr<wal_file_entry>> auto {
+          return xdr_v2::write(pos_stream(wf->file), *wf, xdr_header_invocation{})
+          | then(
+              [&wf](pos_stream&& stream) -> pos_stream&& {
+                wf->link_offset_ = stream.position();
+                return std::move(stream);
+              })
+          | xdr_v2::write(xdr_v2::no_fd, write_variant_type(), xdr_v2::constant(xdr_v2::identity))
+          | then(
+              [&wf](pos_stream&& stream) -> std::shared_ptr<wal_file_entry> {
+                wf->write_offset_ = stream.position();
+                return std::move(wf);
+              });
+        })
+    | let_value(
+        [](std::shared_ptr<wal_file_entry>& wf) -> sender_of<std::shared_ptr<wal_file_entry>> auto {
+          return wf->wal_flusher_.lazy_flush(false)
+          | then(
+              [&wf]() -> std::shared_ptr<wal_file_entry>&& {
+                return std::move(wf);
+              });
+        })
+    | then(
+        [](std::shared_ptr<wal_file_entry> wf) {
+          wf->state_ = wal_file_entry_state::ready;
+          return wf;
+        });
+  }
+
   template<typename CompletionToken>
-  auto async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token);
+  [[deprecated]]
+  auto async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token) {
+    using namespace execution;
+
+    return asio::async_initiate<CompletionToken, void(std::error_code, link_done_event_type)>(
+        [](auto completion_handler, std::shared_ptr<wal_file_entry> wf, const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence) -> void {
+          start_detached(
+              wf->async_create(d, name, sequence)
+              | then(
+                  [](std::shared_ptr<wal_file_entry> wf) -> std::tuple<std::error_code, link_done_event_type> {
+                    return std::make_tuple(std::error_code{}, wf->link_done_event_);
+                  })
+              | upon_error(
+                  [link_done_event=wf->link_done_event_](auto err) -> std::tuple<std::error_code, link_done_event_type> {
+                    if constexpr(std::same_as<std::exception_ptr, decltype(err)>)
+                      std::rethrow_exception(err);
+                    else
+                      return std::make_tuple(err, link_done_event);
+                  })
+              | explode_tuple()
+              | then(completion_handler_fun(std::move(completion_handler), wf->get_executor())));
+        },
+        token, this->shared_from_this(), d, name, sequence);
+  }
 
   template<typename Range, typename CompletionToken, typename TransactionValidator = no_transaction_validation>
 #if __cpp_concepts >= 201907L

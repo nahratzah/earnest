@@ -1660,6 +1660,9 @@ class type_erased_sender<std::variant<ValueTypes...>, std::variant<ErrorTypes...
       : r(std::move(r))
       {}
 
+      impl(const impl&) = delete;
+      impl(impl&&) = default;
+
       ~impl() override = default;
 
       template<typename... T>
@@ -1689,7 +1692,7 @@ class type_erased_sender<std::variant<ValueTypes...>, std::variant<ErrorTypes...
   public:
   template<typename Impl> // Impl should be a typed_sender, but if I enforce it, the compiler says I'm recursing the move-constructible concept.
                           // I don't understand why it says that.
-  explicit type_erased_sender(Impl&& impl)
+  type_erased_sender(Impl&& impl)
   : impl(std::make_unique<typename sender_intf::template impl<std::remove_cvref_t<Impl>>>(std::forward<Impl>(impl)))
   {}
 
@@ -1698,9 +1701,8 @@ class type_erased_sender<std::variant<ValueTypes...>, std::variant<ErrorTypes...
 
   template<receiver Receiver>
   friend auto tag_invoke([[maybe_unused]] connect_t tag, type_erased_sender&& self, Receiver&& r) -> operation_state<std::remove_cvref_t<Receiver>> {
-    return operation_state<std::remove_cvref_t<Receiver>>(
-        std::move(*self.impl),
-        typename receiver_intf::template impl<Receiver>(std::forward<Receiver>(r)));
+    auto receiver_impl = typename receiver_intf::template impl<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r));
+    return operation_state<std::remove_cvref_t<Receiver>>(std::move(*self.impl), std::move(receiver_impl));
   }
 
   private:
@@ -1800,11 +1802,15 @@ struct lazy_validation_t {
   template<typename Pred>
   struct figure_out_error_types {
     template<typename... Args>
-    using result_type = std::invoke_result_t<Pred&&, const Args&...>;
+    struct type_ {
+      using result_type = std::invoke_result_t<Pred&&, const Args&...>;
+      static_assert(is_an_optional<result_type>);
+
+      using type = typename result_type::value_type;
+    };
 
     template<typename... Args>
-    requires (is_an_optional<result_type<Args...>>)
-    using type = typename result_type<Args...>::value_type;
+    using type = typename type_<Args...>::type;
   };
 
   // Sender-types for typed senders.

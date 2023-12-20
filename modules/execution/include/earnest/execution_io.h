@@ -1074,7 +1074,7 @@ struct lazy_write_some_at_ec_t {
   auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf) const
   noexcept(nothrow_tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
   -> typed_sender decltype(auto) {
-    return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
+    return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf));
   }
 
   template<typename FD, const_buffer_sequence Buffers>
@@ -1086,7 +1086,7 @@ struct lazy_write_some_at_ec_t {
       std::is_nothrow_invocable_v<lazy_write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, Buffers>) {
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
+      return execution::tag_invoke(*this, std::forward<FD>(fd), offset, std::move(buf));
     } else {
       std::span<const std::byte> s;
       if (!std::ranges::empty(buf)) s = *std::ranges::begin(buf);

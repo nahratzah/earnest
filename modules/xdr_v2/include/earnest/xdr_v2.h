@@ -435,7 +435,7 @@ class pre_validation {
 
   auto operator()() && {
     return execution::lazy_validation(
-        [pred=std::move(pred)]<typename State>(const State& st) mutable -> State {
+        [pred=std::move(pred)]<typename State>(const State& st) mutable {
           return std::invoke(std::move(pred), st.template get_temporary<TemporariesIndices>()...);
         });
   }
@@ -466,7 +466,7 @@ class post_validation {
 
   auto operator()() && {
     return execution::lazy_validation(
-        [pred=std::move(pred)]<typename State>(const State& st) mutable -> State {
+        [pred=std::move(pred)]<typename State>(const State& st) mutable {
           return std::invoke(std::move(pred), st.template get_temporary<TemporariesIndices>()...);
         });
   }
@@ -710,12 +710,6 @@ class state_ {
         std::forward<OtherFD>(other_fd),
         std::move(buffer),
         std::move(temporaries));
-  }
-
-  template<std::size_t I>
-  requires (I < std::tuple_size_v<Temporaries>)
-  auto get_temporary() -> decltype(auto) {
-    return std::get<I>(*temporaries);
   }
 
   template<std::size_t I>
@@ -1721,6 +1715,7 @@ class unresolved_operation_block<IsConst, std::tuple<Temporaries...>, Elements..
   template<bool, typename OtherTemporaries, unresolved_operation_block_element<OtherTemporaries>...>
   friend class unresolved_operation_block;
 
+  static_assert((std::default_initializable<Temporaries> &&...));
   static_assert(((IsConst ? Elements::for_writing : Elements::for_reading) &&...));
 
   public:
@@ -1833,19 +1828,19 @@ class operation_with_options {
   {}
 
   template<typename T>
-  auto read(T& v) const {
+  auto read(T&& v) const {
     return std::apply(
         [&v, this](const auto&... options) {
-          return this->op.read(v, options...);
+          return this->op.read(std::forward<T>(v), options...);
         },
         options);
   }
 
   template<typename T>
-  auto write(const T& v) const {
+  auto write(T&& v) const {
     return std::apply(
         [&v, this](const auto&... options) {
-          return this->op.write(v, options...);
+          return this->op.write(std::forward<T>(v), options...);
         },
         options);
   }
@@ -2732,10 +2727,7 @@ template<std::size_t Idx, typename T>
 struct readwrite_temporary_variable_t<tuple_element_of_type<Idx, T>> {
   private:
   template<typename Invocation>
-  requires requires(Invocation&& invocation, T& v) {
-    { std::move(invocation).read(v) };
-    { std::move(invocation).write(v) };
-  }
+  requires read_invocation_for<Invocation, T> || write_invocation_for<Invocation, T>
   struct bound {
     explicit constexpr bound(const Invocation& invocation)
     : invocation(invocation)
@@ -2792,14 +2784,16 @@ inline constexpr readwrite_temporary_variable_t<TupleElementOfType> readwrite_te
 
 
 // Read/write a constant value.
-struct constant_t {
+struct constant_t
+: basic_operation<constant_t>
+{
   template<typename T, typename Invocation>
   auto read(T&& v, Invocation&& invocation) const {
     auto confirmation_fn = [expected=std::forward<T>(v)](std::remove_cvref_t<T>& decoded) {
       if (decoded != expected) throw xdr_error("mismatched constant");
     };
 
-    return unresolved_operation_block<false, std::tuple<T>>{}
+    return unresolved_operation_block<false, std::tuple<std::remove_cvref_t<T>>>{}
         .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::remove_cvref_t<T>>>(std::forward<Invocation>(invocation)).read())
         .append_block(operation_block<false>{}.append(post_invocation<decltype(confirmation_fn), 0>(std::move(confirmation_fn))));
   }
@@ -2810,7 +2804,7 @@ struct constant_t {
       to_be_encoded = std::move(initial_value);
     };
 
-    return unresolved_operation_block<true, std::tuple<T>>{}
+    return unresolved_operation_block<true, std::tuple<std::remove_cvref_t<T>>>{}
         .append_block(operation_block<true>{}.append(pre_invocation<decltype(initialize_fn), 0>(std::move(initialize_fn))))
         .append_block(readwrite_temporary_variable<tuple_element_of_type<0, std::remove_cvref_t<T>>>(std::forward<Invocation>(invocation)).write());
   }
@@ -3646,31 +3640,31 @@ struct no_fd_t {};
 
 // Write operation.
 struct write_t {
-  template<typename FD, typename T, write_invocation_for<T> Invocation = identity_t>
+  template<typename FD, typename T, write_invocation_for<std::remove_cvref_t<T>> Invocation = identity_t>
   requires (!std::same_as<std::remove_cvref_t<FD>, no_fd_t>)
-  auto operator()(FD&& fd, const T& v, Invocation invocation = Invocation{}) const {
+  auto operator()(FD&& fd, T&& v, Invocation invocation = Invocation{}) const {
     return execution::just(std::forward<FD>(fd))
-    | (*this)(no_fd_t{}, v, std::move(invocation));
+    | (*this)(no_fd_t{}, std::forward<T>(v), std::move(invocation));
   }
 
-  template<typename T, write_invocation_for<T> Invocation = identity_t>
-  auto operator()([[maybe_unused]] no_fd_t fd, const T& v, Invocation invocation = Invocation{}) const {
-    return invocation.write(v).sender_chain();
+  template<typename T, write_invocation_for<std::remove_cvref_t<T>> Invocation = identity_t>
+  auto operator()([[maybe_unused]] no_fd_t fd, T&& v, Invocation invocation = Invocation{}) const {
+    return invocation.write(std::forward<T>(v)).sender_chain();
   }
 };
 
 // Read operation.
 struct read_t {
-  template<typename FD, typename T, read_invocation_for<T> Invocation = identity_t>
+  template<typename FD, typename T, read_invocation_for<std::remove_cvref_t<T>> Invocation = identity_t>
   requires (!std::same_as<std::remove_cvref_t<FD>, no_fd_t>)
-  auto operator()(FD&& fd, T& v, Invocation invocation = Invocation{}) const {
+  auto operator()(FD&& fd, T&& v, Invocation invocation = Invocation{}) const {
     return execution::just(std::forward<FD>(fd))
-    | (*this)(no_fd_t{}, v, std::move(invocation));
+    | (*this)(no_fd_t{}, std::forward<T>(v), std::move(invocation));
   }
 
-  template<typename T, read_invocation_for<T> Invocation = identity_t>
-  auto operator()([[maybe_unused]] no_fd_t fd, T& v, Invocation invocation = Invocation{}) const {
-    return invocation.read(v).sender_chain();
+  template<typename T, read_invocation_for<std::remove_cvref_t<T>> Invocation = identity_t>
+  auto operator()([[maybe_unused]] no_fd_t fd, T&& v, Invocation invocation = Invocation{}) const {
+    return invocation.read(std::forward<T>(v)).sender_chain();
   }
 };
 
