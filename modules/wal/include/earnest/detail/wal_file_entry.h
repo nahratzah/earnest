@@ -109,9 +109,6 @@ class wal_file_entry
   auto header_reader_();
   auto header_writer_() const;
 
-  template<typename Stream, typename Callback>
-  auto read_records_(Stream& stream, Callback callback, std::unique_ptr<variant_type> ptr) -> void; // Has side-effects.
-
   template<typename Stream, typename Acceptor, typename Callback>
   auto read_records_until_(Stream& stream, Acceptor&& acceptor, Callback callback, typename fd_type::offset_type end_offset) const -> void;
 
@@ -197,8 +194,195 @@ class wal_file_entry
   }
 
   public:
+  auto async_open(const dir& d, const std::filesystem::path& name)
+  -> execution::type_erased_sender<
+      std::variant<std::tuple<std::shared_ptr<wal_file_entry>>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false> {
+    using namespace execution;
+    using pos_stream = positional_stream_adapter<fd_type&>;
+
+    return just(this->shared_from_this(), d, name)
+    | lazy_observe_value(
+        [logger=this->logger](const std::shared_ptr<wal_file_entry>& wf,
+            const dir& d,
+            const std::filesystem::path& name) {
+          logger->info("opening wal file {}", name.native());
+        })
+    | validation(
+        [](const std::shared_ptr<wal_file_entry>& wf,
+            [[maybe_unused]] const dir& d,
+            const std::filesystem::path& name) -> std::optional<std::exception_ptr> {
+          if (name.has_parent_path()) return std::make_exception_ptr(std::runtime_error("wal file must be a filename"));
+          if (wf->file.is_open()) return std::make_exception_ptr(std::logic_error("wal is already open"));
+          return std::nullopt;
+        })
+    | validation(
+        [](const std::shared_ptr<wal_file_entry>& wf,
+            [[maybe_unused]] const dir& d,
+            [[maybe_unused]] const std::filesystem::path& name) -> std::optional<std::error_code> {
+          if (wf->state_ != wal_file_entry_state::uninitialized) return make_error_code(wal_errc::bad_state);
+          return std::nullopt;
+        })
+    | then(
+        [](std::shared_ptr<wal_file_entry> wf,
+            [[maybe_unused]] const dir& d,
+            [[maybe_unused]] const std::filesystem::path& name) {
+          wf->state_ = wal_file_entry_state::opening;
+          std::error_code ec;
+          wf->file.open(d, name, fd_type::READ_WRITE, ec);
+          return std::make_tuple(ec, wf, name);
+        })
+    | explode_tuple()
+    | validation(
+        [](std::error_code ec, [[maybe_unused]] const std::shared_ptr<wal_file_entry>& wf, [[maybe_unused]] const std::filesystem::path& name) -> std::optional<std::error_code> {
+          if (ec) return ec;
+          return std::nullopt;
+        })
+    | then(
+        []([[maybe_unused]] std::error_code ec, std::shared_ptr<wal_file_entry> wf, const std::filesystem::path& name) {
+          return std::make_tuple(wf, name);
+        })
+    | explode_tuple()
+    | validation(
+        [](const std::shared_ptr<wal_file_entry>& wf, [[maybe_unused]] const std::filesystem::path& name) -> std::optional<std::error_code> {
+          std::error_code ec;
+          bool was_locked = wf->file.ftrylock(ec);
+          if (ec) return ec;
+          if (!was_locked) return make_error_code(wal_errc::unable_to_lock);
+          return std::nullopt;
+        })
+    | then(
+        [](std::shared_ptr<wal_file_entry> wf, std::filesystem::path name) {
+          wf->name = name;
+          return wf;
+        })
+    | let_value(
+        [](std::shared_ptr<wal_file_entry>& wf) -> sender_of<std::shared_ptr<wal_file_entry>> auto {
+          return xdr_v2::read(pos_stream(wf->file), *wf, xdr_header_invocation{})
+          | then(
+              [&wf](pos_stream&& stream) {
+                struct repeat_state {
+                  std::shared_ptr<wal_file_entry>& wf;
+                  bool done;
+                };
+                return std::make_tuple(std::move(stream), repeat_state{wf, false});
+              })
+          | explode_tuple()
+          | repeat(
+              []([[maybe_unused]] std::size_t idx, pos_stream& stream, auto& repeat_state) {
+                auto factory = [&]() {
+                  repeat_state.wf->link_offset_ = stream.position();
+
+                  return std::make_optional(
+                      xdr_v2::read_into<variant_type>(std::ref(stream))
+                      | observe_value(
+                          [&repeat_state]([[maybe_unused]] const auto& stream, const variant_type& v) {
+                            repeat_state.wf->logger->debug("read {}", v);
+                          })
+                      | then(
+                          [&repeat_state](std::reference_wrapper<pos_stream> stream, variant_type&& v) -> std::error_code {
+                            using namespace std::literals;
+
+                            wal_file_entry& wf = *repeat_state.wf;
+                            wf.write_offset_ = stream.get().position();
+                            repeat_state.done = std::holds_alternative<wal_record_end_of_records>(v);
+
+                            if (!repeat_state.done) {
+                              if (wf.state_ == wal_file_entry_state::sealed) {
+                                wf.logger->error("file {} is bad: record after seal", wf.name.native());
+                                return make_error_code(wal_errc::unrecoverable);
+                              } else if (std::holds_alternative<wal_record_seal>(v)) {
+                                wf.state_ = wal_file_entry_state::sealed;
+                              }
+                            }
+                            return std::error_code{};
+                          })
+                      | validation(
+                          [](std::error_code err) -> std::optional<std::error_code> {
+                            if (err)
+                              return err;
+                            else
+                              return std::nullopt;
+                          }));
+                };
+                using optional_type = decltype(factory());
+
+                if (repeat_state.done)
+                  return optional_type(std::nullopt);
+                else
+                  return factory();
+              })
+          | then(
+              []([[maybe_unused]] pos_stream&& stream, auto&& repeat_state) -> std::shared_ptr<wal_file_entry> {
+                return std::move(repeat_state.wf);
+              });
+        })
+    | let_value(
+        [](std::shared_ptr<wal_file_entry>& wf) -> sender_of<std::shared_ptr<wal_file_entry>> auto {
+          return wf->wal_flusher_.lazy_flush(false)
+          | then(
+              [&wf]() -> std::shared_ptr<wal_file_entry>&& {
+                return std::move(wf);
+              });
+        })
+    | then(
+        [](std::shared_ptr<wal_file_entry> wf) {
+          if (wf->state_ == wal_file_entry_state::opening) wf->state_ = wal_file_entry_state::ready;
+          wf->link_done_event_(std::error_code{});
+          return wf;
+        })
+    // If anything fails, we set the state to uninitialized.
+    // (But I want to move to a system where the sender-chain allocates a new wf,
+    // thus not requiring that, since the error-channel will never hold a wf.
+    // But first, we have to complete the refactoring.)
+    | let_error(
+        [wf=this->shared_from_this()](auto error) {
+          if (wf->state_ == wal_file_entry_state::opening) wf->state_ = wal_file_entry_state::uninitialized;
+          wf->file.close();
+
+          return just(std::move(error))
+          | validation(
+              [](auto err) -> std::optional<std::error_code> {
+                if constexpr(std::same_as<std::exception_ptr, decltype(err)>)
+                  std::rethrow_exception(err);
+                else
+                  return err;
+              })
+          | then( // Fix up the type.
+              [](auto err) -> std::shared_ptr<wal_file_entry> {
+                return nullptr;
+              });
+        });
+  }
+
   template<typename CompletionToken>
-  auto async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token);
+  [[deprecated]]
+  auto async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token) {
+    using namespace execution;
+
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto completion_handler, std::shared_ptr<wal_file_entry> wf, const dir& d, const std::filesystem::path& name) -> void {
+          start_detached(
+              wf->async_open(d, name)
+              | then(
+                  []([[maybe_unused]] std::shared_ptr<wal_file_entry> wf) -> std::error_code {
+                    return std::error_code{};
+                  })
+              | upon_error(
+                  [logger=wf->logger](auto err) -> std::error_code {
+                    if constexpr(std::same_as<std::exception_ptr, decltype(err)>) {
+                      logger->error("exception");
+                      std::rethrow_exception(err);
+                    } else {
+                      logger->error("error: {}", err.message());
+                      return err;
+                    }
+                  })
+              | then(completion_handler_fun(std::move(completion_handler), wf->get_executor())));
+        },
+        token, this->shared_from_this(), d, name);
+  }
 
   auto async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence)
   -> execution::type_erased_sender<
@@ -255,8 +439,9 @@ class wal_file_entry
     | validation(
         [](const std::shared_ptr<wal_file_entry>& wf, [[maybe_unused]] const std::filesystem::path& name, [[maybe_unused]] std::uint_fast64_t sequence) -> std::optional<std::error_code> {
           std::error_code ec;
-          wf->file.ftrylock(ec);
+          const bool was_locked = wf->file.ftrylock(ec);
           if (ec) return ec;
+          if (!was_locked) return make_error_code(wal_errc::unable_to_lock);
           return std::nullopt;
         })
     | then(
@@ -486,10 +671,16 @@ class wal_file_entry
 
 template<typename Executor, typename Allocator>
 struct wal_file_entry<Executor, Allocator>::xdr_header_invocation {
+  private:
+  static constexpr auto magic() noexcept -> std::array<char, 13> {
+    return std::array<char, 13>{ '\013', '\013', 'e', 'a', 'r', 'n', 'e', 's', 't', '.', 'w', 'a', 'l' };
+  }
+
+  public:
   auto read(wal_file_entry& self) const {
     using namespace std::literals;
 
-    return xdr_v2::constant.read("\013\013earnest.wal"s, xdr_v2::fixed_byte_string)
+    return xdr_v2::constant.read(magic(), xdr_v2::fixed_byte_string)
     | xdr_v2::uint32.read(self.version)
     | xdr_v2::validation.read(
         [&self]() -> std::optional<std::error_code> {
@@ -504,7 +695,7 @@ struct wal_file_entry<Executor, Allocator>::xdr_header_invocation {
   auto write(const wal_file_entry& self) const {
     using namespace std::literals;
 
-    return xdr_v2::constant.write("\013\013earnest.wal"s, xdr_v2::fixed_byte_string)
+    return xdr_v2::constant.write(magic(), xdr_v2::fixed_byte_string)
     | xdr_v2::validation.write(
         [&self]() -> std::optional<std::error_code> {
           if (self.version <= max_version)

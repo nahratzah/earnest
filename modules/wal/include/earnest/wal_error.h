@@ -8,7 +8,7 @@ namespace earnest {
 
 
 enum class wal_errc {
-  bad_version,
+  bad_version=1,
   memory_exhausted,
   bad_state,
   bad_read,

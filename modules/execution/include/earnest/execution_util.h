@@ -1922,12 +1922,350 @@ struct validation_t {
   private:
   template<sender S, typename Pred>
   constexpr auto default_impl(S&& s, Pred&& pred) const
-  noexcept(noexcept(execution::lazy_validation(std::declval<Pred>())))
+  noexcept(noexcept(execution::lazy_validation(std::declval<S>(), std::declval<Pred>())))
   -> sender decltype(auto) {
     return execution::lazy_validation(std::forward<S>(s), std::forward<Pred>(pred));
   }
 };
 inline constexpr validation_t validation{};
+
+
+// Observe the value channel of a sender chain.
+struct lazy_observe_value_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S, typename Fn>
+  constexpr auto operator()(S&& s, Fn&& fn) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const lazy_observe_value_t&>(), std::declval<S>(), std::declval<Fn>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
+  }
+
+  template<typename Fn>
+  constexpr auto operator()(Fn&& fn) const
+  noexcept(noexcept(_generic_adapter(std::declval<const lazy_observe_value_t&>(), std::declval<Fn>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Fn>(fn));
+  }
+
+  private:
+  template<receiver Receiver, typename Fn>
+  class receiver_impl
+  : public _generic_receiver_wrapper<Receiver, set_value_t>
+  {
+    public:
+    explicit receiver_impl(Receiver&& r, Fn&& fn)
+    : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
+      fn(std::move(fn))
+    {}
+
+    template<typename... Args>
+    friend auto tag_invoke(set_value_t set_value, receiver_impl&& self, Args&&... args) -> void {
+      std::invoke(std::move(self.fn), std::as_const(args)...);
+      set_value(std::move(self.r), std::forward<Args>(args)...);
+    }
+
+    private:
+    Fn fn;
+  };
+
+  template<sender Sender, typename Fn>
+  class sender_impl
+  : public _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    explicit sender_impl(Sender&& s, Fn&& fn)
+    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(std::forward<Sender>(s)),
+      fn(std::move(fn))
+    {}
+
+    explicit sender_impl(Sender&& s, const Fn& fn)
+    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(std::forward<Sender>(s)),
+      fn(fn)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke(connect_t connect, sender_impl&& self, Receiver&& r) {
+      return connect(
+          std::move(self.s),
+          receiver_impl<std::remove_cvref_t<Receiver>, Fn>(std::forward<Receiver>(r), std::move(self.fn)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Fn>, OtherSender, Fn>)
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Fn> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
+    }
+
+    Fn fn;
+  };
+
+  template<sender S, typename Fn>
+  constexpr auto default_impl(S&& s, Fn&& fn) const
+  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>, S, Fn>)
+  -> sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>> {
+    return sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>(std::forward<S>(s), std::forward<Fn>(fn));
+  }
+};
+inline constexpr lazy_observe_value_t lazy_observe_value{};
+
+
+// Observe the value channel of a sender chain.
+struct observe_value_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S, typename Fn>
+  constexpr auto operator()(S&& s, Fn&& fn) const
+  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const observe_value_t&>(), std::declval<S>(), std::declval<Fn>())))
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
+  }
+
+  template<typename Fn>
+  constexpr auto operator()(Fn&& fn) const
+  noexcept(noexcept(_generic_adapter(std::declval<const observe_value_t&>(), std::declval<Fn>())))
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Fn>(fn));
+  }
+
+  private:
+  template<sender S, typename Fn>
+  constexpr auto default_impl(S&& s, Fn&& fn) const
+  noexcept(noexcept(execution::lazy_observe_value(std::declval<S>(), std::declval<Fn>())))
+  -> sender decltype(auto) {
+    return execution::lazy_observe_value(std::forward<S>(s), std::forward<Fn>(fn));
+  }
+};
+inline constexpr observe_value_t observe_value{};
+
+
+// Observe the error channel of a sender chain.
+// Note: if the observer-function throws an exception, it'll be forwarded as the error.
+struct lazy_observe_error_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S, typename Fn>
+  constexpr auto operator()(S&& s, Fn&& fn) const
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_error_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
+  }
+
+  template<typename Fn>
+  constexpr auto operator()(Fn&& fn) const
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Fn>(fn));
+  }
+
+  private:
+  template<receiver Receiver, typename Fn>
+  class receiver_impl
+  : public _generic_receiver_wrapper<Receiver, set_error_t>
+  {
+    public:
+    explicit receiver_impl(Receiver&& r, Fn&& fn)
+    : _generic_receiver_wrapper<Receiver, set_error_t>(std::move(r)),
+      fn(std::move(fn))
+    {}
+
+    template<typename Error>
+    friend auto tag_invoke(set_error_t set_error, receiver_impl&& self, Error&& error) noexcept -> void {
+      try {
+        std::invoke(std::move(self.fn), std::as_const(error));
+      } catch (...) {
+        set_error(std::move(self.r), std::current_exception());
+        return;
+      }
+      set_error(std::move(self.r), std::forward<Error>(error));
+    }
+
+    private:
+    Fn fn;
+  };
+
+  template<sender Sender, typename Fn>
+  class sender_impl
+  : public _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    explicit sender_impl(Sender&& s, Fn&& fn)
+    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(std::forward<Sender>(s)),
+      fn(std::move(fn))
+    {}
+
+    explicit sender_impl(Sender&& s, const Fn& fn)
+    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(std::forward<Sender>(s)),
+      fn(fn)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke(connect_t connect, sender_impl&& self, Receiver&& r) {
+      return connect(
+          std::move(self.s),
+          receiver_impl<std::remove_cvref_t<Receiver>, Fn>(std::forward<Receiver>(r), std::move(self.fn)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Fn> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
+    }
+
+    Fn fn;
+  };
+
+  template<sender S, typename Fn>
+  constexpr auto default_impl(S&& s, Fn&& fn) const
+  -> sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>> {
+    return sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>(std::forward<S>(s), std::forward<Fn>(fn));
+  }
+};
+inline constexpr lazy_observe_error_t lazy_observe_error{};
+
+
+// Observe the error channel of a sender chain.
+// Note: if the observer-function throws an exception, it'll be forwarded as the error.
+struct observe_error_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S, typename Fn>
+  constexpr auto operator()(S&& s, Fn&& fn) const
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_error_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
+  }
+
+  template<typename Fn>
+  constexpr auto operator()(Fn&& fn) const
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Fn>(fn));
+  }
+
+  private:
+  template<sender S, typename Fn>
+  constexpr auto default_impl(S&& s, Fn&& fn) const
+  -> sender decltype(auto) {
+    return execution::lazy_observe_error(std::forward<S>(s), std::forward<Fn>(fn));
+  }
+};
+inline constexpr observe_error_t observe_error{};
+
+
+// Observe the done channel of a sender chain.
+// Note: if the observer-function throws an exception, it'll be forwarded as the error.
+struct lazy_observe_done_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S, std::invocable Fn>
+  constexpr auto operator()(S&& s, Fn&& fn) const
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_done_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
+  }
+
+  template<std::invocable Fn>
+  constexpr auto operator()(Fn&& fn) const
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Fn>(fn));
+  }
+
+  private:
+  template<receiver Receiver, std::invocable Fn>
+  class receiver_impl
+  : public _generic_receiver_wrapper<Receiver, set_done_t>
+  {
+    public:
+    explicit receiver_impl(Receiver&& r, Fn&& fn)
+    : _generic_receiver_wrapper<Receiver, set_done_t>(std::move(r)),
+      fn(std::move(fn))
+    {}
+
+    friend auto tag_invoke(set_done_t set_done, receiver_impl&& self) noexcept -> void {
+      try {
+        std::invoke(std::move(self.fn));
+      } catch (...) {
+        set_error(std::move(self.r), std::current_exception());
+        return;
+      }
+      set_done(std::move(self.r));
+    }
+
+    private:
+    Fn fn;
+  };
+
+  template<sender Sender, std::invocable Fn>
+  class sender_impl
+  : public _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    explicit sender_impl(Sender&& s, Fn&& fn)
+    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(std::forward<Sender>(s)),
+      fn(std::move(fn))
+    {}
+
+    explicit sender_impl(Sender&& s, const Fn& fn)
+    : _generic_sender_wrapper<sender_impl<Sender, Fn>, Sender, connect_t>(std::forward<Sender>(s)),
+      fn(fn)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke(connect_t connect, sender_impl&& self, Receiver&& r) {
+      return connect(
+          std::move(self.s),
+          receiver_impl<std::remove_cvref_t<Receiver>, Fn>(std::forward<Receiver>(r), std::move(self.fn)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Fn> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
+    }
+
+    Fn fn;
+  };
+
+  template<sender S, std::invocable Fn>
+  constexpr auto default_impl(S&& s, Fn&& fn) const
+  -> sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>> {
+    return sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>(std::forward<S>(s), std::forward<Fn>(fn));
+  }
+};
+inline constexpr lazy_observe_done_t lazy_observe_done{};
+
+
+// Observe the done channel of a sender chain.
+// Note: if the observer-function throws an exception, it'll be forwarded as the error.
+struct observe_done_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender S, std::invocable Fn>
+  constexpr auto operator()(S&& s, Fn&& fn) const
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_done_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
+  }
+
+  template<std::invocable Fn>
+  constexpr auto operator()(Fn&& fn) const
+  -> decltype(auto) {
+    return _generic_adapter(*this, std::forward<Fn>(fn));
+  }
+
+  private:
+  template<sender S, std::invocable Fn>
+  constexpr auto default_impl(S&& s, Fn&& fn) const
+  -> sender decltype(auto) {
+    return execution::lazy_observe_done(std::forward<S>(s), std::forward<Fn>(fn));
+  }
+};
+inline constexpr observe_done_t observe_done{};
 
 
 } /* inline namespace extensions */

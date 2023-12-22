@@ -9,6 +9,8 @@
 #include <earnest/xdr.h>
 #include <earnest/xdr_v2.h>
 
+#include <spdlog/spdlog.h>
+
 namespace earnest::detail {
 
 
@@ -77,13 +79,32 @@ struct wal_record_skip32 {
 
   auto operator<=>(const wal_record_skip32& y) const noexcept = default;
 
+  private:
+  template<typename T>
+  requires requires(T stream, std::uint32_t bytes) {
+    { stream.skip(bytes) };
+  }
+  static auto skip_(T& stream, std::uint32_t bytes) -> T&& {
+    stream.skip(bytes);
+    return std::move(stream);
+  }
+
+  template<typename T>
+  requires requires(T stream, std::uint32_t bytes) {
+    { stream.skip(bytes) };
+  }
+  static auto skip_(std::reference_wrapper<T> stream, std::uint32_t bytes) -> std::reference_wrapper<T> {
+    stream.get().skip(bytes);
+    return stream;
+  }
+
+  public:
   friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_skip32& r) {
     return xdr_v2::uint32.read(r.bytes)
     | xdr_v2::manual.read(
         [&r](auto& stream) {
-          if constexpr(requires { stream.skip(r.bytes); }) {
-            stream.skip(r.bytes);
-            return execution::just(std::move(stream));
+          if constexpr(requires { skip_(stream, r.bytes); }) {
+            return execution::just(skip_(stream, r.bytes));
           } else {
             return execution::just(std::string(r.bytes, '\0'))
             | execution::lazy_let_value(
@@ -102,9 +123,8 @@ struct wal_record_skip32 {
     return xdr_v2::uint32.write(r.bytes)
     | xdr_v2::manual.write(
         [&r](auto& stream) {
-          if constexpr(requires { stream.skip(r.bytes); }) {
-            stream.skip(r.bytes);
-            return execution::just(std::move(stream));
+          if constexpr(requires { skip_(stream, r.bytes); }) {
+            return execution::just(skip_(stream, r.bytes));
           } else {
             return execution::just(std::string(r.bytes, '\0'))
             | execution::lazy_let_value(
@@ -128,13 +148,32 @@ struct wal_record_skip64 {
 
   auto operator<=>(const wal_record_skip64& y) const noexcept = default;
 
+  private:
+  template<typename T>
+  requires requires(T& stream, std::uint64_t bytes) {
+    { stream.skip(bytes) };
+  }
+  static auto skip_(T& stream, std::uint64_t bytes) -> T&& {
+    stream.skip(bytes);
+    return std::move(stream);
+  }
+
+  template<typename T>
+  requires requires(T& stream, std::uint64_t bytes) {
+    { stream.skip(bytes) };
+  }
+  static auto skip_(std::reference_wrapper<T> stream, std::uint64_t bytes) -> std::reference_wrapper<T> {
+    stream.get().skip(bytes);
+    return stream;
+  }
+
+  public:
   friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_skip64& r) {
     return xdr_v2::uint64.read(r.bytes)
     | xdr_v2::manual.read(
         [&r](auto& stream) {
-          if constexpr(requires { stream.skip(r.bytes); }) {
-            stream.skip(r.bytes);
-            return execution::just(std::move(stream));
+          if constexpr(requires { skip_(stream, r.bytes); }) {
+            return execution::just(skip_(stream, r.bytes));
           } else {
             return execution::just(std::string(r.bytes, '\0'))
             | execution::lazy_let_value(
@@ -153,9 +192,8 @@ struct wal_record_skip64 {
     return xdr_v2::uint64.write(r.bytes)
     | xdr_v2::manual.write(
         [&r](auto& stream) {
-          if constexpr(requires { stream.skip(r.bytes); }) {
-            stream.skip(r.bytes);
-            return execution::just(std::move(stream));
+          if constexpr(requires { skip_(stream, r.bytes); }) {
+            return execution::just(skip_(stream, r.bytes));
           } else {
             return execution::just(std::string(r.bytes, '\0'))
             | execution::lazy_let_value(
@@ -441,13 +479,47 @@ struct wal_record_modify_file32 {
 
   auto operator<=>(const wal_record_modify_file32& y) const noexcept = default;
 
+  private:
+  template<typename T>
+  requires requires(const T& stream) {
+    { stream.position() };
+  }
+  static auto position_(const T& stream) {
+    return stream.position();
+  }
+
+  template<typename T>
+  requires requires(const T& stream) {
+    { stream.position() };
+  }
+  static auto position_(std::reference_wrapper<T> stream) {
+    return stream.get().position();
+  }
+
+  template<typename T>
+  requires requires(T& stream, std::uint32_t bytes) {
+    { stream.skip(bytes) };
+  }
+  static auto skip_(T& stream, std::uint32_t bytes) -> void {
+    stream.skip(bytes);
+  }
+
+  template<typename T>
+  requires requires(T& stream, std::uint32_t bytes) {
+    { stream.skip(bytes) };
+  }
+  static auto skip_(std::reference_wrapper<T> stream, std::uint32_t bytes) -> void {
+    stream.get().skip(bytes);
+  }
+
+  public:
   friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_modify_file32& r) {
     return xdr_v2::uint32.read(r.wal_len)
     | xdr_v2::manual.read(
         [&r](auto& stream) {
-          r.wal_offset = stream.position();
-          stream.skip(r.wal_len);
-          stream.skip((0u - r.wal_len) % 4u); // Skip padding.
+          r.wal_offset = position_(stream);
+          skip_(stream, r.wal_len);
+          skip_(stream, (0u - r.wal_len) % 4u); // Skip padding.
           return execution::just(std::move(stream));
         })
     | xdr_v2::identity.read(r.file)
@@ -559,7 +631,7 @@ struct wal_record_variant
 
   template<std::size_t... Idx>
   static auto xdr_variant_defn([[maybe_unused]] std::index_sequence<Idx...> indices) {
-    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_<Executor, Reactor>>::opcode>(xdr_identity)...);
+    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_<Executor, Reactor>>::opcode>(xdr_v2::identity)...);
   }
 };
 
@@ -823,3 +895,152 @@ struct variant_alternative<I, ::earnest::detail::wal_record_write_variant<Execut
 
 
 }
+
+namespace fmt {
+
+
+template<>
+struct formatter<earnest::detail::wal_record_end_of_records>
+: formatter<std::string>
+{
+  auto format([[maybe_unused]] const earnest::detail::wal_record_end_of_records& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "end-of-records");
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_noop>
+: formatter<std::string>
+{
+  auto format([[maybe_unused]] const earnest::detail::wal_record_noop& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "noop");
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_skip32>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_skip32& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "skip32({} bytes)", r.bytes);
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_skip64>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_skip64& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "skip64({} bytes)", r.bytes);
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_seal>
+: formatter<std::string>
+{
+  auto format([[maybe_unused]] const earnest::detail::wal_record_seal& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "noop");
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_wal_archived>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_wal_archived& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "wal-archived(sequence={})", r.sequence);
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_rollover_intent>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_rollover_intent& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "rollover-intent({})", r.filename);
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_rollover_ready>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_rollover_ready& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "rollover-ready({})", r.filename);
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_create_file>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_create_file& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "create-file({})", r.file);
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_erase_file>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_erase_file& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "erase-file({})", r.file);
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_truncate_file>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_truncate_file& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "truncate-file({}, {})", r.file, r.new_size);
+  }
+};
+
+template<>
+struct formatter<earnest::detail::wal_record_modify_file_write32>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_modify_file_write32& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "modify-file({}, offset={}, {} bytes)", r.file, r.file_offset, r.data.size());
+  }
+};
+
+template<typename Executor, typename Reactor>
+struct formatter<earnest::detail::wal_record_modify_file32<Executor, Reactor>>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_modify_file32<Executor, Reactor>& r, format_context& ctx) -> decltype(ctx.out()) {
+    return fmt::format_to(ctx.out(), "modify-file({}, offset={}, {} bytes)", r.file, r.file_offset, r.wal_len);
+  }
+};
+
+template<typename Executor, typename Reactor>
+struct formatter<earnest::detail::wal_record_variant<Executor, Reactor>>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_variant<Executor, Reactor>& r, format_context& ctx) -> decltype(ctx.out()) {
+    return std::visit(
+        [&ctx](const auto& r) {
+          return fmt::format_to(ctx.out(), "{}", r);
+        },
+        r);
+  }
+};
+
+template<typename Executor, typename Reactor>
+struct formatter<earnest::detail::wal_record_write_variant<Executor, Reactor>>
+: formatter<std::string>
+{
+  auto format(const earnest::detail::wal_record_write_variant<Executor, Reactor>& r, format_context& ctx) -> decltype(ctx.out()) {
+    return std::visit(
+        [&ctx](const auto& r) -> decltype(ctx.out()) {
+          return fmt::format_to(ctx.out(), "{}", r);
+        },
+        r);
+  }
+};
+
+
+} /* namespace fmt */

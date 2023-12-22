@@ -110,4 +110,28 @@ TEST(read_variant_value_1_with_discriminant) {
   CHECK_EQUAL(std::string_view("abcd"), std::get<std::string>(v));
 };
 
+TEST(write_using_ref_fd) {
+  std::variant<int, std::string> v = int(7);
+  buffer buf;
+  auto [result] = sync_wait(
+      just(std::ref(buf))
+      | variant.write(v, uint32, ascii_string).sender_chain()).value();
+  CHECK_EQUAL(
+      buffer({ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07 }),
+      result.get());
+};
+
+TEST(read_using_ref_fd) {
+  std::variant<int, std::string> v;
+  buffer buf({ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 'x', 'x', 'x', 'x' });
+  auto [result] = sync_wait(
+      just(std::ref(buf))
+      | variant.read(v, uint32, ascii_string).sender_chain()).value();
+  CHECK_EQUAL(
+      buffer({ 'x', 'x', 'x', 'x' }),
+      result.get());
+  REQUIRE CHECK(std::holds_alternative<int>(v));
+  CHECK_EQUAL(7, std::get<int>(v));
+};
+
 }

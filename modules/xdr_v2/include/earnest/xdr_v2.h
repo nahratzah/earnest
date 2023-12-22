@@ -1354,7 +1354,7 @@ class manual_invocation {
 
   template<std::size_t N>
   auto temporaries_shift() && {
-    return manual_invocation<Fn, TemporariesIndices + N...>(std::move(fn));
+    return manual_invocation<Fn, Extent, TemporariesIndices + N...>(std::move(fn));
   }
 
   private:
@@ -3448,7 +3448,7 @@ struct variant_t
     using d_set = discriminant_set<figure_out_discriminant<std::remove_cvref_t<Invocations>>(Idx)...>;
     constexpr std::size_t nested_extent = decide_on_extent(decltype(std::get<Idx>(invocations).read(std::declval<T&>()))::extent...);
 
-    auto nested_operation = [&v, invocations]<typename FD>(FD& fd, std::size_t discriminant) {
+    auto nested_operation = [&v, invocations]<typename FD>(FD& fd, std::uint32_t discriminant) {
       using execution::just;
       using execution::let_variant;
 
@@ -3623,7 +3623,7 @@ struct validation_t {
   auto read(Pred&& pred) const {
     return unresolved_operation_block<false, std::tuple<>>{}
         .append_block(operation_block<false>{}
-            .append(pre_validation(std::forward<Pred>(pred))));
+            .append(post_validation(std::forward<Pred>(pred))));
   }
 
   template<std::invocable Pred>
@@ -3668,6 +3668,35 @@ struct read_t {
   }
 };
 
+// Read operation that reads into a newly-instantiated type.
+template<typename T>
+struct read_into_t {
+  template<typename FD, read_invocation_for<std::remove_cvref_t<T>> Invocation = identity_t>
+  requires (!std::same_as<std::remove_cvref_t<FD>, no_fd_t>)
+  auto operator()(FD&& fd, Invocation invocation = Invocation{}) const {
+    return execution::just(std::forward<FD>(fd))
+    | (*this)(no_fd_t{}, std::move(invocation));
+  }
+
+  template<read_invocation_for<std::remove_cvref_t<T>> Invocation = identity_t>
+  auto operator()([[maybe_unused]] no_fd_t fd, Invocation invocation = Invocation{}) const {
+    return execution::lazy_then(
+        []<typename FD>(FD fd) {
+          return std::tuple<FD, T>(std::move(fd), T{});
+        })
+    | execution::explode_tuple()
+    | execution::lazy_let_value(
+        [](auto& fd, T& v) {
+          return read_t{}(std::move(fd), v)
+          | execution::lazy_then(
+              [&v]<typename FD>(FD&& fd) {
+                return std::tuple<FD, T>(std::forward<FD>(fd), std::move(v));
+              })
+          | execution::explode_tuple();
+        });
+  }
+};
+
 
 } /* namespace operation */
 
@@ -3694,6 +3723,8 @@ inline constexpr operation::validation_t         validation{};
 
 inline constexpr operation::no_fd_t              no_fd{}; // Indicate you don't want to bind a file-descriptor to a read/write operation.
 inline constexpr operation::read_t               read{};
+template<typename T>
+inline constexpr operation::read_into_t<T>       read_into{};
 inline constexpr operation::write_t              write{};
 
 

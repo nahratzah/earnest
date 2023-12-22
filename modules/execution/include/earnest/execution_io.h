@@ -53,7 +53,7 @@ namespace earnest::execution::io {
 
 
 enum class errc {
-  eof
+  eof=1,
 };
 
 inline auto category() noexcept -> const std::error_category& {
@@ -520,7 +520,7 @@ inline constexpr ec_to_exception_t ec_to_exception{};
 // Errors are communicated as std::error_code.
 struct lazy_read_some_at_ec_t {
   template<typename FD>
-  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  requires (!std::convertible_to<FD, int>)
   auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf) const
   noexcept(nothrow_tag_invocable<lazy_read_some_at_ec_t, FD, offset_type, std::span<std::byte>>)
   -> typed_sender decltype(auto) {
@@ -800,7 +800,7 @@ inline constexpr lazy_read_some_at_ec_t lazy_read_some_at_ec{};
 // Errors are communicated as std::error_code.
 struct lazy_read_some_ec_t {
   template<typename FD>
-  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  requires (!std::convertible_to<FD, int>)
   auto operator()(FD&& fd, std::span<std::byte> buf) const
   noexcept(nothrow_tag_invocable<lazy_read_some_ec_t, FD, std::span<std::byte>>)
   -> typed_sender decltype(auto) {
@@ -1070,7 +1070,7 @@ inline constexpr lazy_read_some_ec_t lazy_read_some_ec{};
 // Errors are communicated as std::error_code.
 struct lazy_write_some_at_ec_t {
   template<typename FD>
-  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  requires (!std::convertible_to<FD, int>)
   auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf) const
   noexcept(nothrow_tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
   -> typed_sender decltype(auto) {
@@ -1336,7 +1336,7 @@ inline constexpr lazy_write_some_at_ec_t lazy_write_some_at_ec{};
 // Errors are communicated as std::error_code.
 struct lazy_write_some_ec_t {
   template<typename FD>
-  requires (!std::same_as<std::remove_cvref_t<FD>, int>)
+  requires (!std::convertible_to<FD, int>)
   auto operator()(FD&& fd, std::span<const std::byte> buf) const
   noexcept(nothrow_tag_invocable<lazy_write_some_ec_t, FD, std::span<const std::byte>>)
   -> typed_sender decltype(auto) {

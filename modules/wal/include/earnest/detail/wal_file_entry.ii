@@ -100,38 +100,6 @@ inline auto wal_file_entry<Executor, Allocator>::header_writer_() const {
 }
 
 template<typename Executor, typename Allocator>
-template<typename Stream, typename Callback>
-auto wal_file_entry<Executor, Allocator>::read_records_(Stream& stream, Callback callback, std::unique_ptr<variant_type> ptr) -> void {
-  link_offset_ = stream.position();
-  variant_type& variant_ref = *ptr;
-  async_read(
-      stream,
-      ::earnest::xdr_reader<>() & variant_ref,
-      completion_wrapper<void(std::error_code)>(
-          std::move(callback),
-          [wf=this->shared_from_this(), &stream, ptr=std::move(ptr)](auto h, std::error_code ec) mutable {
-            wf->write_offset_ = stream.position();
-
-            const bool done = std::holds_alternative<wal_record_end_of_records>(*ptr);
-            if (!ec && !done) {
-              if (wf->state_ == wal_file_entry_state::sealed) {
-                wf->logger->error("file {} is bad: record after seal", wf->name.native());
-                ec = make_error_code(wal_errc::unrecoverable);
-              } else if (std::holds_alternative<wal_record_seal>(*ptr)) {
-                wf->state_ = wal_file_entry_state::sealed;
-              }
-            }
-
-            if (ec || done) {
-              std::invoke(h, ec);
-              return;
-            }
-
-            wf->read_records_(stream, std::move(h), std::move(ptr));
-          }));
-}
-
-template<typename Executor, typename Allocator>
 template<typename Stream, typename Acceptor, typename Callback>
 #if 0
 requires requires(Acceptor acceptor, typename wal_file_entry<Executor, Allocator>::variant_type v) {
@@ -178,83 +146,6 @@ inline auto wal_file_entry<Executor, Allocator>::decorate_(variant_type& v) cons
         this->shared_from_this(),
         &this->file);
   }
-}
-
-template<typename Executor, typename Allocator>
-template<typename CompletionToken>
-inline auto wal_file_entry<Executor, Allocator>::async_open(const dir& d, const std::filesystem::path& name, CompletionToken&& token) {
-  using pos_stream = positional_stream_adapter<fd_type&>; // XXX replace with buffered positional stream
-
-  if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
-  return asio::async_initiate<CompletionToken, void(std::error_code)>(
-      [](auto completion_handler, const dir& d, const std::filesystem::path& name, std::shared_ptr<wal_file_entry> wf) {
-        asio::dispatch(
-            completion_wrapper<void()>(
-                completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
-                [d, name, wf](auto completion_handler) {
-                  {
-                    std::error_code ec;
-                    if (wf->state_ == wal_file_entry_state::uninitialized) [[likely]] {
-                      if (wf->file.is_open()) throw std::logic_error("wal is already open");
-                      wf->state_ = wal_file_entry_state::opening;
-                    } else {
-                      ec = make_error_code(wal_errc::bad_state);
-                    }
-
-                    if (!ec) {
-                      wf->file.open(d, name, fd_type::READ_WRITE, ec);
-                      if (!ec) {
-                        bool was_locked = wf->file.ftrylock(ec);
-                        if (!ec && !was_locked) ec = make_error_code(wal_errc::unable_to_lock);
-                      }
-                      if (ec) wf->state_ = wal_file_entry_state::uninitialized;
-                    }
-
-                    if (ec) {
-                      completion_handler(ec);
-                      return;
-                    }
-                    wf->name = name;
-                  }
-
-                  struct state {
-                    pos_stream stream;
-                  };
-                  std::unique_ptr<state> s = std::make_unique<state>(
-                      state{
-                        .stream = pos_stream(wf->file)
-                      });
-                  auto& stream = s->stream;
-
-                  async_read(
-                      stream,
-                      wf->header_reader_() & xdr_manual(
-                          [wf](auto& stream, auto callback) {
-                            wf->read_records_(
-                                stream,
-                                std::move(callback),
-                                std::make_unique<variant_type>());
-                          }),
-                      completion_wrapper<void(std::error_code)>(
-                          std::move(completion_handler),
-                          [wf, state_ptr=std::move(s)](auto& h, std::error_code ec) mutable {
-                            assert(wf->state_ == wal_file_entry_state::opening || wf->state_ == wal_file_entry_state::sealed);
-                            assert(wf->write_offset_ == state_ptr->stream.position());
-
-                            if (!ec && wf->state_ == wal_file_entry_state::opening)
-                              wf->state_ = wal_file_entry_state::ready;
-
-                            if (ec) {
-                              wf->state_ = wal_file_entry_state::uninitialized;
-                              wf->file.close();
-                            }
-
-                            if (!ec) wf->link_done_event_(ec);
-                            std::invoke(h, ec);
-                          }));
-                }));
-      },
-      token, d, name, this->shared_from_this());
 }
 
 template<typename Executor, typename Allocator>

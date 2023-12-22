@@ -8,7 +8,7 @@ namespace earnest {
 
 
 enum class file_db_errc {
-  unrecoverable,
+  unrecoverable=1,
   lock_failure,
   read_not_permitted,
   write_not_permitted,
