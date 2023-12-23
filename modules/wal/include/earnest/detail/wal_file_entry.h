@@ -16,6 +16,7 @@
 #include <asio/buffer.hpp>
 #include <asio/strand.hpp>
 
+#include <earnest/detail/asio_execution_scheduler.h>
 #include <earnest/detail/buffered_readstream_adapter.h>
 #include <earnest/detail/byte_stream.h>
 #include <earnest/detail/fanout.h>
@@ -571,9 +572,9 @@ class wal_file_entry
           [this](auto completion_handler, auto buffers) {
             asio::dispatch(
                 completion_wrapper<void()>(
-                    completion_handler_fun(std::move(completion_handler), wf_->get_executor(), wf_->strand_),
+                    completion_handler_fun(std::move(completion_handler), wf_->get_executor(), wf_->asio_strand_.get_executor()),
                     [this, buffers](auto handler) mutable -> void {
-                      assert(wf_->strand_.running_in_this_thread());
+                      assert(wf_->asio_strand_.get_executor().running_in_this_thread());
 
                       auto next = std::upper_bound(wf_->unwritten_links_.cbegin(), wf_->unwritten_links_.cend(), this->position(),
                           overload(
@@ -655,7 +656,7 @@ class wal_file_entry
   typename fd_type::offset_type write_offset_;
   typename fd_type::offset_type link_offset_;
   typename fd_type::offset_type must_flush_offset_ = 0;
-  asio::strand<executor_type> strand_;
+  asio_execution_scheduler<asio::strand<executor_type>> asio_strand_;
   wal_file_entry_state state_ = wal_file_entry_state::uninitialized;
   link_done_event_type link_done_event_;
   wal_flusher<fd_type&, allocator_type> wal_flusher_;

@@ -2431,7 +2431,7 @@ struct execute_t {
   auto default_impl(Scheduler&& sch, Fn&& fn)
   noexcept(noexcept(::earnest::execution::start_detached(::earnest::execution::then(std::declval<Scheduler>(), std::declval<Fn>()))))
   -> void {
-    ::earnest::execution::start_detached(::earnest::execution::then(std::forward<Scheduler>(sch), std::forward<Fn>(fn)));
+    ::earnest::execution::start_detached(::earnest::execution::then(::earnest::execution::schedule(std::forward<Scheduler>(sch)), std::forward<Fn>(fn)));
   }
 };
 inline constexpr execute_t execute{};

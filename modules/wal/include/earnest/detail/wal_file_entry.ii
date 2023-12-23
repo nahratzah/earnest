@@ -60,7 +60,7 @@ template<typename Executor, typename Allocator>
 inline wal_file_entry<Executor, Allocator>::wal_file_entry(const executor_type& ex, allocator_type alloc)
 : file(ex),
   alloc_(alloc),
-  strand_(ex),
+  asio_strand_(asio::strand<Executor>(ex)),
   link_done_event_(ex, alloc),
   wal_flusher_(this->file, alloc),
   unwritten_links_(alloc),
@@ -190,7 +190,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_append_impl_(write_record
   write_records_to_buffer_(
       std::move(records),
       asio::bind_executor(
-          strand_,
+          asio_strand_.get_executor(),
           completion_wrapper<void(std::error_code, std::vector<std::byte, rebind_alloc<std::byte>>, write_record_with_offset_vector)>(
               asio::bind_allocator(
                   get_allocator(),
@@ -201,7 +201,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_append_impl_(write_record
                 on_successful_write_callback=std::move(on_successful_write_callback),
                 delay_flush
               ](auto handler, std::error_code ec, auto byte_vector, write_record_with_offset_vector records) mutable {
-                assert(wf->strand_.running_in_this_thread());
+                assert(wf->asio_strand_.get_executor().running_in_this_thread());
                 wf->append_bytes_(std::move(byte_vector), std::move(handler), std::move(on_space_assigned), ec, wal_file_entry_state::ready, std::move(transaction_validator), std::move(on_successful_write_callback), std::move(records), delay_flush);
               })));
 }
@@ -212,7 +212,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_seal(CompletionToken&& to
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto completion_handler, std::shared_ptr<wal_file_entry> wf) {
         auto wrapped_handler = completion_wrapper<void(std::error_code)>(
-            completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+            completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->asio_strand_.get_executor(), wf->get_allocator()),
             [wf](auto handler, std::error_code ec) mutable {
               if (!ec) [[likely]] {
                 assert(wf->state_ == wal_file_entry_state::sealing);
@@ -253,9 +253,9 @@ template<typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_discard_all(CompletionToken&& token) {
   return asio::async_initiate<CompletionToken, void(std::error_code)>(
       [](auto handler, std::shared_ptr<wal_file_entry> wf) {
-        auto wrapped_handler = completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_, wf->get_allocator());
+        auto wrapped_handler = completion_handler_fun(std::move(handler), wf->get_executor(), wf->asio_strand_.get_executor(), wf->get_allocator());
 
-        wf->strand_.dispatch(
+        wf->asio_strand_.get_executor().dispatch(
             completion_wrapper<void()>(
                 std::move(wrapped_handler),
                 [wf](auto handler) {
@@ -339,11 +339,11 @@ template<typename HandlerAllocator>
 inline auto wal_file_entry<Executor, Allocator>::async_records_impl_(move_only_function<std::error_code(variant_type)> acceptor, move_only_function<void(std::error_code)> completion_handler, HandlerAllocator handler_alloc) const {
   asio::dispatch(
       completion_wrapper<void()>(
-          asio::bind_executor(strand_,
+          asio::bind_executor(asio_strand_.get_executor(),
               asio::bind_allocator(handler_alloc,
                   std::move(completion_handler))),
           [wf=this->shared_from_this(), acceptor=std::move(acceptor)](auto completion_handler) mutable {
-            assert(wf->strand_.running_in_this_thread());
+            assert(wf->asio_strand_.get_executor().running_in_this_thread());
 
             // If we are not in the correct state, refuse the request.
             if (wf->state_ != wal_file_entry_state::ready && wf->state_ != wal_file_entry_state::sealing && wf->state_ != wal_file_entry_state::sealed) [[unlikely]] {
@@ -446,11 +446,11 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::
         auto f = fanout<executor_type, void(std::error_code), allocator_type>(wf->get_executor(), wf->get_allocator());
         auto barrier = make_completion_barrier(
             completion_wrapper<void(std::error_code)>(
-                asio::bind_executor(wf->strand_, f),
+                asio::bind_executor(wf->asio_strand_.get_executor(), f),
                 [ on_successful_write_callback=std::move(on_successful_write_callback),
                   wf, bytes_size, converted_records
                 ](auto&& f, std::error_code ec) -> void {
-                  assert(wf->strand_.running_in_this_thread());
+                  assert(wf->asio_strand_.get_executor().running_in_this_thread());
 
                   // Before declaring the link "done", we must update the link offset.
                   //
@@ -510,7 +510,7 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
               wf, write_offset, delay_flush
             ]([[maybe_unused]] auto deferred_transaction_validator) mutable {
               auto wrapper = completion_wrapper<void(std::error_code)>(
-                  completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->strand_, wf->get_allocator()),
+                  completion_handler_fun(std::move(completion_handler), wf->get_executor(), wf->asio_strand_.get_executor(), wf->get_allocator()),
                   [ wf, write_offset,
                     barrier=std::move(barrier),
                     converted_records=std::move(converted_records),
@@ -519,7 +519,7 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
                     link,
                     delay_flush
                   ](auto completion_handler, std::error_code ec) mutable {
-                    assert(wf->strand_.running_in_this_thread());
+                    assert(wf->asio_strand_.get_executor().running_in_this_thread());
 
                     if (ec) {
                       converted_records->clear(); // So that the barrier-invocation won't send those to a successful-write-callback.
@@ -550,11 +550,11 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
 
                       wf->write_link_(write_offset, link,
                           asio::bind_executor(
-                              wf->strand_,
+                              wf->asio_strand_.get_executor(),
                               completion_wrapper<void(std::error_code)>(
                                   ulink->done,
                                   [wf, write_offset](auto&& handler, std::error_code ec) -> void {
-                                    assert(wf->strand_.running_in_this_thread());
+                                    assert(wf->asio_strand_.get_executor().running_in_this_thread());
 
                                     if (ec) {
                                       wf->logger->error("file {} is bad: unable to write link (and can't use live recovery)", wf->name.native());
@@ -687,11 +687,11 @@ inline auto wal_file_entry<Executor, Allocator>::write_link_(
                       stream,
                       ::earnest::xdr_writer<>() & xdr_constant(bytes).as(xdr_raw_bytes<4>),
                       completion_wrapper<void(std::error_code)>(
-                          completion_handler_fun(std::move(handler), wf->get_executor(), wf->strand_),
+                          completion_handler_fun(std::move(handler), wf->get_executor(), wf->asio_strand_.get_executor()),
                           [ stream_ptr=std::move(s),
                             wf, delay_flush, write_offset
                           ](auto&& handler, std::error_code ec) mutable -> void {
-                            assert(wf->strand_.running_in_this_thread());
+                            assert(wf->asio_strand_.get_executor().running_in_this_thread());
 
                             stream_ptr.reset();
                             if (ec) {
