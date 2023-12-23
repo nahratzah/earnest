@@ -15,6 +15,7 @@
 
 #include <asio/buffer.hpp>
 #include <asio/strand.hpp>
+#include <asio/post.hpp>
 
 #include <earnest/detail/asio_execution_scheduler.h>
 #include <earnest/detail/buffered_readstream_adapter.h>
@@ -28,7 +29,10 @@
 #include <earnest/detail/wal_logger.h>
 #include <earnest/detail/wal_records.h>
 #include <earnest/dir.h>
+#include <earnest/execution.h>
+#include <earnest/execution_util.h>
 #include <earnest/fd.h>
+#include <earnest/strand.h>
 #include <earnest/wal_error.h>
 #include <earnest/xdr.h>
 #include <earnest/xdr_v2.h>
@@ -639,11 +643,63 @@ class wal_file_entry
       typename fd_type::offset_type write_offset,
       std::size_t bytes, CompletionToken&& token);
 
+  auto write_link_(
+      typename fd_type::offset_type write_offset,
+      std::array<std::byte, 4> bytes,
+      bool delay_flush = false)
+  -> execution::type_erased_sender<
+      std::variant<std::tuple<>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false> {
+    using namespace execution;
+    using pos_stream = positional_stream_adapter<fd_type&>;
+
+    return wal_flusher_.lazy_flush(true, delay_flush)
+    | lazy_let_value(
+        [this, write_offset, bytes]() {
+          return xdr_v2::write(pos_stream(this->file, write_offset - 4u), bytes, xdr_v2::constant(xdr_v2::fixed_byte_string))
+          | then(
+              []([[maybe_unused]] pos_stream&& stream) -> void {
+                return;
+              });
+        })
+    | lazy_transfer(strand_.scheduler(asio_strand_))
+    | lazy_let_value(
+        [this, write_offset, delay_flush]() {
+          assert(this->strand_.running_in_this_thread());
+          assert(this->asio_strand_.get_executor().running_in_this_thread());
+
+          return this->wal_flusher_.lazy_flush(true, delay_flush && this->must_flush_offset_ < write_offset);
+        });
+  }
+
   template<typename CompletionToken>
+  [[deprecated]]
   auto write_link_(
       typename fd_type::offset_type write_offset,
       std::array<std::byte, 4> bytes, CompletionToken&& token,
-      bool delay_flush = false);
+      bool delay_flush = false) {
+    using namespace execution;
+
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto completion_handler, std::shared_ptr<wal_file_entry> wf, typename fd_type::offset_type write_offset, std::array<std::byte, 4> bytes, bool delay_flush) -> void {
+          start_detached(
+              wf->write_link_(write_offset, bytes, delay_flush)
+              | then(
+                  []() noexcept -> std::error_code {
+                    return std::error_code{};
+                  })
+              | upon_error(
+                  [](auto err) -> std::error_code {
+                    if constexpr(std::same_as<std::exception_ptr, decltype(err)>)
+                      std::rethrow_exception(err);
+                    else
+                      return err;
+                  })
+              | then(completion_handler_fun(std::move(completion_handler), wf->get_executor())));
+        },
+        token, this->shared_from_this(), write_offset, bytes, delay_flush);
+  }
 
   public:
   std::filesystem::path name;
@@ -657,6 +713,7 @@ class wal_file_entry
   typename fd_type::offset_type link_offset_;
   typename fd_type::offset_type must_flush_offset_ = 0;
   asio_execution_scheduler<asio::strand<executor_type>> asio_strand_;
+  execution::strand<> strand_;
   wal_file_entry_state state_ = wal_file_entry_state::uninitialized;
   link_done_event_type link_done_event_;
   wal_flusher<fd_type&, allocator_type> wal_flusher_;

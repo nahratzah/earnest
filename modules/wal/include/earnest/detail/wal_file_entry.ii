@@ -662,51 +662,5 @@ inline auto wal_file_entry<Executor, Allocator>::write_skip_record_(
       token, write_offset, bytes, this->shared_from_this());
 }
 
-template<typename Executor, typename Allocator>
-template<typename CompletionToken>
-inline auto wal_file_entry<Executor, Allocator>::write_link_(
-    typename fd_type::offset_type write_offset,
-    std::array<std::byte, 4> bytes, CompletionToken&& token,
-    bool delay_flush) {
-  return asio::async_initiate<CompletionToken, void(std::error_code)>(
-      [delay_flush, write_offset, bytes](auto completion_handler, std::shared_ptr<wal_file_entry> wf) {
-        using pos_stream = positional_stream_adapter<fd_type&>;
-
-        wf->wal_flusher_.async_flush(true,
-            completion_wrapper<void(std::error_code)>(
-                std::move(completion_handler),
-                [wf, delay_flush, write_offset, bytes](auto&& handler, std::error_code ec) -> void {
-                  if (ec) {
-                    std::invoke(handler, ec);
-                    return;
-                  }
-
-                  std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf->file, write_offset - 4u);
-                  auto& stream = *s;
-                  async_write(
-                      stream,
-                      ::earnest::xdr_writer<>() & xdr_constant(bytes).as(xdr_raw_bytes<4>),
-                      completion_wrapper<void(std::error_code)>(
-                          completion_handler_fun(std::move(handler), wf->get_executor(), wf->asio_strand_.get_executor()),
-                          [ stream_ptr=std::move(s),
-                            wf, delay_flush, write_offset
-                          ](auto&& handler, std::error_code ec) mutable -> void {
-                            assert(wf->asio_strand_.get_executor().running_in_this_thread());
-
-                            stream_ptr.reset();
-                            if (ec) {
-                              std::invoke(handler, ec);
-                              return;
-                            }
-
-                            wf->wal_flusher_.async_flush(true, std::move(handler),
-                                delay_flush && wf->must_flush_offset_ < write_offset);
-                          }));
-                }),
-            delay_flush);
-      },
-      token, this->shared_from_this());
-}
-
 
 } /* namespace earnest::detail */

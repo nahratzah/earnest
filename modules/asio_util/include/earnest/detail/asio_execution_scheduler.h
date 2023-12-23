@@ -73,7 +73,7 @@ class asio_execution_scheduler {
 
     template<execution::receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] execution::connect_t connect, sender_impl&& self, Receiver&& r) -> opstate<std::remove_cvref_t<Receiver>> {
-      return opstate<std::remove_cvref_t<Receiver>>(std::move(self), std::forward<Receiver>(r));
+      return opstate<std::remove_cvref_t<Receiver>>(std::move(self.sch.ex), std::forward<Receiver>(r));
     }
 
     friend auto tag_invoke([[maybe_unused]] execution::get_completion_scheduler_t<execution::set_value_t> tag, const sender_impl& self) noexcept -> const asio_execution_scheduler& {

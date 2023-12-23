@@ -33,3 +33,21 @@ TEST(strand_scheduler_equality) {
   CHECK(s.scheduler(fake_scheduler<false>{}) == s.scheduler(fake_scheduler<false>{}));
   CHECK(!(s.scheduler(fake_scheduler<false>{}) != s.scheduler(fake_scheduler<false>{})));
 }
+
+TEST(strand_transfer) {
+  bool scheduler_started = false;
+  strand<> s;
+  auto sch = s.scheduler(fake_scheduler<false>{&scheduler_started});
+
+  auto [x] = sync_wait(
+      just(15)
+      | transfer(sch)
+      | then(
+          [&scheduler_started, &s](int x) noexcept {
+            CHECK_EQUAL(15, x);
+            CHECK(scheduler_started);
+            CHECK(s.running_in_this_thread());
+            return 1;
+          })).value();
+  CHECK_EQUAL(1, x);
+}

@@ -161,7 +161,7 @@ class strand {
       return &s == &y.s && underlying_sched == y.underlying_sched;
     }
 
-    friend auto tag_invoke([[maybe_unused]] execution::schedule_t tag, bound_scheduler_t& self) -> sender_impl<UnderlyingScheduler> {
+    friend auto tag_invoke([[maybe_unused]] execution::schedule_t tag, bound_scheduler_t&& self) -> sender_impl<UnderlyingScheduler> {
       return sender_impl<UnderlyingScheduler>(self.s, self.underlying_sched);
     }
 
@@ -224,6 +224,10 @@ class strand {
     assert(q.empty());
   }
 #endif
+
+  auto get_allocator() const -> allocator_type {
+    return q.get_allocator();
+  }
 
   auto running_in_this_thread() const noexcept -> bool {
     std::lock_guard lck{mtx};

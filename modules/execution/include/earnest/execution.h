@@ -578,6 +578,14 @@ struct schedule_t {
   -> tag_invoke_result_t<schedule_t, Scheduler> {
     return tag_invoke(*this, std::forward<Scheduler>(sch));
   }
+
+  // XXX extension
+  template<typename Scheduler>
+  requires (!tag_invocable<schedule_t, const Scheduler&>)
+  auto operator()(const Scheduler& sch) const
+  -> tag_invoke_result_t<schedule_t, std::remove_cvref_t<Scheduler>> {
+    return (*this)(std::remove_cvref_t<Scheduler>(sch));
+  }
 };
 inline constexpr schedule_t schedule{};
 
@@ -2813,7 +2821,10 @@ struct lazy_schedule_from_t {
   class done_receiver_wrapper
   : public _generic_receiver_wrapper<Receiver, set_value_t> {
     public:
-    using _generic_receiver_wrapper<Receiver, set_value_t>::_generic_receiver_wrapper;
+    explicit done_receiver_wrapper(Receiver&& r)
+    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
+    : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r))
+    {}
 
     friend auto tag_invoke([[maybe_unused]] set_value_t, done_receiver_wrapper&& self)
     noexcept(noexcept(set_done(std::declval<done_receiver_wrapper>())))
@@ -3013,12 +3024,9 @@ struct lazy_schedule_from_t {
     using add_error_handlers = typename sender_traits<Sender>::template error_types<many_error_opstate_<Appender>::template type>;
     // This template takes a sender and an appender, and adds op_state for the done signal.
     // Returns an appender.
-    // Noop if the sender advertises it cannot send a done-signal.
+    // Even if the done signal isn't advertised, we must accept the done signal.
     template<typed_sender Sender, typename Appender>
-    using add_done_handlers = std::conditional_t<
-        sender_traits<Sender>::sends_done,
-        typename Appender::template append<done_opstate>,
-        Appender>;
+    using add_done_handlers = typename Appender::template append<done_opstate>;
 
     // When we have all the operation-state wrappers figured out, we can declare the type of the receiver.
     template<typename... OpStates>
@@ -3027,7 +3035,7 @@ struct lazy_schedule_from_t {
     // This template adds all the possible handlers to the opstate.
     // Note that it is possible they'll contain duplicates, for example if the scheduler is type-erasing.
     template<typed_sender Sender>
-    using add_all_done_handlers =
+    using add_all_handlers =
         add_done_handlers<Sender,
             add_error_handlers<Sender,
                 add_value_handlers<Sender, _type_appender<>>>>;
@@ -3043,7 +3051,7 @@ struct lazy_schedule_from_t {
     // - `bind_opstates_to_receiver` takes a series of op-states, and creates a `receiver_impl` using them.
     // And that last `receiver_impl` is what we want. :)
     template<typed_sender Sender>
-    using type = typename add_all_done_handlers<Sender>::template type<_deduplicate<bind_opstates_to_receiver>::template type>;
+    using type = typename add_all_handlers<Sender>::template type<_deduplicate<bind_opstates_to_receiver>::template type>;
   };
 
   // Easier-to-use version of the above.
@@ -3156,14 +3164,12 @@ struct lazy_transfer_t {
 
   template<sender Sender, scheduler Scheduler>
   constexpr auto operator()(Sender&& s, Scheduler&& sch) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const lazy_transfer_t&>, std::declval<Sender>(), std::declval<Scheduler>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s), std::forward<Scheduler>(sch));
   }
 
   template<scheduler Scheduler>
   constexpr auto operator()(Scheduler&& sch) const
-  noexcept(noexcept(_generic_adapter(std::declval<const lazy_transfer_t&>(), std::declval<Scheduler>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Scheduler>(sch));
   }
@@ -3171,7 +3177,6 @@ struct lazy_transfer_t {
   private:
   template<sender Sender, scheduler Scheduler>
   constexpr auto default_impl(Sender&& s, Scheduler&& sch) const
-  noexcept(std::is_nothrow_invocable_v<const lazy_schedule_from_t&, Scheduler, Sender>)
   -> sender decltype(auto) {
     return lazy_schedule_from(std::forward<Scheduler>(sch), std::forward<Sender>(s));
   }
