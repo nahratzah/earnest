@@ -394,7 +394,6 @@ struct ec_to_exception_t {
 
   template<sender Sender>
   auto operator()(Sender&& s) const
-  noexcept(noexcept(_generic_operand_base<set_error_t>(std::declval<const ec_to_exception_t&>(), std::declval<Sender>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_error_t>(*this, std::forward<Sender>(s));
   }
@@ -423,7 +422,6 @@ struct ec_to_exception_t {
   {
     public:
     explicit receiver_impl(Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_error_t>(std::move(r))
     {}
 
@@ -477,7 +475,6 @@ struct ec_to_exception_t {
     template<typename Sender_>
     requires std::constructible_from<Sender, Sender_>
     explicit sender_impl(Sender_&& s)
-    noexcept(std::is_nothrow_constructible_v<Sender, Sender_>)
     : sender_types_for_impl<Sender>(std::forward<Sender_>(s))
     {}
 
@@ -492,7 +489,6 @@ struct ec_to_exception_t {
     private:
     template<sender OtherSender>
     auto rebind(OtherSender&& other_sender) &&
-    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>>, OtherSender>)
     -> sender_impl<std::remove_cvref_t<OtherSender>> {
       return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
     }
@@ -522,7 +518,6 @@ struct lazy_read_some_at_ec_t {
   template<typename FD>
   requires (!std::convertible_to<FD, int>)
   auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf) const
-  noexcept(nothrow_tag_invocable<lazy_read_some_at_ec_t, FD, offset_type, std::span<std::byte>>)
   -> typed_sender decltype(auto) {
     return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf));
   }
@@ -530,10 +525,6 @@ struct lazy_read_some_at_ec_t {
   template<typename FD, mutable_buffer_sequence Buffers>
   requires (!std::same_as<std::remove_cvref_t<FD>, int>)
   auto operator()(FD&& fd, offset_type offset, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_read_some_at_ec_t, FD, offset_type, Buffers> ?
-      nothrow_tag_invocable<lazy_read_some_at_ec_t, FD, offset_type, Buffers> :
-      std::is_nothrow_invocable_v<lazy_read_some_at_ec_t, FD, offset_type, std::span<std::byte>>)
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_read_some_at_ec_t, FD, offset_type, Buffers>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
@@ -551,7 +542,6 @@ struct lazy_read_some_at_ec_t {
   {
     public:
     explicit opstate(Receiver&& r, int fd, offset_type offset, std::span<std::byte> buf)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : r(std::move(r)),
       fd(fd),
       offset(offset),
@@ -597,7 +587,6 @@ struct lazy_read_some_at_ec_t {
     public:
     template<mutable_buffer_sequence Buffers>
     explicit vectored_opstate(Receiver&& r, int fd, offset_type offset, Buffers&& buf)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : r(std::move(r)),
       fd(fd),
       offset(offset),
@@ -773,10 +762,6 @@ struct lazy_read_some_at_ec_t {
 
   template<scheduler Scheduler, typename FD, mutable_buffers Buffers>
   auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_read_some_at_ec_t, Scheduler, FD, offset_type, Buffers> ?
-      nothrow_tag_invocable<lazy_read_some_at_ec_t, Scheduler, FD, offset_type, Buffers> :
-      std::is_nothrow_invocable_v<lazy_read_some_at_ec_t, FD, offset_type, Buffers>)
   -> decltype(auto) {
     if constexpr(tag_invocable<lazy_read_some_at_ec_t, Scheduler, FD, offset_type, Buffers>)
       return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
@@ -802,7 +787,6 @@ struct lazy_read_some_ec_t {
   template<typename FD>
   requires (!std::convertible_to<FD, int>)
   auto operator()(FD&& fd, std::span<std::byte> buf) const
-  noexcept(nothrow_tag_invocable<lazy_read_some_ec_t, FD, std::span<std::byte>>)
   -> typed_sender decltype(auto) {
     return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
   }
@@ -810,10 +794,6 @@ struct lazy_read_some_ec_t {
   template<typename FD, mutable_buffer_sequence Buffers>
   requires (!std::same_as<std::remove_cvref_t<FD>, int>)
   auto operator()(FD&& fd, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_read_some_ec_t, FD, Buffers> ?
-      nothrow_tag_invocable<lazy_read_some_ec_t, FD, Buffers> :
-      std::is_nothrow_invocable_v<lazy_read_some_ec_t, FD, std::span<std::byte>>)
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_read_some_ec_t, FD, Buffers>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf));
@@ -831,7 +811,6 @@ struct lazy_read_some_ec_t {
   {
     public:
     explicit opstate(Receiver&& r, int fd, std::span<std::byte> buf)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : r(std::move(r)),
       fd(fd),
       buf(buf)
@@ -875,7 +854,6 @@ struct lazy_read_some_ec_t {
     public:
     template<mutable_buffer_sequence Buffers>
     explicit vectored_opstate(Receiver&& r, int fd, Buffers&& buf)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : r(std::move(r)),
       fd(fd),
       iov(vectorize_mutable_buffers(
@@ -1045,10 +1023,6 @@ struct lazy_read_some_ec_t {
 
   template<scheduler Scheduler, typename FD, mutable_buffers Buffers>
   auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_read_some_ec_t, Scheduler, FD, Buffers> ?
-      nothrow_tag_invocable<lazy_read_some_ec_t, Scheduler, FD, Buffers> :
-      std::is_nothrow_invocable_v<lazy_read_some_ec_t, FD, Buffers>)
   -> decltype(auto) {
     if constexpr(tag_invocable<lazy_read_some_ec_t, Scheduler, FD, Buffers>)
       return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::forward<Buffers>(buf));
@@ -1072,7 +1046,6 @@ struct lazy_write_some_at_ec_t {
   template<typename FD>
   requires (!std::convertible_to<FD, int>)
   auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf) const
-  noexcept(nothrow_tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
   -> typed_sender decltype(auto) {
     return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf));
   }
@@ -1080,10 +1053,6 @@ struct lazy_write_some_at_ec_t {
   template<typename FD, const_buffer_sequence Buffers>
   requires (!std::same_as<std::remove_cvref_t<FD>, int>)
   auto operator()(FD&& fd, offset_type offset, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, Buffers> ?
-      nothrow_tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, Buffers> :
-      std::is_nothrow_invocable_v<lazy_write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_write_some_at_ec_t, FD, offset_type, Buffers>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), offset, std::move(buf));
@@ -1101,7 +1070,6 @@ struct lazy_write_some_at_ec_t {
   {
     public:
     explicit opstate(Receiver&& r, int fd, offset_type offset, std::span<const std::byte> buf)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : r(std::move(r)),
       fd(fd),
       offset(offset),
@@ -1141,7 +1109,6 @@ struct lazy_write_some_at_ec_t {
     public:
     template<const_buffer_sequence Buffers>
     explicit vectored_opstate(Receiver&& r, int fd, offset_type offset, Buffers&& buf)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : r(std::move(r)),
       fd(fd),
       offset(offset),
@@ -1311,10 +1278,6 @@ struct lazy_write_some_at_ec_t {
 
   template<scheduler Scheduler, typename FD, const_buffers Buffers>
   auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_write_some_at_ec_t, Scheduler, FD, offset_type, Buffers> ?
-      nothrow_tag_invocable<lazy_write_some_at_ec_t, Scheduler, FD, offset_type, Buffers> :
-      std::is_nothrow_invocable_v<lazy_write_some_at_ec_t, FD, offset_type, Buffers>)
   -> decltype(auto) {
     if constexpr(tag_invocable<lazy_write_some_at_ec_t, Scheduler, FD, offset_type, Buffers>)
       return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
@@ -1338,7 +1301,6 @@ struct lazy_write_some_ec_t {
   template<typename FD>
   requires (!std::convertible_to<FD, int>)
   auto operator()(FD&& fd, std::span<const std::byte> buf) const
-  noexcept(nothrow_tag_invocable<lazy_write_some_ec_t, FD, std::span<const std::byte>>)
   -> typed_sender decltype(auto) {
     return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
   }
@@ -1346,10 +1308,6 @@ struct lazy_write_some_ec_t {
   template<typename FD, const_buffer_sequence Buffers>
   requires (!std::same_as<std::remove_cvref_t<FD>, int>)
   auto operator()(FD&& fd, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_write_some_ec_t, FD, Buffers> ?
-      nothrow_tag_invocable<lazy_write_some_ec_t, FD, Buffers> :
-      std::is_nothrow_invocable_v<lazy_write_some_ec_t, FD, std::span<std::byte>>)
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_write_some_ec_t, FD, Buffers>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buf));
@@ -1367,7 +1325,6 @@ struct lazy_write_some_ec_t {
   {
     public:
     explicit opstate(Receiver&& r, int fd, std::span<const std::byte> buf)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : r(std::move(r)),
       fd(fd),
       buf(buf)
@@ -1405,7 +1362,6 @@ struct lazy_write_some_ec_t {
     public:
     template<const_buffer_sequence Buffers>
     explicit vectored_opstate(Receiver&& r, int fd, Buffers&& buf)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : r(std::move(r)),
       fd(fd),
       iov(vectorize_const_buffers(
@@ -1569,10 +1525,6 @@ struct lazy_write_some_ec_t {
 
   template<scheduler Scheduler, typename FD, const_buffers Buffers>
   auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_write_some_ec_t, Scheduler, FD, Buffers> ?
-      nothrow_tag_invocable<lazy_write_some_ec_t, Scheduler, FD, Buffers> :
-      std::is_nothrow_invocable_v<lazy_write_some_ec_t, FD, Buffers>)
   -> decltype(auto) {
     if constexpr(tag_invocable<lazy_write_some_ec_t, Scheduler, FD, Buffers>)
       return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::forward<Buffers>(buf));
@@ -1608,12 +1560,6 @@ struct lazy_read_some_at_t {
   template<typename FD, mutable_buffer_sequence Buffers>
   requires (!std::same_as<std::remove_cvref_t<FD>, int>)
   auto operator()(FD&& fd, offset_type offset, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_read_some_at_t, FD, offset_type, Buffers> ?
-      nothrow_tag_invocable<lazy_read_some_at_t, FD, offset_type, Buffers> :
-      noexcept(
-          lazy_read_some_at_ec(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf))
-          | ec_to_exception()))
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_read_some_at_t, FD, offset_type, Buffers>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
@@ -1629,9 +1575,6 @@ struct lazy_read_some_at_t {
 
   template<mutable_buffers Buffers>
   auto operator()(int fd, offset_type offset, Buffers&& buf) const
-  noexcept(noexcept(
-          lazy_read_some_at_ec(fd, offset, std::forward<Buffers>(buf))
-          | ec_to_exception()))
   -> typed_sender decltype(auto) {
     return lazy_read_some_at_ec(fd, offset, std::forward<Buffers>(buf))
     | ec_to_exception();
@@ -1639,10 +1582,6 @@ struct lazy_read_some_at_t {
 
   template<scheduler Scheduler, typename FD, mutable_buffers Buffers>
   auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_read_some_at_t, Scheduler, FD, offset_type, Buffers> ?
-      nothrow_tag_invocable<lazy_read_some_at_t, Scheduler, FD, offset_type, Buffers> :
-      std::is_nothrow_invocable_v<lazy_read_some_at_t, FD, offset_type, Buffers>)
   -> decltype(auto) {
     if constexpr(tag_invocable<lazy_read_some_at_t, Scheduler, FD, offset_type, Buffers>)
       return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
@@ -1693,9 +1632,6 @@ struct lazy_read_some_t {
 
   template<mutable_buffers Buffers>
   auto operator()(int fd, Buffers&& buf) const
-  noexcept(noexcept(
-          lazy_read_some_ec(fd, std::forward<Buffers>(buf))
-          | ec_to_exception()))
   -> typed_sender decltype(auto) {
     return lazy_read_some_ec(fd, std::forward<Buffers>(buf))
     | ec_to_exception();
@@ -1703,10 +1639,6 @@ struct lazy_read_some_t {
 
   template<scheduler Scheduler, typename FD, mutable_buffers Buffers>
   auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_read_some_t, Scheduler, FD, Buffers> ?
-      nothrow_tag_invocable<lazy_read_some_t, Scheduler, FD, Buffers> :
-      std::is_nothrow_invocable_v<lazy_read_some_t, FD, Buffers>)
   -> decltype(auto) {
     if constexpr(tag_invocable<lazy_read_some_t, Scheduler, FD, Buffers>)
       return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::forward<Buffers>(buf));
@@ -1757,9 +1689,6 @@ struct lazy_write_some_at_t {
 
   template<const_buffers Buffers>
   auto operator()(int fd, offset_type offset, Buffers&& buf) const
-  noexcept(noexcept(
-          lazy_write_some_at_ec(fd, offset, std::forward<Buffers>(buf))
-          | ec_to_exception()))
   -> typed_sender decltype(auto) {
     return lazy_write_some_at_ec(fd, offset, std::forward<Buffers>(buf))
     | ec_to_exception();
@@ -1767,10 +1696,6 @@ struct lazy_write_some_at_t {
 
   template<scheduler Scheduler, typename FD, const_buffers Buffers>
   auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, offset_type offset, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_write_some_at_t, Scheduler, FD, offset_type, Buffers> ?
-      nothrow_tag_invocable<lazy_write_some_at_t, Scheduler, FD, offset_type, Buffers> :
-      std::is_nothrow_invocable_v<lazy_write_some_at_t, FD, offset_type, Buffers>)
   -> decltype(auto) {
     if constexpr(tag_invocable<lazy_write_some_at_t, Scheduler, FD, offset_type, Buffers>)
       return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buf));
@@ -1794,12 +1719,6 @@ struct lazy_write_some_t {
   template<typename FD>
   requires (!std::same_as<std::remove_cvref_t<FD>, int>)
   auto operator()(FD&& fd, std::span<const std::byte> buf) const
-  noexcept(
-      tag_invocable<lazy_write_some_t, FD, std::span<const std::byte>> ?
-      nothrow_tag_invocable<lazy_write_some_t, FD, std::span<const std::byte>> :
-      noexcept(
-          lazy_write_some_ec(std::forward<FD>(fd), std::move(buf))
-          | ec_to_exception()))
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_write_some_t, FD, std::span<const std::byte>>) {
       return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
@@ -1827,9 +1746,6 @@ struct lazy_write_some_t {
 
   template<const_buffers Buffers>
   auto operator()(int fd, Buffers&& buf) const
-  noexcept(noexcept(
-          lazy_write_some_ec(fd, std::forward<Buffers>(buf))
-          | ec_to_exception()))
   -> typed_sender decltype(auto) {
     return lazy_write_some_ec(fd, std::forward<Buffers>(buf))
     | ec_to_exception();
@@ -1837,10 +1753,6 @@ struct lazy_write_some_t {
 
   template<scheduler Scheduler, typename FD, const_buffers Buffers>
   auto operator()([[maybe_unused]] Scheduler&& sch, FD&& fd, Buffers&& buf) const
-  noexcept(
-      tag_invocable<lazy_write_some_t, Scheduler, FD, Buffers> ?
-      nothrow_tag_invocable<lazy_write_some_t, Scheduler, FD, Buffers> :
-      std::is_nothrow_invocable_v<lazy_write_some_t, FD, Buffers>)
   -> decltype(auto) {
     if constexpr(tag_invocable<lazy_write_some_t, Scheduler, FD, Buffers>)
       return execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<FD>(fd), std::forward<Buffers>(buf));
@@ -2386,7 +2298,6 @@ struct lazy_truncate_ec_t {
   {
     public:
     explicit opstate(int fd, offset_type len, Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : fd(fd),
       len(len),
       r(std::move(r))
@@ -2431,9 +2342,6 @@ struct lazy_truncate_ec_t {
 
     template<receiver_of<> Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(std::is_nothrow_constructible_v<
-        opstate<std::remove_cvref_t<Receiver>>,
-        int, offset_type, Receiver>)
     -> opstate<std::remove_cvref_t<Receiver>> {
       return opstate<std::remove_cvref_t<Receiver>>(self.fd, self.len, std::forward<Receiver>(r));
     }
@@ -2508,7 +2416,6 @@ struct lazy_datasync_ec_t {
   {
     public:
     explicit opstate(int fd, Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : fd(fd),
       r(std::move(r))
     {}
@@ -2550,9 +2457,6 @@ struct lazy_datasync_ec_t {
 
     template<receiver_of<> Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(std::is_nothrow_constructible_v<
-        opstate<std::remove_cvref_t<Receiver>>,
-        int, offset_type, Receiver>)
     -> opstate<std::remove_cvref_t<Receiver>> {
       return opstate<std::remove_cvref_t<Receiver>>(self.fd, std::forward<Receiver>(r));
     }
@@ -2626,7 +2530,6 @@ struct lazy_sync_ec_t {
   {
     public:
     explicit opstate(int fd, Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : fd(fd),
       r(std::move(r))
     {}
@@ -2668,9 +2571,6 @@ struct lazy_sync_ec_t {
 
     template<receiver_of<> Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(std::is_nothrow_constructible_v<
-        opstate<std::remove_cvref_t<Receiver>>,
-        int, offset_type, Receiver>)
     -> opstate<std::remove_cvref_t<Receiver>> {
       return opstate<std::remove_cvref_t<Receiver>>(self.fd, std::forward<Receiver>(r));
     }

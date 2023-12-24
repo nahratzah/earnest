@@ -638,10 +638,109 @@ class wal_file_entry
       std::shared_ptr<records_vector> converted_records,
       bool delay_flush = false);
 
+  auto write_skip_record_(typename fd_type::offset_type write_offset, std::size_t bytes)
+  -> execution::type_erased_sender<
+      std::variant<std::tuple<>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false> {
+    using namespace execution;
+    using pos_stream = positional_stream_adapter<fd_type&>;
+
+    auto zero_bytes = [](std::shared_ptr<wal_file_entry> wf, typename fd_type::offset_type write_offset, [[maybe_unused]] std::size_t bytes) {
+      assert(bytes == 0);
+      constexpr std::array<std::byte, 4> opcode{
+        std::byte{(wal_record_noop::opcode >> 24u) & 0xffu},
+        std::byte{(wal_record_noop::opcode >> 16u) & 0xffu},
+        std::byte{(wal_record_noop::opcode >>  8u) & 0xffu},
+        std::byte{(wal_record_noop::opcode       ) & 0xffu},
+      };
+      return just(wf, write_offset, opcode);
+    };
+    auto uint32_bytes = [](std::shared_ptr<wal_file_entry> wf, typename fd_type::offset_type write_offset, std::size_t bytes) {
+      assert(bytes >= 4u);
+      return xdr_v2::write(
+          pos_stream(wf->file, write_offset),
+          bytes - 4u,
+          xdr_v2::constant(xdr_v2::uint32))
+      | then(
+          [wf, write_offset]([[maybe_unused]] pos_stream&& stream) {
+            constexpr std::array<std::byte, 4> opcode{
+              std::byte{(wal_record_skip32::opcode >> 24u) & 0xffu},
+              std::byte{(wal_record_skip32::opcode >> 16u) & 0xffu},
+              std::byte{(wal_record_skip32::opcode >>  8u) & 0xffu},
+              std::byte{(wal_record_skip32::opcode       ) & 0xffu},
+            };
+            return std::make_tuple(wf, write_offset, opcode);
+          })
+      | explode_tuple();
+    };
+    auto uint64_bytes = [](std::shared_ptr<wal_file_entry> wf, typename fd_type::offset_type write_offset, std::size_t bytes) {
+      assert(bytes >= 8u);
+      return xdr_v2::write(
+          pos_stream(wf->file, write_offset),
+          bytes - 8u,
+          xdr_v2::constant(xdr_v2::uint64))
+      | then(
+          [wf, write_offset]([[maybe_unused]] pos_stream&& stream) {
+            constexpr std::array<std::byte, 4> opcode{
+              std::byte{(wal_record_skip64::opcode >> 24u) & 0xffu},
+              std::byte{(wal_record_skip64::opcode >> 16u) & 0xffu},
+              std::byte{(wal_record_skip64::opcode >>  8u) & 0xffu},
+              std::byte{(wal_record_skip64::opcode       ) & 0xffu},
+            };
+            return std::make_tuple(wf, write_offset, opcode);
+          })
+      | explode_tuple();
+    };
+
+    using sender_variant_type = std::variant<
+        decltype(zero_bytes(std::declval<std::shared_ptr<wal_file_entry>>(), std::declval<typename fd_type::offset_type>(), std::declval<std::size_t>())),
+        decltype(uint32_bytes(std::declval<std::shared_ptr<wal_file_entry>>(), std::declval<typename fd_type::offset_type>(), std::declval<std::size_t>())),
+        decltype(uint64_bytes(std::declval<std::shared_ptr<wal_file_entry>>(), std::declval<typename fd_type::offset_type>(), std::declval<std::size_t>()))
+    >;
+
+    return just(this->shared_from_this(), write_offset, bytes)
+    | let_variant(
+        [zero_bytes, uint32_bytes, uint64_bytes](std::shared_ptr<wal_file_entry> wf, typename fd_type::offset_type write_offset, std::size_t bytes) -> sender_variant_type {
+          if (bytes == 0)
+            return zero_bytes(wf, write_offset, bytes);
+          else if (bytes <= 0xffff'ffffu)
+            return uint32_bytes(wf, write_offset, bytes);
+          else
+            return uint64_bytes(wf, write_offset, bytes);
+        })
+    | let_value(
+        [](std::shared_ptr<wal_file_entry> wf, typename fd_type::offset_type write_offset, std::array<std::byte, 4> opcode) {
+          return wf->write_link_(write_offset, opcode);
+        });
+  }
+
   template<typename CompletionToken>
+  [[deprecated]]
   auto write_skip_record_(
       typename fd_type::offset_type write_offset,
-      std::size_t bytes, CompletionToken&& token);
+      std::size_t bytes, CompletionToken&& token) {
+    using namespace execution;
+
+    return asio::async_initiate<CompletionToken, void(std::error_code)>(
+        [](auto completion_handler, std::shared_ptr<wal_file_entry> wf, typename fd_type::offset_type write_offset, std::size_t bytes) -> void {
+          start_detached(
+              wf->write_skip_record_(write_offset, bytes)
+              | then(
+                  []() noexcept -> std::error_code {
+                    return std::error_code{};
+                  })
+              | upon_error(
+                  [](auto err) -> std::error_code {
+                    if constexpr(std::same_as<std::exception_ptr, decltype(err)>)
+                      std::rethrow_exception(err);
+                    else
+                      return err;
+                  })
+              | then(completion_handler_fun(std::move(completion_handler), wf->get_executor())));
+        },
+        token, this->shared_from_this(), write_offset, bytes);
+  }
 
   auto write_link_(
       typename fd_type::offset_type write_offset,

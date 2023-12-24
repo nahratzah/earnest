@@ -574,7 +574,6 @@ inline constexpr start_t start{};
 struct schedule_t {
   template<typename Scheduler>
   auto operator()(Scheduler&& sch) const
-  noexcept(nothrow_tag_invocable<schedule_t, Scheduler>)
   -> tag_invoke_result_t<schedule_t, Scheduler> {
     return tag_invoke(*this, std::forward<Scheduler>(sch));
   }
@@ -604,10 +603,8 @@ enum class forward_progress_guarantee {
 // This function may fail, in which case you must either call the `set_error` or the `set_done` operations.
 struct set_value_t {
   template<typename R, typename... Args>
-  auto operator()(R&& r, Args&&... args) const
-  noexcept(nothrow_tag_invocable<set_value_t, R, Args...>)
-  -> tag_invoke_result_t<set_value_t, R, Args...> {
-    return tag_invoke(*this, std::forward<R>(r), std::forward<Args>(args)...);
+  auto operator()(R&& r, Args&&... args) const -> void {
+    tag_invoke(*this, std::forward<R>(r), std::forward<Args>(args)...);
   }
 };
 inline constexpr set_value_t set_value{};
@@ -616,10 +613,9 @@ inline constexpr set_value_t set_value{};
 // Assign an error to the receiver.
 struct set_error_t {
   template<typename R, typename E>
-  auto operator()(R&& r, E&& e) const
-  noexcept(nothrow_tag_invocable<set_error_t, R, E>)
-  -> tag_invoke_result_t<set_error_t, R, E> {
-    return tag_invoke(*this, std::forward<R>(r), std::forward<E>(e));
+  auto operator()(R&& r, E&& e) const noexcept -> void {
+    static_assert(nothrow_tag_invocable<set_error_t, R, E>, "execution::set_error should be noexcept");
+    tag_invoke(*this, std::forward<R>(r), std::forward<E>(e));
   }
 };
 inline constexpr set_error_t set_error{};
@@ -630,10 +626,9 @@ inline constexpr set_error_t set_error{};
 // There are no arguments. `set_done` is used to signal that the work is no longer needed, and was canceled.
 struct set_done_t {
   template<typename R>
-  auto operator()(R&& r) const
-  noexcept(nothrow_tag_invocable<set_done_t, R>)
-  -> tag_invoke_result_t<set_done_t, R> {
-    return tag_invoke(*this, std::forward<R>(r));
+  auto operator()(R&& r) const noexcept -> void {
+    static_assert(nothrow_tag_invocable<set_done_t, R>, "execution::set_error should be noexcept");
+    tag_invoke(*this, std::forward<R>(r));
   }
 };
 inline constexpr set_done_t set_done{};
@@ -946,7 +941,6 @@ class _generic_adapter_t
   public:
   template<typename... Args_>
   explicit constexpr _generic_adapter_t(const Tag& tag, Args_&&... args)
-  noexcept(std::is_nothrow_copy_constructible_v<Tag> && std::is_nothrow_constructible_v<std::tuple<Args...>, Args_...>)
   : tag(tag),
     args(std::forward<Args_>(args)...)
   {}
@@ -955,7 +949,6 @@ class _generic_adapter_t
   template<sender Sender, std::size_t... Idx>
   requires std::invocable<const Tag&, Sender, std::add_lvalue_reference_t<Args>...>
   constexpr auto invoke(Sender&& s, [[maybe_unused]] std::index_sequence<Idx...>) &
-  noexcept(std::is_nothrow_invocable_v<const Tag&, Sender, std::add_lvalue_reference_t<Args>...>)
   -> std::invoke_result_t<const Tag&, Sender, std::add_lvalue_reference_t<Args>...> {
     return std::invoke(std::as_const(tag), std::forward<Sender>(s), std::get<Idx>(args)...);
   }
@@ -963,7 +956,6 @@ class _generic_adapter_t
   template<sender Sender, std::size_t... Idx>
   requires std::invocable<const Tag&, Sender, Args...>
   constexpr auto invoke(Sender&& s, [[maybe_unused]] std::index_sequence<Idx...>) &&
-  noexcept(noexcept(std::is_nothrow_invocable_v<const Tag&, Sender, Args...>))
   -> std::invoke_result_t<const Tag&, Sender, Args...> {
     return std::invoke(std::as_const(tag), std::forward<Sender>(s), std::get<Idx>(std::move(args))...);
   }
@@ -971,14 +963,12 @@ class _generic_adapter_t
   public:
   template<sender Sender>
   constexpr auto operator()(Sender&& s) &
-  noexcept(noexcept(std::declval<_generic_adapter_t&>().invoke(std::declval<Sender>(), std::index_sequence_for<Args...>())))
   -> decltype(std::declval<_generic_adapter_t&>().invoke(std::declval<Sender>(), std::index_sequence_for<Args...>())) {
     return invoke(std::forward<Sender>(s), std::index_sequence_for<Args...>());
   }
 
   template<sender Sender>
   constexpr auto operator()(Sender&& s) &&
-  noexcept(noexcept(std::declval<_generic_adapter_t>().invoke(std::declval<Sender>(), std::index_sequence_for<Args...>())))
   -> decltype(std::declval<_generic_adapter_t>().invoke(std::declval<Sender>(), std::index_sequence_for<Args...>())) {
     return std::move(*this).invoke(std::forward<Sender>(s), std::index_sequence_for<Args...>());
   }
@@ -991,7 +981,6 @@ class _generic_adapter_t
 // Pipe operation on an adapter: `... | _const generic_adapter_t&`
 template<sender Sender, typename Tag, typename... Args>
 constexpr auto operator|(Sender&& s, const _generic_adapter_t<Tag, Args...>& adapter)
-noexcept(std::is_nothrow_invocable_v<const _generic_adapter_t<Tag, Args...>&, Sender>)
 -> decltype(auto) {
   return adapter(std::forward<Sender>(s));
 }
@@ -999,7 +988,6 @@ noexcept(std::is_nothrow_invocable_v<const _generic_adapter_t<Tag, Args...>&, Se
 // Pipe operation on an adapter: `... | _generic_adapter_t&`
 template<sender Sender, typename Tag, typename... Args>
 constexpr auto operator|(Sender&& s, _generic_adapter_t<Tag, Args...>& adapter)
-noexcept(std::is_nothrow_invocable_v<_generic_adapter_t<Tag, Args...>&, Sender>)
 -> decltype(auto) {
   return adapter(std::forward<Sender>(s));
 }
@@ -1007,7 +995,6 @@ noexcept(std::is_nothrow_invocable_v<_generic_adapter_t<Tag, Args...>&, Sender>)
 // Pipe operation on an adapter: `... | _generic_adapter_t&&`
 template<sender Sender, typename Tag, typename... Args>
 constexpr auto operator|(Sender&& s, _generic_adapter_t<Tag, Args...>&& adapter)
-noexcept(std::is_nothrow_invocable_v<_generic_adapter_t<Tag, Args...>, Sender>)
 -> decltype(std::declval<_generic_adapter_t<Tag, Args...>>()(std::declval<Sender>())) {
   return std::move(adapter)(std::forward<Sender>(s));
 }
@@ -1015,7 +1002,6 @@ noexcept(std::is_nothrow_invocable_v<_generic_adapter_t<Tag, Args...>, Sender>)
 // Create a _generic_adapter_t.
 template<typename Tag, typename... Args>
 constexpr auto _generic_adapter(const Tag& tag, Args&&... args)
-noexcept(std::is_nothrow_constructible_v<_generic_adapter_t<Tag, std::remove_cvref_t<Args>...>, const Tag&, Args...>)
 -> _generic_adapter_t<Tag, std::remove_cvref_t<Args>...> {
   return _generic_adapter_t<Tag, std::remove_cvref_t<Args>...>(tag, std::forward<Args>(args)...);
 }
@@ -1065,7 +1051,6 @@ struct connect_t {
       sender_traits<std::remove_cvref_t<S>>::template value_types<std::tuple, accepts_values>::template valid<R>
   )
   constexpr auto operator()(S&& s, R&& r) const
-  noexcept(noexcept(_generic_operand_base<>(std::declval<const connect_t&>(), std::declval<S>(), std::declval<R>())))
   -> operation_state decltype(auto) {
     return _generic_operand_base<>(*this, std::forward<S>(s), std::forward<R>(r));
   }
@@ -1245,13 +1230,12 @@ constexpr bool _is_forwardable_sender_tag =
 template<receiver Receiver, typename... SpecializedOperations>
 class _generic_receiver_wrapper {
   protected:
+  // XXX delete this: receivers are always move-constructed, never copied
   constexpr _generic_receiver_wrapper(const Receiver& r)
-  noexcept(std::is_nothrow_copy_constructible_v<Receiver>)
   : r(r)
   {}
 
   constexpr _generic_receiver_wrapper(Receiver&& r)
-  noexcept(std::is_nothrow_move_constructible_v<Receiver>)
   : r(std::move(r))
   {}
 
@@ -1291,7 +1275,7 @@ class _generic_receiver_wrapper {
       typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
       typename = std::enable_if_t<std::conjunction_v<std::negation<std::is_same<SpecializedOperations, Tag>>...>>>
   friend constexpr auto tag_invoke(Tag tag, _generic_receiver_wrapper&& self, Args&&... args)
-  noexcept(nothrow_tag_invocable<Tag, Receiver, Args...>)
+  noexcept(nothrow_tag_invocable<Tag, Receiver&&, Args...>)
   -> tag_invoke_result_t<Tag, Receiver&&, Args...> {
     return tag_invoke(std::move(tag), std::move(self.r), std::forward<Args>(args)...);
   }
@@ -1339,8 +1323,8 @@ class _generic_rawptr_receiver {
   // This implementation is for rvalue-reference.
   template<typename Tag, typename... Args>
   friend auto tag_invoke([[maybe_unused]] Tag tag, _generic_rawptr_receiver&& self, Args&&... args)
-  noexcept(noexcept(tag_invoke(std::declval<Tag>(), std::declval<Receiver>(), std::declval<Args>()...)))
-  -> decltype(tag_invoke(std::declval<Tag>(), std::declval<Receiver>(), std::declval<Args>()...)) {
+  noexcept(noexcept(tag_invoke(std::declval<Tag>(), std::declval<Receiver&&>(), std::declval<Args>()...)))
+  -> decltype(tag_invoke(std::declval<Tag>(), std::declval<Receiver&&>(), std::declval<Args>()...)) {
     return tag_invoke(std::move(tag), std::move(*self.r_ptr), std::forward<Args>(args)...);
   }
 
@@ -1422,8 +1406,8 @@ class _generic_sender_wrapper
       typename = std::enable_if_t<_is_forwardable_sender_tag<Tag>>,
       typename = std::enable_if_t<std::conjunction_v<std::negation<std::is_same<SpecializedOperations, Tag>>...>>>
   friend constexpr auto tag_invoke(Tag tag, _generic_sender_wrapper&& self, Args&&... args)
-  noexcept(nothrow_tag_invocable<Tag, Sender, Args...>)
-  -> tag_invoke_result_t<Tag, Sender, Args...> {
+  noexcept(nothrow_tag_invocable<Tag, Sender&&, Args...>)
+  -> tag_invoke_result_t<Tag, Sender&&, Args...> {
     return tag_invoke(std::move(tag), std::move(self.s), std::forward<Args>(args)...);
   }
 
@@ -1439,9 +1423,6 @@ class _generic_sender_wrapper
   template<sender PipeSource,
       typename = std::enable_if_t<std::is_invocable_v<Sender, PipeSource>>>
   auto operator()(PipeSource&& pipe_source) &&
-  noexcept(noexcept(
-          std::declval<Derived>().rebind(
-              std::invoke(std::declval<Sender>(), std::declval<PipeSource>()))))
   -> decltype(auto) {
     return std::move(static_cast<Derived&>(*this)).rebind(
         std::invoke(std::move(this->s), std::forward<PipeSource>(pipe_source)));
@@ -1455,7 +1436,6 @@ class _generic_sender_wrapper
 // if the generic-sender holds an adapter-chain.
 template<sender PipeSource, typename Derived, sender Sender, typename... SpecializedOperations>
 auto operator|(PipeSource&& pipe_source, _generic_sender_wrapper<Derived, Sender, SpecializedOperations...>&& wrapper)
-noexcept(std::is_nothrow_invocable_v<_generic_sender_wrapper<Derived, Sender, SpecializedOperations...>, PipeSource>)
 -> decltype(auto) {
   return std::invoke(std::move(wrapper), std::forward<PipeSource>(pipe_source));
 }
@@ -1464,7 +1444,6 @@ noexcept(std::is_nothrow_invocable_v<_generic_sender_wrapper<Derived, Sender, Sp
 // if the generic-sender holds an adapter-chain.
 template<sender PipeSource, typename Derived, sender Sender, typename... SpecializedOperations>
 auto operator|(PipeSource&& pipe_source, const _generic_sender_wrapper<Derived, Sender, SpecializedOperations...>& wrapper)
-noexcept(std::is_nothrow_invocable_v<const _generic_sender_wrapper<Derived, Sender, SpecializedOperations...>&, PipeSource>)
 -> decltype(auto) {
   return std::invoke(std::move(wrapper), std::forward<PipeSource>(pipe_source));
 }
@@ -1481,14 +1460,12 @@ struct lazy_then_t {
 
   template<sender S, typename Fn>
   constexpr auto operator()(S&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const lazy_then_t&>(), std::declval<S>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
   }
 
   template<typename Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const lazy_then_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -1503,48 +1480,30 @@ struct lazy_then_t {
   struct wrapped_receiver
   : public _generic_receiver_wrapper<Receiver, set_value_t>
   {
+    // XXX remove all but one of those
     wrapped_receiver(const Fn& fn, const Receiver& r)
-    noexcept(std::is_nothrow_copy_constructible_v<Fn> && std::is_nothrow_copy_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t>(r),
       fn(fn)
     {}
 
     wrapped_receiver(Fn&& fn, const Receiver& r)
-    noexcept(std::is_nothrow_move_constructible_v<Fn> && std::is_nothrow_copy_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t>(r),
       fn(std::move(fn))
     {}
 
     wrapped_receiver(const Fn& fn, Receiver&& r)
-    noexcept(std::is_nothrow_copy_constructible_v<Fn> && std::is_nothrow_move_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
       fn(fn)
     {}
 
     wrapped_receiver(Fn&& fn, Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Fn> && std::is_nothrow_move_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
       fn(std::move(fn))
     {}
 
     template<typename... Args>
-    static constexpr auto noexcept_() noexcept -> bool {
-      if constexpr(!std::is_invocable_v<Fn, Args...>) {
-        return false;
-      } else if constexpr(std::is_void_v<std::invoke_result_t<Fn, Args...>>) {
-        return noexcept(std::invoke(std::declval<Fn>(), std::declval<Args>()...)) &&
-            noexcept(::earnest::execution::set_value(std::declval<Receiver>()));
-      } else {
-        return noexcept(::earnest::execution::set_value(
-                std::declval<Receiver>(),
-                std::invoke(std::declval<Fn>(), std::declval<Args>()...)));
-      }
-    }
-
-    template<typename... Args>
     requires std::invocable<Fn, Args...>
     friend auto tag_invoke([[maybe_unused]] set_value_t, wrapped_receiver&& self, Args&&... args)
-    noexcept(noexcept_<Args...>())
     -> decltype(auto) {
       if constexpr(std::is_void_v<std::invoke_result_t<Fn, Args...>>) {
         std::invoke(std::move(self.fn), std::forward<Args>(args)...);
@@ -1628,10 +1587,6 @@ struct lazy_then_t {
 
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(noexcept(
-            ::earnest::execution::connect(
-                std::declval<Sender>(),
-                wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(std::declval<Fn>(), std::declval<Receiver>()))))
     -> operation_state decltype(auto) {
       return ::earnest::execution::connect(
           std::move(self.s),
@@ -1641,7 +1596,6 @@ struct lazy_then_t {
     private:
     template<sender OtherSender>
     auto rebind(OtherSender&& other_sender) &&
-    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Fn>, OtherSender, Fn>)
     -> sender_impl<std::remove_cvref_t<OtherSender>, Fn> {
       return sender_impl<std::remove_cvref_t<OtherSender>, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
     }
@@ -1651,7 +1605,6 @@ struct lazy_then_t {
 
   template<sender S, typename Fn>
   auto default_impl(S&& s, Fn&& fn) const
-  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>, S, Fn>)
   -> sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>> {
     return sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>(std::forward<S>(s), std::forward<Fn>(fn));
   }
@@ -1667,7 +1620,6 @@ struct then_t {
 
   template<sender S, typename Fn>
   constexpr auto operator()(S&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<then_t>(), std::declval<S>(), std::declval<Fn>())))
   -> sender decltype(auto)
   {
     return _generic_operand_base<set_value_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
@@ -1675,7 +1627,6 @@ struct then_t {
 
   template<typename Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const then_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -1683,7 +1634,6 @@ struct then_t {
   private:
   template<sender S, typename Fn>
   constexpr auto default_impl(S&& s, Fn&& fn) const
-  noexcept(noexcept(::earnest::execution::lazy_then(std::declval<S>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return ::earnest::execution::lazy_then(std::forward<S>(s), std::forward<Fn>(fn));
   }
@@ -1703,14 +1653,12 @@ struct lazy_upon_error_t {
 
   template<sender S, typename Fn>
   constexpr auto operator()(S&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_error_t>(std::declval<const lazy_upon_error_t&>(), std::declval<S>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_error_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
   }
 
   template<typename Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const lazy_upon_error_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -1725,26 +1673,23 @@ struct lazy_upon_error_t {
   struct wrapped_receiver
   : public _generic_receiver_wrapper<Receiver, set_value_t, set_error_t>
   {
+    // XXX remove all but one of these constructors
     wrapped_receiver(const Fn& fn, const Receiver& r)
-    noexcept(std::is_nothrow_copy_constructible_v<Fn> && std::is_nothrow_copy_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_error_t>(r),
       fn(fn)
     {}
 
     wrapped_receiver(Fn&& fn, const Receiver& r)
-    noexcept(std::is_nothrow_move_constructible_v<Fn> && std::is_nothrow_copy_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_error_t>(r),
       fn(std::move(fn))
     {}
 
     wrapped_receiver(const Fn& fn, Receiver&& r)
-    noexcept(std::is_nothrow_copy_constructible_v<Fn> && std::is_nothrow_move_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_error_t>(std::move(r)),
       fn(fn)
     {}
 
     wrapped_receiver(Fn&& fn, Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Fn> && std::is_nothrow_move_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_error_t>(std::move(r)),
       fn(std::move(fn))
     {}
@@ -1775,19 +1720,7 @@ struct lazy_upon_error_t {
 
     private:
     template<typename Error>
-    static constexpr auto noexcept_error_() noexcept -> bool {
-      if constexpr(std::is_void_v<std::invoke_result_t<Fn, Error>>) {
-        return noexcept(std::invoke(std::declval<Fn>(), std::declval<Error>())) &&
-            noexcept(::earnest::execution::set_value(std::declval<Receiver>()));
-      } else {
-        return noexcept(::earnest::execution::set_value(
-                std::declval<Receiver>(),
-                std::invoke(std::declval<Fn>(), std::declval<Error>())));
-      }
-    }
-
-    template<typename Error>
-    auto invoke_error(Error&& err) noexcept(noexcept_error_<Error>()) -> void {
+    auto invoke_error(Error&& err) -> void {
       if constexpr(std::is_void_v<std::invoke_result_t<Fn, Error>>) {
         std::invoke(std::move(fn), std::forward<Error>(err));
         ::earnest::execution::set_value(std::move(this->r));
@@ -1892,17 +1825,12 @@ struct lazy_upon_error_t {
     template<typename Sender_, typename Fn_>
     requires std::constructible_from<Sender, Sender_> && std::constructible_from<Fn, Fn_>
     constexpr sender_impl(Sender_&& sender, Fn_&& fn)
-    noexcept(std::is_nothrow_constructible_v<Sender, Sender_> && std::is_nothrow_constructible_v<Fn, Fn_>)
     : sender_types_for_impl<Sender, Fn>(std::move(sender)),
       fn(std::move(fn))
     {}
 
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(noexcept(
-            ::earnest::execution::connect(
-                std::declval<Sender>(),
-                wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(std::declval<Fn>(), std::declval<Receiver>()))))
     -> operation_state decltype(auto) {
       return ::earnest::execution::connect(
           std::move(self.s),
@@ -1912,7 +1840,6 @@ struct lazy_upon_error_t {
     private:
     template<sender OtherSender>
     auto rebind(OtherSender&& other_sender) &&
-    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Fn>, OtherSender, Fn>)
     -> sender_impl<std::remove_cvref_t<OtherSender>, Fn> {
       return sender_impl<std::remove_cvref_t<OtherSender>, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
     }
@@ -1922,7 +1849,6 @@ struct lazy_upon_error_t {
 
   template<sender S, typename Fn>
   auto default_impl(S&& s, Fn&& fn) const
-  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>, S, Fn>)
   -> sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>> {
     return sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>(std::forward<S>(s), std::forward<Fn>(fn));
   }
@@ -1938,7 +1864,6 @@ struct upon_error_t {
 
   template<sender S, typename Fn>
   constexpr auto operator()(S&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_error_t>(std::declval<upon_error_t>(), std::declval<S>(), std::declval<Fn>())))
   -> sender decltype(auto)
   {
     return _generic_operand_base<set_error_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
@@ -1946,7 +1871,6 @@ struct upon_error_t {
 
   template<typename Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const upon_error_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -1954,7 +1878,6 @@ struct upon_error_t {
   private:
   template<sender S, typename Fn>
   constexpr auto default_impl(S&& s, Fn&& fn) const
-  noexcept(noexcept(::earnest::execution::lazy_upon_error(std::declval<S>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return ::earnest::execution::lazy_upon_error(std::forward<S>(s), std::forward<Fn>(fn));
   }
@@ -1974,14 +1897,12 @@ struct lazy_upon_done_t {
 
   template<sender S, std::invocable<> Fn>
   constexpr auto operator()(S&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_done_t>(std::declval<const lazy_upon_done_t&>(), std::declval<S>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_done_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
   }
 
   template<std::invocable<> Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const lazy_upon_done_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -1996,26 +1917,23 @@ struct lazy_upon_done_t {
   struct wrapped_receiver
   : public _generic_receiver_wrapper<Receiver, set_value_t, set_done_t>
   {
+    // XXX remove all but one of the constructors
     wrapped_receiver(const Fn& fn, const Receiver& r)
-    noexcept(std::is_nothrow_copy_constructible_v<Fn> && std::is_nothrow_copy_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_done_t>(r),
       fn(fn)
     {}
 
     wrapped_receiver(Fn&& fn, const Receiver& r)
-    noexcept(std::is_nothrow_move_constructible_v<Fn> && std::is_nothrow_copy_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_done_t>(r),
       fn(std::move(fn))
     {}
 
     wrapped_receiver(const Fn& fn, Receiver&& r)
-    noexcept(std::is_nothrow_copy_constructible_v<Fn> && std::is_nothrow_move_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_done_t>(std::move(r)),
       fn(fn)
     {}
 
     wrapped_receiver(Fn&& fn, Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Fn> && std::is_nothrow_move_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_done_t>(std::move(r)),
       fn(std::move(fn))
     {}
@@ -2044,19 +1962,8 @@ struct lazy_upon_done_t {
     }
 
     private:
-    static constexpr auto noexcept_done_() noexcept -> bool {
-      if constexpr(std::is_void_v<std::invoke_result_t<Fn>>) {
-        return noexcept(std::invoke(std::declval<Fn>())) &&
-            noexcept(::earnest::execution::set_value(std::declval<Receiver>()));
-      } else {
-        return noexcept(::earnest::execution::set_value(
-                std::declval<Receiver>(),
-                std::invoke(std::declval<Fn>())));
-      }
-    }
-
     template<typename Error>
-    auto invoke_done(Error&& err) noexcept(noexcept_done_<Error>()) -> void {
+    auto invoke_done(Error&& err) -> void {
       if constexpr(std::is_void_v<std::invoke_result_t<Fn, Error>>) {
         std::invoke(std::move(fn));
         ::earnest::execution::set_value(std::move(this->r));
@@ -2151,17 +2058,12 @@ struct lazy_upon_done_t {
     template<typename Sender_, typename Fn_>
     requires std::constructible_from<Sender, Sender_> && std::constructible_from<Fn, Fn_>
     constexpr sender_impl(Sender_&& sender, Fn_&& fn)
-    noexcept(std::is_nothrow_move_constructible_v<Sender> && std::is_nothrow_move_constructible_v<Fn>)
     : sender_types_for_impl<Sender, Fn>(std::forward<Sender_>(sender)),
       fn(std::forward<Fn_>(fn))
     {}
 
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(noexcept(
-            ::earnest::execution::connect(
-                std::declval<Sender>(),
-                wrapped_receiver<Fn, std::remove_cvref_t<Receiver>>(std::declval<Fn>(), std::declval<Receiver>()))))
     -> operation_state decltype(auto) {
       return ::earnest::execution::connect(
           std::move(self.s),
@@ -2171,7 +2073,6 @@ struct lazy_upon_done_t {
     private:
     template<sender OtherSender>
     auto rebind(OtherSender&& other_sender) &&
-    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Fn>, OtherSender, Fn>)
     -> sender_impl<std::remove_cvref_t<OtherSender>, Fn> {
       return sender_impl<std::remove_cvref_t<OtherSender>, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
     }
@@ -2181,7 +2082,6 @@ struct lazy_upon_done_t {
 
   template<sender S, typename Fn>
   auto default_impl(S&& s, Fn&& fn) const
-  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>, S, Fn>)
   -> sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>> {
     return sender_impl<std::remove_cvref_t<S>, std::remove_cvref_t<Fn>>(std::forward<S>(s), std::forward<Fn>(fn));
   }
@@ -2197,7 +2097,6 @@ struct upon_done_t {
 
   template<sender S, std::invocable<> Fn>
   constexpr auto operator()(S&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_done_t>(std::declval<upon_done_t>(), std::declval<S>(), std::declval<Fn>())))
   -> sender decltype(auto)
   {
     return _generic_operand_base<set_done_t>(*this, std::forward<S>(s), std::forward<Fn>(fn));
@@ -2205,7 +2104,6 @@ struct upon_done_t {
 
   template<std::invocable<> Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const upon_done_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -2213,7 +2111,6 @@ struct upon_done_t {
   private:
   template<sender S, typename Fn>
   constexpr auto default_impl(S&& s, Fn&& fn) const
-  noexcept(noexcept(::earnest::execution::lazy_upon_done(std::declval<S>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return ::earnest::execution::lazy_upon_done(std::forward<S>(s), std::forward<Fn>(fn));
   }
@@ -2240,17 +2137,11 @@ class _just_sender {
   {
     public:
     operation_state(const std::tuple<T...>& values, Receiver&& r)
-    noexcept(
-        std::is_nothrow_copy_constructible_v<std::tuple<T...>> &&
-        std::is_nothrow_move_constructible_v<Receiver>)
     : values(values),
       r(std::move(r))
     {}
 
     operation_state(std::tuple<T...>&& values, Receiver&& r)
-    noexcept(
-        std::is_nothrow_move_constructible_v<std::tuple<T...>> &&
-        std::is_nothrow_move_constructible_v<Receiver>)
     : values(std::move(values)),
       r(std::move(r))
     {}
@@ -2284,20 +2175,23 @@ class _just_sender {
 
   template<typename... T_>
   explicit constexpr _just_sender(T_&&... v)
-  noexcept(std::is_nothrow_constructible_v<std::tuple<T...>, T_...>)
   : values(std::forward<T_>(v)...)
   {}
 
   template<receiver Receiver>
   friend constexpr auto tag_invoke([[maybe_unused]] connect_t, _just_sender&& self, Receiver&& r)
-  noexcept(noexcept(std::is_nothrow_constructible_v<operation_state<std::remove_cvref_t<Receiver>>, std::tuple<T...>&&, Receiver>))
   -> operation_state<std::remove_cvref_t<Receiver>> {
     return operation_state<std::remove_cvref_t<Receiver>>(std::move(self.values), std::forward<Receiver>(r));
   }
 
   // Optimization: immediately compute eager then(), if the function is noexcept.
-  template<std::invocable<T...> Fn,
-      typename = std::enable_if_t<std::is_nothrow_invocable_v<Fn, T...>>>
+  template<std::invocable<T...> Fn>
+  requires
+      std::is_nothrow_invocable_v<Fn, T...> &&
+      ( std::is_void_v<std::invoke_result_t<Fn, T...>> ||
+        std::is_nothrow_constructible_v<
+            std::remove_cvref_t<std::invoke_result_t<Fn, T...>>,
+            std::invoke_result_t<Fn, T...>>)
   friend constexpr auto tag_invoke([[maybe_unused]] then_t, _just_sender&& self, Fn&& fn) noexcept {
     using new_type = std::remove_cvref_t<std::invoke_result_t<Fn, T...>>;
 
@@ -2316,7 +2210,6 @@ class _just_sender {
 // Create a sender that sends the given values.
 template<typename... T>
 constexpr auto just(T&&... v)
-noexcept(std::is_nothrow_constructible_v<_just_sender<std::remove_cvref_t<T>...>, T...>)
 -> _just_sender<std::remove_cvref_t<T>...> {
   return _just_sender<std::remove_cvref_t<T>...>(std::forward<T>(v)...);
 }
@@ -2335,7 +2228,6 @@ struct into_variant_t {
   }
 
   auto operator()() const
-  noexcept
   -> decltype(auto) {
     return _generic_adapter(*this);
   }
@@ -2348,7 +2240,6 @@ struct into_variant_t {
     template<typename... Args>
     requires std::constructible_from<result_type, std::tuple<std::remove_cvref_t<Args>...>>
     constexpr auto operator()(Args&&... args)
-    noexcept(noexcept(result_type(std::make_tuple(std::declval<Args>()...))))
     -> result_type {
       return result_type(std::make_tuple(std::forward<Args>(args)...));
     }
@@ -2357,7 +2248,6 @@ struct into_variant_t {
   // Implement in terms of lazy-then.
   template<typed_sender Sender>
   auto default_impl(Sender&& s) const
-  noexcept(noexcept(lazy_then(std::forward<Sender>(s), transformer<Sender>{})))
   -> decltype(lazy_then(std::forward<Sender>(s), transformer<Sender>{})) {
     return then(std::forward<Sender>(s), transformer<Sender>{});
   }
@@ -2374,7 +2264,6 @@ struct start_detached_t {
 
   template<sender Sender>
   auto operator()(Sender&& s) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const start_detached_t&>(), std::declval<Sender>())))
   -> void {
     _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
   }
@@ -2406,10 +2295,6 @@ struct start_detached_t {
 
   template<sender Sender>
   auto default_impl(Sender&& s) const
-  noexcept(
-      noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver>())) &&
-      noexcept(::earnest::execution::start(
-              std::declval<std::add_lvalue_reference_t<std::remove_cvref_t<decltype(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver>()))>>>())))
   -> void {
     using op_state_type = std::remove_cvref_t<decltype(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver>()))>;
 
@@ -2429,7 +2314,6 @@ struct execute_t {
 
   template<scheduler Scheduler, std::invocable<> Fn>
   auto operator()(Scheduler&& sch, Fn&& fn)
-  noexcept(noexcept(_generic_operand_base<>(std::declval<const execute_t&>(), std::declval<std::remove_cvref_t<Scheduler>&>(), std::declval<Fn>())))
   -> void {
     _generic_operand_base<>(*this, sch, std::forward<Fn>(fn));
   }
@@ -2437,7 +2321,6 @@ struct execute_t {
   private:
   template<scheduler Scheduler, std::invocable<> Fn>
   auto default_impl(Scheduler&& sch, Fn&& fn)
-  noexcept(noexcept(::earnest::execution::start_detached(::earnest::execution::then(std::declval<Scheduler>(), std::declval<Fn>()))))
   -> void {
     ::earnest::execution::start_detached(::earnest::execution::then(::earnest::execution::schedule(std::forward<Scheduler>(sch)), std::forward<Fn>(fn)));
   }
@@ -2454,7 +2337,6 @@ struct sync_wait_t {
   template<typed_sender Sender>
   requires (std::variant_size_v<typename sender_traits<std::remove_cvref_t<Sender>>::template value_types<std::tuple, std::variant>> == 1)
   constexpr auto operator()(Sender&& s) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const sync_wait_t&>(), std::declval<Sender>())))
   -> decltype(_generic_operand_base<set_value_t>(std::declval<const sync_wait_t&>(), std::declval<Sender>())) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
   }
@@ -2475,7 +2357,6 @@ struct sync_wait_t {
       public:
       template<sender Sender, receiver Receiver>
       explicit operation_state(execution_context& ex_ctx, Sender&& s, Receiver&& r)
-      noexcept(std::is_nothrow_move_constructible_v<OpState>)
       : ex_ctx(ex_ctx),
         op_state(execution::connect(std::forward<Sender>(s), std::forward<Receiver>(r)))
       {}
@@ -2497,7 +2378,6 @@ struct sync_wait_t {
     // The returned operation state will execute on the execution-context.
     template<sender Sender, receiver Receiver>
     static auto make_operation_state(execution_context& ex_ctx, Sender&& s, Receiver&& r)
-    noexcept(std::is_nothrow_constructible_v<operation_state<std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>>, Sender, Receiver>)
     -> operation_state<std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>> {
       return operation_state<std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>>(ex_ctx, std::forward<Sender>(s), std::forward<Receiver>(r));
     }
@@ -2692,7 +2572,6 @@ struct sync_wait_t {
     // We use emplace, to be as-late-binding as possible.
     template<typename... Args>
     friend auto tag_invoke([[maybe_unused]] set_value_t, receiver&& r, Args&&... args)
-    noexcept(std::is_nothrow_constructible_v<Tpl, Args...>)
     -> std::enable_if_t<std::is_constructible_v<Tpl, Args...>> {
       assert(r.var.index() == 0 || r.var.valueless_by_exception()); // Undefined behaviour if there was already an assignment.
                                                                     // Note: valueless-by-exception is probably not true here,
@@ -2802,10 +2681,6 @@ struct lazy_schedule_from_t {
 
   template<scheduler Scheduler, sender Sender>
   auto operator()(Scheduler&& sch, Sender&& s) const
-  noexcept(
-      tag_invocable<lazy_schedule_from_t, Scheduler, Sender> ?
-      nothrow_tag_invocable<lazy_schedule_from_t, Scheduler, Sender> :
-      noexcept(std::declval<const lazy_schedule_from_t&>().default_impl(std::declval<Scheduler>(), std::declval<Sender>())))
   -> sender decltype(auto) {
     if constexpr(tag_invocable<lazy_schedule_from_t, Scheduler, Sender>)
       return tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s));
@@ -2822,14 +2697,11 @@ struct lazy_schedule_from_t {
   : public _generic_receiver_wrapper<Receiver, set_value_t> {
     public:
     explicit done_receiver_wrapper(Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r))
     {}
 
-    friend auto tag_invoke([[maybe_unused]] set_value_t, done_receiver_wrapper&& self)
-    noexcept(noexcept(set_done(std::declval<done_receiver_wrapper>())))
-    -> decltype(auto) {
-      return set_done(std::move(self.r));
+    friend auto tag_invoke([[maybe_unused]] set_value_t, done_receiver_wrapper&& self) noexcept -> void {
+      set_done(std::move(self.r));
     }
   };
 
@@ -2842,21 +2714,17 @@ struct lazy_schedule_from_t {
   : public _generic_receiver_wrapper<Receiver, set_value_t> {
     public:
     error_receiver_wrapper(Receiver&& r, ErrorType&& err)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver> && std::is_nothrow_move_constructible_v<ErrorType>)
     : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
       err(std::move(err))
     {}
 
     error_receiver_wrapper(Receiver&& r, const ErrorType& err)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver> && std::is_nothrow_move_constructible_v<ErrorType>)
     : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
       err(err)
     {}
 
-    friend auto tag_invoke([[maybe_unused]] set_value_t, error_receiver_wrapper&& self)
-    noexcept(noexcept(set_error(std::declval<error_receiver_wrapper>(), std::declval<ErrorType>())))
-    -> decltype(auto) {
-      return set_error(std::move(self.r), std::move(self.err));
+    friend auto tag_invoke([[maybe_unused]] set_value_t, error_receiver_wrapper&& self) noexcept -> void {
+      set_error(std::move(self.r), std::move(self.err));
     }
 
     private:
@@ -2872,19 +2740,14 @@ struct lazy_schedule_from_t {
     public:
     template<typename... ValueTypes_>
     value_receiver_wrapper(Receiver&& r, ValueTypes_&&... value_types)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver> && std::is_nothrow_constructible_v<std::tuple<ValueTypes...>, ValueTypes_...>)
     : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
       values(std::forward<ValueTypes_>(value_types)...)
     {}
 
-    friend auto tag_invoke([[maybe_unused]] set_value_t, value_receiver_wrapper&& self)
-    noexcept(noexcept(set_value(std::declval<Receiver>(), std::declval<ValueTypes>()...)))
-    -> decltype(auto) {
-      return std::apply(
-          [&self](ValueTypes&&... values)
-          noexcept(noexcept(set_value(std::declval<Receiver>(), std::declval<ValueTypes>()...)))
-          -> decltype(auto) {
-            return set_value(std::move(self.r), std::move(values)...);
+    friend auto tag_invoke([[maybe_unused]] set_value_t, value_receiver_wrapper&& self) -> void {
+      std::apply(
+          [&self](ValueTypes&&... values) -> void {
+            set_value(std::move(self.r), std::move(values)...);
           },
           std::move(self.values));
     }
@@ -2911,7 +2774,7 @@ struct lazy_schedule_from_t {
             SignalReceiverWrapper<Receiver, Args...>(std::move(r), std::forward<Args_>(args)...)))
     {}
 
-    void start() noexcept(noexcept(::earnest::execution::start(std::declval<op_state_type&>()))) {
+    void start() noexcept {
       ::earnest::execution::start(impl);
     }
 
@@ -2933,7 +2796,6 @@ struct lazy_schedule_from_t {
   {
     public:
     receiver_impl(Scheduler&& sch, Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Scheduler> && std::is_nothrow_move_constructible_v<Receiver>)
     : _generic_receiver_wrapper<Receiver, set_value_t, set_error_t, set_done_t>(std::move(r)),
       sch(std::move(sch))
     {}
@@ -3070,7 +2932,6 @@ struct lazy_schedule_from_t {
     template<typename Sender_, typename Scheduler_>
     requires std::constructible_from<Sender, Sender_> && std::constructible_from<Scheduler, Scheduler_>
     sender_impl(Sender_&& sender, Scheduler_&& sch)
-    noexcept(std::is_nothrow_constructible_v<Sender, Sender_> && std::is_nothrow_constructible_v<Scheduler, Scheduler_>)
     : _generic_sender_wrapper<sender_impl, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>(std::move(sender)),
       sch(std::move(sch))
     {}
@@ -3081,37 +2942,27 @@ struct lazy_schedule_from_t {
     // That wrapped receiver will do the work of creating a new operation-state and executing the transfer.
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(
-        std::is_nothrow_constructible_v<receiver_type<Scheduler, Sender, std::remove_cvref_t<Receiver>>, Scheduler, Receiver> &&
-        noexcept(connect(std::declval<Sender>(), std::declval<receiver_type<Scheduler, Sender, std::remove_cvref_t<Receiver>>>())))
     -> operation_state decltype(auto) {
       return ::earnest::execution::connect(
           std::move(self.s),
           receiver_type<Scheduler, Sender, std::remove_cvref_t<Receiver>>(std::move(self.sch), std::forward<Receiver>(r)));
     }
 
-    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_value_t>, const sender_impl& self)
-    noexcept(std::is_nothrow_copy_constructible_v<Scheduler>)
-    -> Scheduler {
+    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_value_t>, const sender_impl& self) noexcept -> const Scheduler& {
       return self.sch;
     }
 
-    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_error_t>, const sender_impl& self)
-    noexcept(std::is_nothrow_copy_constructible_v<Scheduler>)
-    -> Scheduler {
+    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_error_t>, const sender_impl& self) -> const Scheduler& {
       return self.sch;
     }
 
-    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_done_t>, const sender_impl& self)
-    noexcept(std::is_nothrow_copy_constructible_v<Scheduler>)
-    -> Scheduler {
+    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_done_t>, const sender_impl& self) -> const Scheduler& {
       return self.sch;
     }
 
     private:
     template<sender OtherSender>
     auto rebind(OtherSender&& other_sender) &&
-    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Scheduler>, OtherSender, Scheduler>)
     -> sender_impl<std::remove_cvref_t<OtherSender>, Scheduler> {
       return sender_impl<std::remove_cvref_t<OtherSender>, Scheduler>(std::forward<OtherSender>(other_sender), std::move(sch));
     }
@@ -3121,7 +2972,6 @@ struct lazy_schedule_from_t {
 
   template<scheduler Scheduler, sender Sender>
   constexpr auto default_impl(Scheduler&& sch, Sender&& s) const
-  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Scheduler>>, Sender, Scheduler>)
   -> sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Scheduler>> {
     return sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Scheduler>>(std::forward<Sender>(s), std::forward<Scheduler>(sch));
   }
@@ -3136,10 +2986,6 @@ struct schedule_from_t {
 
   template<scheduler Scheduler, sender Sender>
   auto operator()(Scheduler&& sch, Sender&& s) const
-  noexcept(
-      tag_invocable<schedule_from_t, Scheduler, Sender> ?
-      nothrow_tag_invocable<schedule_from_t, Scheduler, Sender> :
-      noexcept(std::declval<const schedule_from_t&>().default_impl(std::declval<Scheduler>(), std::declval<Sender>())))
   -> sender decltype(auto) {
     if constexpr(tag_invocable<lazy_schedule_from_t, Scheduler, Sender>)
       return tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s));
@@ -3150,7 +2996,6 @@ struct schedule_from_t {
   private:
   template<scheduler Scheduler, sender Sender>
   constexpr auto default_impl(Scheduler&& sch, Sender&& s) const
-  noexcept(noexcept(lazy_schedule_from(std::declval<Scheduler>(), std::declval<Sender>())))
   -> sender decltype(auto) {
     return lazy_schedule_from(std::forward<Scheduler>(sch), std::forward<Sender>(s));
   }
@@ -3190,14 +3035,12 @@ struct transfer_t {
 
   template<sender Sender, scheduler Scheduler>
   constexpr auto operator()(Sender&& s, Scheduler&& sch) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const transfer_t&>(), std::declval<Sender>(), std::declval<Scheduler>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s), std::forward<Scheduler>(sch));
   }
 
   template<scheduler Scheduler>
   constexpr auto operator()(Scheduler&& sch) const
-  noexcept(noexcept(_generic_adapter(std::declval<const transfer_t&>(), std::declval<Scheduler>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Scheduler>(sch));
   }
@@ -3205,7 +3048,6 @@ struct transfer_t {
   private:
   template<sender Sender, scheduler Scheduler>
   constexpr auto default_impl(Sender&& s, Scheduler&& sch) const
-  noexcept(std::is_nothrow_invocable_v<const schedule_from_t&, Scheduler, Sender>)
   -> sender decltype(auto) {
     return schedule_from(std::forward<Scheduler>(sch), std::forward<Sender>(s));
   }
@@ -3219,7 +3061,6 @@ struct transfer_just_t {
 
   template<scheduler Scheduler, typename... Args>
   constexpr auto operator()(Scheduler&& sch, Args&&... args)
-  noexcept(noexcept(_generic_operand_base<>(std::declval<const transfer_just_t&>(), std::declval<Scheduler>(), std::declval<Args>()...)))
   -> sender decltype(auto) {
     return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Args>(args)...);
   }
@@ -3227,7 +3068,6 @@ struct transfer_just_t {
   private:
   template<scheduler Scheduler, typename... Args>
   constexpr auto default_impl(Scheduler&& sch, Args&&... args)
-  noexcept(noexcept(transfer(just(std::forward<Args>(args)...), std::forward<Scheduler>(sch))))
   -> sender decltype(auto) {
     return transfer(just(std::forward<Args>(args)...), std::forward<Scheduler>(sch));
   }
@@ -3312,9 +3152,6 @@ struct _let_adapter_common_t {
     private:
     template<std::size_t... Idx, typename Fn, typename Receiver, typename... Args_>
     constexpr values_and_opstate([[maybe_unused]] std::index_sequence<Idx...>, Fn&& fn, Receiver&& r, Args_&&... args)
-    noexcept(
-        (std::is_nothrow_constructible_v<Args, Args_> &&...) &&
-        noexcept(connect(std::invoke(std::declval<Fn>(), std::declval<Args&>()...), std::declval<Receiver>())))
     : args(std::forward<Args_>(args)...),
       opstate(
           connect(
@@ -3335,10 +3172,8 @@ struct _let_adapter_common_t {
     values_and_opstate& operator=(const values_and_opstate&) = delete;
     values_and_opstate& operator=(values_and_opstate&&) = delete;
 
-    auto start()
-    noexcept(noexcept(::earnest::execution::start(std::declval<OpState&>())))
-    -> decltype(auto) {
-      return ::earnest::execution::start(opstate);
+    auto start() noexcept -> void {
+      ::earnest::execution::start(opstate);
     }
 
     private:
@@ -3396,13 +3231,7 @@ struct _let_adapter_common_t {
     // Instantiate an opstate bound to the specific arguments.
     // And then starts that opstate.
     template<typename Fn, typename Receiver, typename... Args>
-    auto apply(Fn&& fn, Receiver&& r, Args&&... args)
-    noexcept(
-        std::is_nothrow_constructible_v<
-            typename values_and_opstate_type<Fn, Receiver>::template type<Args...>,
-            Fn, Receiver, Args...> &&
-        noexcept(std::declval<typename values_and_opstate_type<Fn, Receiver>::template type<Args...>&>().start()))
-    -> void {
+    auto apply(Fn&& fn, Receiver&& r, Args&&... args) -> void {
       using opstate_type = typename values_and_opstate_type<Fn, Receiver>::template type<Args...>;
       static_assert(std::disjunction_v<std::is_same<ValuesAndOpstates, opstate_type>...>,
           "chosen operation type must be present in the variant");
@@ -3452,13 +3281,11 @@ struct _let_adapter_common_t {
   {
     public:
     receiver_impl(Receiver&& r, Fn&& fn)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver> && std::is_nothrow_move_constructible_v<Fn>)
     : _generic_receiver_wrapper<Receiver, Signal>(std::move(r)),
       fn(std::move(fn))
     {}
 
     receiver_impl(const Receiver& r, Fn&& fn)
-    noexcept(std::is_nothrow_copy_constructible_v<Receiver> && std::is_nothrow_move_constructible_v<Fn>)
     : _generic_receiver_wrapper<Receiver, Signal>(r),
       fn(std::move(fn))
     {}
@@ -3609,21 +3436,12 @@ struct _let_adapter_common_t {
     template<typename Sender_, typename Fn_>
     requires std::constructible_from<Sender, Sender_> && std::constructible_from<Fn, Fn_>
     constexpr sender_impl(Sender_&& s, Fn_&& fn)
-    noexcept(std::is_nothrow_constructible_v<Sender, Sender_> && std::is_nothrow_constructible_v<Fn, Fn_>)
     : sender_types_for_impl<Sender, Signal, Fn>(std::forward<Sender_>(s)),
       fn(std::forward<Fn_>(fn))
     {}
 
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(
-        std::is_nothrow_constructible_v<
-            wrapped_receiver_type<std::remove_cvref_t<Receiver>>,
-            Receiver, Fn> &&
-        noexcept(
-            ::earnest::execution::connect(
-                std::declval<Sender>(),
-                std::declval<wrapped_receiver_type<std::remove_cvref_t<Receiver>>>())))
     -> operation_state decltype(auto) {
       return ::earnest::execution::connect(
           std::move(self.s),
@@ -3633,7 +3451,6 @@ struct _let_adapter_common_t {
     private:
     template<sender OtherSender>
     auto rebind(OtherSender&& other_sender) &&
-    noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<OtherSender>, Signal, Fn>, OtherSender, Fn>)
     -> sender_impl<std::remove_cvref_t<OtherSender>, Signal, Fn> {
       return sender_impl<std::remove_cvref_t<OtherSender>, Signal, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
     }
@@ -3645,7 +3462,6 @@ struct _let_adapter_common_t {
   public:
   template<typename Signal, sender Sender, typename Fn>
   static constexpr auto impl(Sender&& s, Fn&& fn)
-  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<Sender>, Signal, std::remove_cvref_t<Fn>>, Sender, Fn>)
   -> sender decltype(auto) {
     return sender_impl<std::remove_cvref_t<Sender>, Signal, std::remove_cvref_t<Fn>>(std::forward<Sender>(s), std::forward<Fn>(fn));
   }
@@ -3669,14 +3485,12 @@ struct lazy_let_value_t {
   // Fn will return a sender, and we'll run that next.
   template<sender Sender, typename Fn>
   constexpr auto operator()(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const lazy_let_value_t&>(), std::declval<Sender>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s), std::forward<Fn>(fn));
   }
 
   template<typename Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const lazy_let_value_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -3684,7 +3498,6 @@ struct lazy_let_value_t {
   private:
   template<sender Sender, typename Fn>
   constexpr auto default_impl(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(_let_adapter_common_t::impl<set_value_t>(std::forward<Sender>(s), std::forward<Fn>(fn))))
   -> sender decltype(auto) {
     return _let_adapter_common_t::impl<set_value_t>(std::forward<Sender>(s), std::forward<Fn>(fn));
   }
@@ -3707,14 +3520,12 @@ struct let_value_t {
   // Fn will return a sender, and we'll run that next.
   template<sender Sender, typename Fn>
   constexpr auto operator()(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const let_value_t&>(), std::declval<Sender>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s), std::forward<Fn>(fn));
   }
 
   template<typename Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const let_value_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -3722,7 +3533,6 @@ struct let_value_t {
   private:
   template<sender Sender, typename Fn>
   constexpr auto default_impl(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(lazy_let_value(std::forward<Sender>(s), std::forward<Fn>(fn))))
   -> sender decltype(auto) {
     return lazy_let_value(std::forward<Sender>(s), std::forward<Fn>(fn));
   }
@@ -3747,14 +3557,12 @@ struct lazy_let_error_t {
   // Fn will return a sender, and we'll run that next.
   template<sender Sender, typename Fn>
   constexpr auto operator()(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_error_t>(std::declval<const lazy_let_error_t&>(), std::declval<Sender>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_error_t>(*this, std::forward<Sender>(s), std::forward<Fn>(fn));
   }
 
   template<typename Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const lazy_let_error_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -3762,7 +3570,6 @@ struct lazy_let_error_t {
   private:
   template<sender Sender, typename Fn>
   constexpr auto default_impl(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(_let_adapter_common_t::impl<set_error_t>(std::forward<Sender>(s), std::forward<Fn>(fn))))
   -> sender decltype(auto) {
     return _let_adapter_common_t::impl<set_error_t>(std::forward<Sender>(s), std::forward<Fn>(fn));
   }
@@ -3785,14 +3592,12 @@ struct let_error_t {
   // Fn will return a sender, and we'll run that next.
   template<sender Sender, typename Fn>
   constexpr auto operator()(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_error_t>(std::declval<const let_error_t&>(), std::declval<Sender>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_error_t>(*this, std::forward<Sender>(s), std::forward<Fn>(fn));
   }
 
   template<typename Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const let_error_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -3800,7 +3605,6 @@ struct let_error_t {
   private:
   template<sender Sender, typename Fn>
   constexpr auto default_impl(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(lazy_let_error(std::forward<Sender>(s), std::forward<Fn>(fn))))
   -> sender decltype(auto) {
     return lazy_let_error(std::forward<Sender>(s), std::forward<Fn>(fn));
   }
@@ -3821,14 +3625,12 @@ struct lazy_let_done_t {
   // Fn will return a sender, and we'll run that next.
   template<sender Sender, typename Fn>
   constexpr auto operator()(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_done_t>(std::declval<const lazy_let_done_t&>(), std::declval<Sender>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_done_t>(*this, std::forward<Sender>(s), std::forward<Fn>(fn));
   }
 
   template<typename Fn>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const lazy_let_done_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -3836,7 +3638,6 @@ struct lazy_let_done_t {
   private:
   template<sender Sender, typename Fn>
   constexpr auto default_impl(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(_let_adapter_common_t::impl<set_done_t>(std::forward<Sender>(s), std::forward<Fn>(fn))))
   -> sender decltype(auto) {
     return _let_adapter_common_t::impl<set_done_t>(std::forward<Sender>(s), std::forward<Fn>(fn));
   }
@@ -3856,7 +3657,6 @@ struct let_done_t {
   template<sender Sender, std::invocable<> Fn>
   requires typed_sender<std::invoke_result_t<Fn>>
   constexpr auto operator()(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_done_t>(std::declval<const let_done_t&>(), std::declval<Sender>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_done_t>(*this, std::forward<Sender>(s), std::forward<Fn>(fn));
   }
@@ -3864,7 +3664,6 @@ struct let_done_t {
   template<std::invocable<> Fn>
   requires typed_sender<std::invoke_result_t<Fn>>
   constexpr auto operator()(Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const let_done_t&>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Fn>(fn));
   }
@@ -3873,7 +3672,6 @@ struct let_done_t {
   template<sender Sender, std::invocable<> Fn>
   requires typed_sender<std::invoke_result_t<Fn>>
   constexpr auto default_impl(Sender&& s, Fn&& fn) const
-  noexcept(noexcept(lazy_let_done(std::forward<Sender>(s), std::forward<Fn>(fn))))
   -> sender decltype(auto) {
     return lazy_let_done(std::forward<Sender>(s), std::forward<Fn>(fn));
   }
@@ -3896,14 +3694,12 @@ struct lazy_bulk_t {
 
   template<sender Sender, std::integral Shape, typename Fn>
   constexpr auto operator()(Sender&& s, Shape&& shape, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const lazy_bulk_t&>(), std::declval<Sender>(), std::declval<Shape>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s), std::forward<Shape>(shape), std::forward<Fn>(fn));
   }
 
   template<std::integral Shape, typename Fn>
   constexpr auto operator()(Shape&& shape, Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const lazy_bulk_t&>(), std::declval<Shape>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Shape>(shape), std::forward<Fn>(fn));
   }
@@ -3918,25 +3714,16 @@ struct lazy_bulk_t {
   {
     public:
     receiver_impl(Receiver&& r, Shape&& shape, Fn&& fn)
-    noexcept(
-        std::is_nothrow_move_constructible_v<Receiver> &&
-        std::is_nothrow_move_constructible_v<Shape> &&
-        std::is_nothrow_move_constructible_v<Fn>)
     : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
       shape(std::move(shape)),
       fn(std::move(fn))
     {}
 
     template<typename... Args>
-    friend auto tag_invoke([[maybe_unused]] set_value_t, receiver_impl&& self, Args&&... args)
-    noexcept(
-        noexcept(Shape(0)) && noexcept(std::declval<const Shape&>() < std::declval<const Shape&>()) && noexcept(++std::declval<Shape&>()) && // Confirm we can execute the for-loop.
-        std::is_nothrow_invocable_v<Fn, const Shape&, std::add_lvalue_reference_t<std::remove_reference_t<Args>>...> &&
-        noexcept(set_value(std::declval<Receiver>(), std::declval<Args>()...)))
-    -> decltype(auto) {
+    friend auto tag_invoke([[maybe_unused]] set_value_t, receiver_impl&& self, Args&&... args) -> void {
       for (Shape i = Shape(0); i < self.shape; ++i)
         std::invoke(self.fn, std::as_const(i), args...);
-      return set_value(std::move(self.r), std::forward<Args>(args)...);
+      set_value(std::move(self.r), std::forward<Args>(args)...);
     }
 
     private:
@@ -3955,10 +3742,6 @@ struct lazy_bulk_t {
     template<typename Sender_, typename Shape_, typename Fn_>
     requires std::constructible_from<Sender, Sender_> && std::constructible_from<Shape, Shape_> && std::constructible_from<Fn, Fn_>
     sender_impl(Sender_&& s, Shape_&& shape, Fn_&& fn)
-    noexcept(
-        std::is_nothrow_constructible_v<Sender, Sender_> &&
-        std::is_nothrow_constructible_v<Shape, Shape_> &&
-        std::is_nothrow_constructible_v<Fn, Fn_>)
     : _generic_sender_wrapper<sender_impl<Sender, Shape, Fn>, Sender, connect_t>(std::forward<Sender_>(s)),
       shape(std::forward<Shape_>(shape)),
       fn(std::forward<Fn_>(fn))
@@ -3966,11 +3749,6 @@ struct lazy_bulk_t {
 
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(
-        std::is_nothrow_constructible_v<
-            receiver_impl<std::remove_cvref_t<Receiver>, Shape, Fn>,
-            Receiver, Shape, Fn> &&
-        noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl<std::remove_cvref_t<Receiver>, Shape, Fn>>())))
     -> operation_state decltype(auto) {
       return ::earnest::execution::connect(
           std::move(self.s),
@@ -3980,9 +3758,6 @@ struct lazy_bulk_t {
     private:
     template<sender OtherSender>
     auto rebind(OtherSender&& other_sender) &&
-    noexcept(std::is_nothrow_constructible_v<
-        sender_impl<std::remove_cvref_t<OtherSender>, Shape, Fn>,
-        OtherSender, Shape, Fn>)
     -> sender_impl<std::remove_cvref_t<OtherSender>, Shape, Fn> {
       return sender_impl<std::remove_cvref_t<OtherSender>, Shape, Fn>(std::forward<OtherSender>(other_sender), std::move(shape), std::move(fn));
     }
@@ -3993,9 +3768,6 @@ struct lazy_bulk_t {
 
   template<sender Sender, std::integral Shape, typename Fn>
   constexpr auto default_impl(Sender&& s, Shape&& shape, Fn&& fn) const
-  noexcept(std::is_nothrow_constructible_v<
-      sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Shape>, std::remove_cvref_t<Fn>>,
-      Sender, Shape, Fn>)
   -> sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Shape>, std::remove_cvref_t<Fn>> {
     return sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Shape>, std::remove_cvref_t<Fn>>(
         std::forward<Sender>(s), std::forward<Shape>(shape), std::forward<Fn>(fn));
@@ -4019,14 +3791,12 @@ struct bulk_t {
   // Fn will return a sender, and we'll run that next.
   template<sender Sender, std::integral Shape, typename Fn>
   constexpr auto operator()(Sender&& s, Shape&& shape, Fn&& fn) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const bulk_t&>(), std::declval<Sender>(), std::declval<Shape>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s), std::forward<Shape>(shape), std::forward<Fn>(fn));
   }
 
   template<std::integral Shape, typename Fn>
   constexpr auto operator()(Shape&& shape, Fn&& fn) const
-  noexcept(noexcept(_generic_adapter(std::declval<const bulk_t&>(), std::declval<Shape>(), std::declval<Fn>())))
   -> decltype(auto) {
     return _generic_adapter(*this, std::forward<Shape>(shape), std::forward<Fn>(fn));
   }
@@ -4034,7 +3804,6 @@ struct bulk_t {
   private:
   template<sender Sender, std::integral Shape, typename Fn>
   constexpr auto default_impl(Sender&& s, Shape&& shape, Fn&& fn) const
-  noexcept(noexcept(lazy_bulk(std::declval<Sender>(), std::declval<Shape>(), std::declval<Fn>())))
   -> sender decltype(auto) {
     return lazy_bulk(std::forward<Sender>(s), std::forward<Shape>(shape), std::forward<Fn>(fn));
   }
@@ -4071,13 +3840,11 @@ struct ensure_started_t {
 
   template<typed_sender Sender>
   constexpr auto operator()(Sender&& s) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<const ensure_started_t>(), std::declval<Sender>())))
   -> typed_sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
   }
 
   constexpr auto operator()() const
-  noexcept(noexcept(_generic_adapter(std::declval<const ensure_started_t&>())))
   -> decltype(auto) {
     return _generic_adapter(*this);
   }
@@ -4096,7 +3863,6 @@ struct ensure_started_t {
 
     template<typename... T_>
     explicit outcome(T_&&... values)
-    noexcept(std::is_nothrow_constructible_v<std::tuple<T...>, T_...>)
     : values(std::forward<T_>(values)...)
     {}
 
@@ -4125,7 +3891,6 @@ struct ensure_started_t {
 
     template<typename Error_>
     explicit outcome(Error_&& error)
-    noexcept(std::is_nothrow_constructible_v<Error, Error_>)
     : error(std::forward<Error_>(error))
     {}
 
@@ -4461,7 +4226,6 @@ struct ensure_started_t {
   {
     public:
     explicit opstate(std::shared_ptr<OutcomeHandlerType>&& outcome_handler, Receiver&& r)
-    noexcept(std::is_nothrow_move_constructible_v<Receiver>)
     : outcome_handler(std::move(outcome_handler)),
       next_receiver(std::move(r))
     {}
@@ -4523,9 +4287,6 @@ struct ensure_started_t {
 
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(std::is_nothrow_constructible_v<
-        opstate<outcome_handler_type, std::remove_cvref_t<Receiver>>,
-        std::shared_ptr<outcome_handler_type>, Receiver>)
     -> opstate<outcome_handler_type, std::remove_cvref_t<Receiver>> {
       return opstate<outcome_handler_type, std::remove_cvref_t<Receiver>>(std::move(self.handler), std::forward<Receiver>(r));
     }
@@ -4540,7 +4301,6 @@ struct ensure_started_t {
   // because the `make_handler' function performs a heap allocation.
   template<typed_sender Sender>
   auto default_impl(Sender&& s) const
-  noexcept(noexcept(make_handler(std::declval<Sender>())))
   -> typed_sender decltype(auto) {
     using outcome_handler_type = outcome_handler<all_outcomes<std::remove_cvref_t<Sender>>, sender_traits<std::remove_cvref_t<Sender>>::sends_done>;
     return sender_impl<outcome_handler_type>(make_handler(std::forward<Sender>(s)));
@@ -4580,7 +4340,6 @@ struct when_all_t {
   template<typed_sender... Sender>
   requires ((std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1) &&...)
   constexpr auto operator()(Sender&&... s) const
-  noexcept(noexcept(_generic_operand_base<>(std::declval<when_all_t>(), std::declval<Sender>()...)))
   -> typed_sender decltype(auto) {
     return _generic_operand_base<>(*this, std::forward<Sender>(s)...);
   }
@@ -4609,9 +4368,6 @@ struct when_all_t {
     template<typename... Args>
     requires std::constructible_from<TupleType, Args...>
     friend auto tag_invoke([[maybe_unused]] set_value_t, local_receiver_impl&& self, Args&&... args)
-    noexcept(
-        std::is_nothrow_constructible_v<TupleType, Args...> &&
-        noexcept(::earnest::execution::set_value(std::declval<Receiver>())))
     -> void {
       assert(!self.outcome->has_value());
       self.outcome->emplace(std::forward<Args>(args)...); // Save our value (may throw).
@@ -4636,9 +4392,6 @@ struct when_all_t {
 
     public:
     explicit local_opstate(Sender&& s, Receiver&& r)
-    noexcept(
-        noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>())) &&
-        std::is_nothrow_constructible_v<receiver_impl, Receiver, std::optional<tuple_type>*>)
     : impl(::earnest::execution::connect(std::forward<Sender>(s), receiver_impl(std::move(r), &this->values)))
     {}
 
@@ -4647,9 +4400,6 @@ struct when_all_t {
     // and tuples don't have a `std::tuple(std::inplace, tuple-of-args...)'
     // style constructor.
     explicit local_opstate(std::tuple<Sender&&, Receiver&&> tpl)
-    noexcept(
-        noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>())) &&
-        std::is_nothrow_constructible_v<receiver_impl, Receiver, std::optional<tuple_type>*>)
     : local_opstate(std::get<0>(std::move(tpl)), std::get<1>(std::move(tpl)))
     {}
 
@@ -4697,7 +4447,6 @@ struct when_all_t {
 
     public:
     explicit local_opstate(Sender&& s, Receiver&& r)
-    noexcept(noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>())))
     : impl(::earnest::execution::connect(std::forward<Sender>(s), std::move(r)))
     {}
 
@@ -4706,7 +4455,6 @@ struct when_all_t {
     // and tuples don't have a `std::tuple(std::inplace, tuple-of-args...)'
     // style constructor.
     explicit local_opstate(std::tuple<Sender&&, Receiver&&> tpl)
-    noexcept(noexcept(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_impl>())))
     : local_opstate(std::get<0>(std::move(tpl)), std::get<1>(std::move(tpl)))
     {}
 
@@ -5126,15 +4874,11 @@ struct when_all_t {
 
     template<typename... Sender_>
     explicit constexpr sender_impl(Sender_&&... s)
-    noexcept(std::is_nothrow_constructible_v<std::tuple<Sender...>, Sender_...>)
     : senders(std::forward<Sender_>(s)...)
     {}
 
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(std::is_nothrow_constructible_v<
-        opstate<std::remove_cvref_t<Receiver>, Sender...>,
-        Receiver, Sender...>)
     -> operation_state decltype(auto) {
       return std::apply(
           [&](auto&&... s) {
@@ -5152,7 +4896,6 @@ struct when_all_t {
   template<typed_sender... Sender, typename = std::enable_if_t<(sizeof...(Sender) >= 2)>>
   requires ((std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1) &&...)
   constexpr auto default_impl(Sender&&... s) const
-  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<Sender>...>, Sender...>)
   -> sender_impl<std::remove_cvref_t<Sender>...> {
     return sender_impl<std::remove_cvref_t<Sender>...>(std::forward<Sender>(s)...);
   }
@@ -5183,7 +4926,6 @@ struct when_all_with_variant_t {
 
   template<typed_sender... Sender>
   constexpr auto operator()(Sender&&... s) const
-  noexcept(noexcept(_generic_operand_base<>(std::declval<when_all_with_variant_t>(), std::declval<Sender>()...)))
   -> typed_sender decltype(auto) {
     return _generic_operand_base<>(*this, std::forward<Sender>(s)...);
   }
@@ -5191,7 +4933,6 @@ struct when_all_with_variant_t {
   private:
   template<typed_sender... Sender>
   constexpr auto default_impl(Sender&&... s) const
-  noexcept(noexcept(::earnest::execution::when_all(::earnest::execution::into_variant(std::declval<Sender>())...)))
   -> typed_sender decltype(auto) {
     return ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...);
   }
@@ -5205,7 +4946,6 @@ struct transfer_when_all_t {
 
   template<scheduler Scheduler, typed_sender... Sender>
   constexpr auto operator()(Scheduler&& sch, Sender&&... s) const
-  noexcept(noexcept(_generic_operand_base<>(std::declval<transfer_when_all_t>(), std::declval<Scheduler>(), std::declval<Sender>()...)))
   -> typed_sender decltype(auto) {
     return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s)...);
   }
@@ -5213,7 +4953,6 @@ struct transfer_when_all_t {
   private:
   template<scheduler Scheduler, typed_sender... Sender>
   constexpr auto default_impl(Scheduler&& sch, Sender&&... s) const
-  noexcept(noexcept(::earnest::execution::transfer(::earnest::execution::when_all(std::forward<Sender>(s)...), std::forward<Scheduler>(sch))))
   -> typed_sender decltype(auto) {
     return ::earnest::execution::transfer(
         ::earnest::execution::when_all(std::forward<Sender>(s)...),
@@ -5229,7 +4968,6 @@ struct lazy_transfer_when_all_t {
 
   template<scheduler Scheduler, typed_sender... Sender>
   constexpr auto operator()(Scheduler&& sch, Sender&&... s) const
-  noexcept(noexcept(_generic_operand_base<>(std::declval<lazy_transfer_when_all_t>(), std::declval<Scheduler>(), std::declval<Sender>()...)))
   -> typed_sender decltype(auto) {
     return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s)...);
   }
@@ -5237,7 +4975,6 @@ struct lazy_transfer_when_all_t {
   private:
   template<scheduler Scheduler, typed_sender... Sender>
   constexpr auto default_impl(Scheduler&& sch, Sender&&... s) const
-  noexcept(noexcept(::earnest::execution::lazy_transfer(::earnest::execution::when_all(std::forward<Sender>(s)...), std::forward<Scheduler>(sch))))
   -> typed_sender decltype(auto) {
     return ::earnest::execution::lazy_transfer(
         ::earnest::execution::when_all(std::forward<Sender>(s)...),
@@ -5253,7 +4990,6 @@ struct transfer_when_all_with_variant_t {
 
   template<scheduler Scheduler, typed_sender... Sender>
   constexpr auto operator()(Scheduler&& sch, Sender&&... s) const
-  noexcept(noexcept(_generic_operand_base<>(std::declval<transfer_when_all_with_variant_t>(), std::declval<Scheduler>(), std::declval<Sender>()...)))
   -> typed_sender decltype(auto) {
     return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s)...);
   }
@@ -5261,10 +4997,6 @@ struct transfer_when_all_with_variant_t {
   private:
   template<scheduler Scheduler, typed_sender... Sender>
   constexpr auto default_impl(Scheduler&& sch, Sender&&... s) const
-  noexcept(noexcept(
-          ::earnest::execution::transfer(
-              ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...),
-              std::forward<Scheduler>(sch))))
   -> typed_sender decltype(auto) {
     return ::earnest::execution::transfer(
         ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...),
@@ -5280,7 +5012,6 @@ struct lazy_transfer_when_all_with_variant_t {
 
   template<scheduler Scheduler, typed_sender... Sender>
   constexpr auto operator()(Scheduler&& sch, Sender&&... s) const
-  noexcept(noexcept(_generic_operand_base<>(std::declval<lazy_transfer_when_all_with_variant_t>(), std::declval<Scheduler>(), std::declval<Sender>()...)))
   -> typed_sender decltype(auto) {
     return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s)...);
   }
@@ -5288,10 +5019,6 @@ struct lazy_transfer_when_all_with_variant_t {
   private:
   template<scheduler Scheduler, typed_sender... Sender>
   constexpr auto default_impl(Scheduler&& sch, Sender&&... s) const
-  noexcept(noexcept(
-          ::earnest::execution::lazy_transfer(
-              ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...),
-              std::forward<Scheduler>(sch))))
   -> typed_sender decltype(auto) {
     return ::earnest::execution::lazy_transfer(
         ::earnest::execution::when_all(::earnest::execution::into_variant(std::forward<Sender>(s))...),
@@ -5308,7 +5035,6 @@ struct lazy_split_t {
 
   template<typed_sender Sender>
   constexpr auto operator()(Sender&& s) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<lazy_split_t>(), std::declval<Sender>())))
   -> typed_sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
   }
@@ -5319,7 +5045,6 @@ struct lazy_split_t {
     public:
     template<typename... Args_>
     explicit constexpr value_outcome(Args_&&... args)
-    noexcept(std::is_nothrow_constructible_v<std::tuple<Args...>, Args_...>)
     : values(std::forward<Args_>(args)...)
     {}
 
@@ -5327,7 +5052,11 @@ struct lazy_split_t {
     auto apply(Receiver&& r) const noexcept -> void {
       std::apply(
           [&r](const auto&... args) -> void {
-            ::earnest::execution::set_value(std::forward<Receiver>(r), args...);
+            try {
+              ::earnest::execution::set_value(std::forward<Receiver>(r), args...);
+            } catch (...) {
+              ::earnest::execution::set_error(std::forward<Receiver>(r), std::current_exception());
+            }
           },
           values);
     }
@@ -5475,7 +5204,15 @@ struct lazy_split_t {
 
         {
           std::lock_guard lck{self.state.mtx};
-          self.state.outcome.template emplace<outcome_type>(std::forward<Error>(error));
+          if constexpr(std::same_as<std::remove_cvref_t<Error>, std::exception_ptr>) {
+            self.state.outcome.template emplace<outcome_type>(std::forward<Error>(error));
+          } else {
+            try {
+              self.state.outcome.template emplace<outcome_type>(std::forward<Error>(error));
+            } catch (...) {
+              self.state.outcome.template emplace<error_outcome<std::exception_ptr>>(std::current_exception());
+            }
+          }
         }
 
         self.state.notify();
@@ -5646,14 +5383,12 @@ struct lazy_split_t {
   {
     public:
     explicit opstate(std::shared_ptr<shared_opstate<Sender>>&& shared_state, Receiver&& r)
-    noexcept(std::is_nothrow_move_assignable_v<Receiver>)
     : opstate_link(&callback_impl),
       r(std::move(r)),
       shared_state(std::move(shared_state))
     {}
 
     explicit opstate(const std::shared_ptr<shared_opstate<Sender>>& shared_state, Receiver&& r)
-    noexcept(std::is_nothrow_move_assignable_v<Receiver>)
     : opstate_link(&callback_impl),
       r(std::move(r)),
       shared_state(shared_state)
@@ -5691,14 +5426,13 @@ struct lazy_split_t {
 
     template<typename Sender_>
     requires std::constructible_from<shared_opstate<Sender>, Sender_>
-    explicit constexpr sender_impl(Sender_&& s) noexcept(std::is_nothrow_constructible_v<Sender, Sender_>)
+    explicit constexpr sender_impl(Sender_&& s)
     : shared_state(std::make_shared<shared_opstate<Sender>>(std::forward<Sender_>(s)))
     {}
 
     // Connect to a receiver.
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(std::is_nothrow_constructible_v<opstate<Sender, std::remove_cvref_t<Receiver>>, std::shared_ptr<shared_opstate<Sender>>, Receiver>)
     -> opstate<Sender, std::remove_cvref_t<Receiver>> {
       return opstate<Sender, std::remove_cvref_t<Receiver>>(std::move(self.shared_state), std::forward<Receiver>(r));
     }
@@ -5707,7 +5441,6 @@ struct lazy_split_t {
     // This connect takes `sender_impl' as by const-reference, permitting re-use.
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, const sender_impl& self, Receiver&& r)
-    noexcept(std::is_nothrow_constructible_v<opstate<Sender, std::remove_cvref_t<Receiver>>, std::shared_ptr<shared_opstate<Sender>>, Receiver>)
     -> opstate<Sender, std::remove_cvref_t<Receiver>> {
       return opstate<Sender, std::remove_cvref_t<Receiver>>(self.shared_state, std::forward<Receiver>(r));
     }
@@ -5718,7 +5451,6 @@ struct lazy_split_t {
 
   template<typed_sender Sender>
   constexpr auto default_impl(Sender&& s) const
-  noexcept(std::is_nothrow_constructible_v<sender_impl<std::remove_cvref_t<Sender>>, Sender>)
   -> sender_impl<std::remove_cvref_t<Sender>> {
     return sender_impl<std::remove_cvref_t<Sender>>(std::forward<Sender>(s));
   }
@@ -5733,7 +5465,6 @@ struct split_t {
 
   template<typed_sender Sender>
   constexpr auto operator()(Sender&& s) const
-  noexcept(noexcept(_generic_operand_base<set_value_t>(std::declval<split_t>(), std::declval<Sender>())))
   -> typed_sender decltype(auto) {
     return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
   }
@@ -5741,7 +5472,6 @@ struct split_t {
   private:
   template<typed_sender Sender>
   constexpr auto default_impl(Sender&& s) const
-  noexcept(noexcept(lazy_split(std::forward<Sender>(s))))
   -> typed_sender decltype(auto) {
     return lazy_split(std::forward<Sender>(s));
   }
@@ -5752,10 +5482,6 @@ inline constexpr split_t split{};
 struct lazy_on_t {
   template<scheduler Scheduler, typed_sender Sender>
   constexpr auto operator()(Scheduler&& sch, Sender&& s) const
-  noexcept(
-      tag_invocable<lazy_on_t, Scheduler, Sender> ?
-      nothrow_tag_invocable<lazy_on_t, Scheduler, Sender> :
-      noexcept(std::declval<const lazy_on_t&>().default_impl(std::forward<Scheduler>(sch), std::forward<Sender>(s))))
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_on_t, Scheduler, Sender>)
       return ::earnest::execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s));
@@ -5786,7 +5512,6 @@ struct lazy_on_t {
     {
       public:
       explicit scheduler_receiver(LocalReceiver&& r, opstate& state)
-      noexcept(std::is_nothrow_move_constructible_v<LocalReceiver>)
       : _generic_receiver_wrapper<LocalReceiver, set_value_t, set_error_t, set_done_t, get_scheduler_t>(std::move(r)),
         state(state)
       {}
@@ -5865,10 +5590,6 @@ struct lazy_on_t {
 
     public:
     opstate(Scheduler&& sch, Sender&& s, Receiver&& r)
-    noexcept(
-        std::is_nothrow_move_constructible_v<Scheduler> &&
-        std::is_nothrow_move_constructible_v<Sender> &&
-        std::is_nothrow_move_constructible_v<Receiver>)
     : sch(std::move(sch)),
       s(std::move(s)),
       r(std::move(r))
@@ -5900,16 +5621,12 @@ struct lazy_on_t {
     template<typename Scheduler_, typename Sender_>
     requires std::constructible_from<Scheduler, Scheduler_> && std::constructible_from<Sender, Sender_>
     constexpr sender_impl(Scheduler_&& sch, Sender_&& s)
-    noexcept(std::is_nothrow_constructible_v<Scheduler, Scheduler_> && std::is_nothrow_constructible_v<Sender, Sender_>)
     : _generic_sender_wrapper<sender_impl<Scheduler, Sender>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>(std::forward<Sender_>(s)),
       sch(std::forward<Scheduler_>(sch))
     {}
 
     template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
-    noexcept(std::is_nothrow_constructible_v<
-        opstate<Scheduler, Sender, std::remove_cvref_t<Receiver>>,
-        Scheduler, Sender, Receiver>)
     -> opstate<Scheduler, Sender, std::remove_cvref_t<Receiver>> {
       return opstate<Scheduler, Sender, std::remove_cvref_t<Receiver>>(std::move(self.sch), std::move(self.s), std::forward<Receiver>(r));
     }
@@ -5920,9 +5637,6 @@ struct lazy_on_t {
 
   template<scheduler Scheduler, typed_sender Sender>
   constexpr auto default_impl(Scheduler&& sch, Sender&& s) const
-  noexcept(std::is_nothrow_constructible_v<
-      sender_impl<std::remove_cvref_t<Scheduler>, std::remove_cvref_t<Sender>>,
-      Scheduler, Sender>)
   -> sender_impl<std::remove_cvref_t<Scheduler>, std::remove_cvref_t<Sender>> {
     return sender_impl<std::remove_cvref_t<Scheduler>, std::remove_cvref_t<Sender>>(std::forward<Scheduler>(sch), std::forward<Sender>(s));
   }
@@ -5933,10 +5647,6 @@ inline constexpr lazy_on_t lazy_on{};
 struct on_t {
   template<scheduler Scheduler, typed_sender Sender>
   constexpr auto operator()(Scheduler&& sch, Sender&& s) const
-  noexcept(
-      tag_invocable<on_t, Scheduler, Sender> ?
-      nothrow_tag_invocable<on_t, Scheduler, Sender> :
-      noexcept(lazy_on(std::forward<Scheduler>(sch), std::forward<Sender>(s))))
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<on_t, Scheduler, Sender>)
       return ::earnest::execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s));

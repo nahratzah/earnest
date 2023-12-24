@@ -615,52 +615,5 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
       token, write_offset, std::move(bytes), std::forward<Barrier>(barrier), std::forward<Fanout>(f), this->shared_from_this(), std::forward<DeferredTransactionValidator>(deferred_transaction_validator), std::move(converted_records), delay_flush);
 }
 
-template<typename Executor, typename Allocator>
-template<typename CompletionToken>
-inline auto wal_file_entry<Executor, Allocator>::write_skip_record_(
-    typename fd_type::offset_type write_offset,
-    std::size_t bytes, CompletionToken&& token) {
-  if (bytes == 0) {
-    auto skip_record = std::array<std::byte, 4>{ std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x01} };
-    return write_link_(write_offset, std::move(skip_record), std::forward<CompletionToken>(token));
-  }
-
-  assert(bytes >= 4u);
-  return asio::async_initiate<CompletionToken, void(std::error_code)>(
-      [](auto completion_handler, auto write_offset, std::size_t bytes, std::shared_ptr<wal_file_entry> wf) {
-        using pos_stream = positional_stream_adapter<fd_type&>;
-
-        std::unique_ptr<pos_stream> s = std::make_unique<pos_stream>(wf->file, write_offset);
-        auto& stream = *s;
-
-        if (bytes - 4u <= 0xffff'ffffu) {
-          return async_write(
-              stream,
-              ::earnest::xdr_writer<>() & xdr_constant(bytes - 4u).as(xdr_uint32),
-              completion_wrapper<void(std::error_code)>(
-                  std::move(completion_handler),
-                  [ wf, write_offset,
-                    stream_ptr=std::move(s)
-                  ](auto completion_handler, std::error_code) mutable {
-                    auto skip_bytes32_record = std::array<std::byte, 4>{ std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x02} };
-                    wf->write_link_(write_offset, std::move(skip_bytes32_record), std::move(completion_handler));
-                  }));
-        } else {
-          return async_write(
-              stream,
-              ::earnest::xdr_writer<>() & xdr_constant(bytes - 8u).as(xdr_uint64),
-              completion_wrapper<void(std::error_code)>(
-                  std::move(completion_handler),
-                  [ wf, write_offset,
-                    stream_ptr=std::move(s)
-                  ](auto completion_handler, std::error_code) mutable {
-                    auto skip_bytes64_record = std::array<std::byte, 4>{ std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x03} };
-                    wf->write_link_(write_offset, std::move(skip_bytes64_record), std::move(completion_handler));
-                  }));
-        }
-      },
-      token, write_offset, bytes, this->shared_from_this());
-}
-
 
 } /* namespace earnest::detail */
