@@ -214,6 +214,24 @@ inline auto vectorize_const_buffers(Buffers&& buf, TransformFn&& transform_fn)
 #endif
 }
 
+// Convert a buffer sequence into a single buffer.
+template<const_buffer_sequence Buffers>
+auto first_buffer(Buffers&& buffers) -> std::span<const std::byte> {
+  for (std::span<const std::byte> buf : buffers) {
+    if (!buf.empty()) return buf;
+  }
+  return {};
+}
+
+// Convert a buffer sequence into a single buffer.
+template<mutable_buffer_sequence Buffers>
+auto first_buffer(Buffers&& buffers) -> std::span<std::byte> {
+  for (std::span<std::byte> buf : buffers) {
+    if (!buf.empty()) return buf;
+  }
+  return {};
+}
+
 
 // The buffer aspect of a readwrite-state.
 //
@@ -2181,12 +2199,23 @@ inline constexpr write_t write{};
 
 struct read_some_at_ec_t {
   template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<read_some_at_ec_t, FD, offset_type, std::span<std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<read_some_at_ec_t, FD, offset_type, std::span<std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf));
     else
-      return lazy_read_some_at_ec(std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+      return lazy_read_some_at_ec(std::forward<FD>(fd), std::move(offset), std::move(buf));
+  }
+
+  template<typename FD, mutable_buffer_sequence Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buffers) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<read_some_at_ec_t, FD, offset_type, Buffers>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buffers));
+    else if constexpr(tag_invocable<read_some_at_ec_t, FD, offset_type, std::span<std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), first_buffer(std::forward<Buffers>(buffers)));
+    else
+      return lazy_read_some_at_ec(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buffers));
   }
 };
 inline constexpr read_some_at_ec_t read_some_at_ec{};
@@ -2194,12 +2223,23 @@ inline constexpr read_some_at_ec_t read_some_at_ec{};
 
 struct read_some_ec_t {
   template<typename FD>
-  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  auto operator()(FD&& fd, std::span<std::byte> buf) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<read_some_ec_t, FD, std::span<std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<read_some_ec_t, FD, std::span<std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
     else
-      return lazy_read_some_ec(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+      return lazy_read_some_ec(std::forward<FD>(fd), std::move(buf));
+  }
+
+  template<typename FD, mutable_buffer_sequence Buffers>
+  auto operator()(FD&& fd, Buffers&& buffers) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<read_some_ec_t, FD, Buffers>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buffers));
+    else if constexpr(tag_invocable<read_some_ec_t, FD, std::span<std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), first_buffer(std::forward<Buffers>(buffers)));
+    else
+      return lazy_read_some_ec(std::forward<FD>(fd), std::forward<Buffers>(buffers));
   }
 };
 inline constexpr read_some_ec_t read_some_ec{};
@@ -2207,12 +2247,23 @@ inline constexpr read_some_ec_t read_some_ec{};
 
 struct write_some_at_ec_t {
   template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<write_some_at_ec_t, FD, offset_type, std::span<const std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf));
     else
-      return lazy_write_some_at_ec(std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+      return lazy_write_some_at_ec(std::forward<FD>(fd), std::move(offset), std::move(buf));
+  }
+
+  template<typename FD, const_buffer_sequence Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buffers) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<write_some_at_ec_t, FD, offset_type, Buffers>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buffers));
+    else if constexpr(tag_invocable<write_some_at_ec_t, FD, offset_type, std::span<const std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), first_buffer(std::forward<Buffers>(buffers)));
+    else
+      return lazy_write_some_at_ec(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buffers));
   }
 };
 inline constexpr write_some_at_ec_t write_some_at_ec{};
@@ -2220,12 +2271,23 @@ inline constexpr write_some_at_ec_t write_some_at_ec{};
 
 struct write_some_ec_t {
   template<typename FD>
-  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  auto operator()(FD&& fd, std::span<const std::byte> buf) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<write_some_ec_t, FD, std::span<const std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<write_some_ec_t, FD, std::span<const std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
     else
-      return lazy_write_some_ec(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+      return lazy_write_some_ec(std::forward<FD>(fd), std::move(buf));
+  }
+
+  template<typename FD, const_buffer_sequence Buffers>
+  auto operator()(FD&& fd, Buffers&& buffers) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<write_some_ec_t, FD, Buffers>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buffers));
+    else if constexpr(tag_invocable<write_some_ec_t, FD, std::span<const std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), first_buffer(std::forward<Buffers>(buffers)));
+    else
+      return lazy_write_some_ec(std::forward<FD>(fd), std::forward<Buffers>(buffers));
   }
 };
 inline constexpr write_some_ec_t write_some_ec{};
@@ -2233,12 +2295,23 @@ inline constexpr write_some_ec_t write_some_ec{};
 
 struct read_some_at_t {
   template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  auto operator()(FD&& fd, offset_type offset, std::span<std::byte> buf) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<read_some_at_t, FD, offset_type, std::span<std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<read_some_at_t, FD, offset_type, std::span<std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf));
     else
-      return lazy_read_some_at(std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+      return lazy_read_some_at(std::forward<FD>(fd), std::move(offset), std::move(buf));
+  }
+
+  template<typename FD, mutable_buffer_sequence Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buffers) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<read_some_at_t, FD, offset_type, Buffers>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buffers));
+    else if constexpr(tag_invocable<read_some_at_t, FD, offset_type, std::span<std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), first_buffer(std::forward<Buffers>(buffers)));
+    else
+      return lazy_read_some_at(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buffers));
   }
 };
 inline constexpr read_some_at_t read_some_at{};
@@ -2246,12 +2319,23 @@ inline constexpr read_some_at_t read_some_at{};
 
 struct read_some_t {
   template<typename FD>
-  auto operator()(FD&& fd, std::span<std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  auto operator()(FD&& fd, std::span<std::byte> buf) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<read_some_t, FD, std::span<std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<read_some_t, FD, std::span<std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
     else
-      return lazy_read_some(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+      return lazy_read_some(std::forward<FD>(fd), std::move(buf));
+  }
+
+  template<typename FD, mutable_buffer_sequence Buffers>
+  auto operator()(FD&& fd, Buffers&& buffers) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<read_some_t, FD, Buffers>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buffers));
+    else if constexpr(tag_invocable<read_some_t, FD, std::span<std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), first_buffer(std::forward<Buffers>(buffers)));
+    else
+      return lazy_read_some(std::forward<FD>(fd), std::forward<Buffers>(buffers));
   }
 };
 inline constexpr read_some_t read_some{};
@@ -2259,12 +2343,23 @@ inline constexpr read_some_t read_some{};
 
 struct write_some_at_t {
   template<typename FD>
-  auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  auto operator()(FD&& fd, offset_type offset, std::span<const std::byte> buf) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<write_some_at_t, FD, offset_type, std::span<const std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<write_some_at_t, FD, offset_type, std::span<const std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::move(buf));
     else
-      return lazy_write_some_at(std::forward<FD>(fd), std::move(offset), std::move(buf), std::move(minbytes));
+      return lazy_write_some_at(std::forward<FD>(fd), std::move(offset), std::move(buf));
+  }
+
+  template<typename FD, const_buffer_sequence Buffers>
+  auto operator()(FD&& fd, offset_type offset, Buffers&& buffers) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<write_some_at_t, FD, offset_type, Buffers>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buffers));
+    else if constexpr(tag_invocable<write_some_at_t, FD, offset_type, std::span<const std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(offset), first_buffer(std::forward<Buffers>(buffers)));
+    else
+      return lazy_write_some_at(std::forward<FD>(fd), std::move(offset), std::forward<Buffers>(buffers));
   }
 };
 inline constexpr write_some_at_t write_some_at{};
@@ -2272,12 +2367,23 @@ inline constexpr write_some_at_t write_some_at{};
 
 struct write_some_t {
   template<typename FD>
-  auto operator()(FD&& fd, std::span<const std::byte> buf, std::optional<std::size_t> minbytes = std::nullopt) const
+  auto operator()(FD&& fd, std::span<const std::byte> buf) const
   -> typed_sender decltype(auto) {
-    if constexpr(tag_invocable<write_some_t, FD, std::span<const std::byte>, std::optional<std::size_t>>)
-      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+    if constexpr(tag_invocable<write_some_t, FD, std::span<const std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::move(buf));
     else
-      return lazy_write_some(std::forward<FD>(fd), std::move(buf), std::move(minbytes));
+      return lazy_write_some(std::forward<FD>(fd), std::move(buf));
+  }
+
+  template<typename FD, const_buffer_sequence Buffers>
+  auto operator()(FD&& fd, Buffers&& buffers) const
+  -> typed_sender decltype(auto) {
+    if constexpr(tag_invocable<write_some_t, FD, Buffers>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), std::forward<Buffers>(buffers));
+    else if constexpr(tag_invocable<write_some_t, FD, std::span<const std::byte>>)
+      return execution::tag_invoke(*this, std::forward<FD>(fd), first_buffer(std::forward<Buffers>(buffers)));
+    else
+      return lazy_write_some(std::forward<FD>(fd), std::forward<Buffers>(buffers));
   }
 };
 inline constexpr write_some_t write_some{};

@@ -3600,7 +3600,7 @@ struct tuple_t
 
 
 struct pair_t
-: basic_operation<tuple_t>
+: basic_operation<pair_t>
 {
   template<typename T, typename U, typename FirstInvocation = identity_t, typename SecondInvocation = identity_t>
   auto read(std::pair<T, U>& v, FirstInvocation first_invocation = FirstInvocation{}, SecondInvocation second_invocation = SecondInvocation{}) const {
@@ -3686,8 +3686,8 @@ struct read_into_t {
         })
     | execution::explode_tuple()
     | execution::lazy_let_value(
-        [](auto& fd, T& v) {
-          return read_t{}(std::move(fd), v)
+        [invocation](auto& fd, T& v) {
+          return read_t{}(std::move(fd), v, invocation)
           | execution::lazy_then(
               [&v]<typename FD>(FD&& fd) {
                 return std::tuple<FD, T>(std::forward<FD>(fd), std::move(v));

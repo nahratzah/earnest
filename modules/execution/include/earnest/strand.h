@@ -7,7 +7,10 @@
 #include <thread>
 #include <utility>
 
+#include <gsl/gsl>
+
 #include <earnest/execution.h>
+#include <earnest/blocking_scheduler.h>
 
 namespace earnest::execution {
 inline namespace extensions {
@@ -55,7 +58,150 @@ class strand {
       std::invoke(cb, ptr);
     }
   };
-  using queue_type = std::queue<entry, std::deque<entry, rebind_alloc<entry>>>;
+
+  // We use a state pointer, so that the strand can be destroyed while it's running,
+  // without creating all kinds of pointer problems.
+  class state {
+    private:
+    using queue_type = std::queue<entry, std::deque<entry, rebind_alloc<entry>>>;
+
+    public:
+    explicit state(allocator_type alloc)
+    : q(alloc)
+    {}
+
+    state(const state&) = delete;
+    state(state&&) = delete;
+
+#ifndef NDEBUG
+    ~state() {
+      std::lock_guard lck{mtx};
+      assert(!engaged);
+      assert(q.empty());
+    }
+#endif
+
+    auto get_allocator() const -> allocator_type {
+      return q.get_allocator();
+    }
+
+    auto try_lock() -> bool {
+      std::unique_lock lck{mtx, std::try_to_lock};
+      if (lck.owns_lock() && !engaged) {
+        engaged = true;
+        active_thread_ = std::this_thread::get_id();
+        return true;
+      } else {
+        return false;
+      }
+    }
+
+    auto lock() -> void {
+      struct lock_state_t {
+        std::mutex& mtx;
+        std::condition_variable cond_var;
+        bool active = false;
+
+        auto wait(std::unique_lock<std::mutex>& lck) noexcept -> void {
+          // wait_until may throw (which ought to be impossible under normal circumstances).
+          // If it does, we cannot recover, so we mark this function as noexcept.
+          cond_var.wait_until(
+              lck,
+              [this]() -> bool {
+                return this->active;
+              });
+        }
+      };
+
+      std::unique_lock lck{mtx};
+      if (!engaged) {
+        engaged = true;
+        active_thread_ = std::this_thread::get_id();
+        return;
+      }
+
+      lock_state_t lock_state{ .mtx=this->mtx };
+      q.push(
+          entry{
+            .cb=[](void* lock_state_vptr) noexcept -> void {
+              gsl::not_null<lock_state_t*> lock_state = static_cast<lock_state_t*>(lock_state_vptr);
+              std::lock_guard lck{lock_state->mtx};
+              lock_state->active = true;
+              lock_state->cond_var.notify_one();
+            },
+            .ptr=&lock_state,
+          });
+
+      lock_state.wait(lck);
+      assert(engaged);
+      active_thread_ = std::this_thread::get_id();
+    }
+
+    auto unlock() -> void {
+      std::unique_lock lck{mtx};
+      if (!engaged)
+        throw std::logic_error("strand: unlock called when not locked");
+      if (active_thread_ != std::this_thread::get_id())
+        throw std::logic_error("strand: unlock called from different thread");
+      release_(std::move(lck));
+    }
+
+    auto release() noexcept -> void {
+      release_(std::unique_lock{mtx});
+    }
+
+    auto running_in_this_thread() const noexcept -> bool {
+      std::lock_guard lck{mtx};
+      return active_thread_ == std::this_thread::get_id();
+    }
+
+    auto run_or_enqueue(entry&& e) -> void {
+      std::unique_lock lck{mtx};
+      if (engaged) {
+        q.push(std::move(e));
+      } else {
+        engaged = true;
+
+        // Run the item, without holding the lock.
+        lck.unlock();
+        std::invoke(e);
+      }
+    }
+
+    auto mark_running() noexcept -> void {
+      std::lock_guard lck{mtx};
+      active_thread_ = std::this_thread::get_id();
+    }
+
+    private:
+    auto release_(std::unique_lock<std::mutex> lck) noexcept -> void {
+      assert(lck.owns_lock() && lck.mutex() == &mtx);
+      assert(engaged);
+      active_thread_ = std::thread::id{}; // Clear the active-thread-ID
+      if (q.empty()) {
+        engaged = false;
+      } else {
+        auto todo = std::move(q.front());
+        q.pop();
+
+        // Run the item, without holding the lock.
+        lck.unlock();
+        std::invoke(todo); // Never throws.
+      }
+    }
+
+    mutable std::mutex mtx;
+    mutable std::condition_variable cond_var;
+    bool engaged = false;
+    queue_type q;
+    std::thread::id active_thread_{};
+  };
+
+  using state_ptr = gsl::not_null<std::shared_ptr<state>>;
+
+  static auto new_state(allocator_type alloc) -> state_ptr {
+    return std::allocate_shared<state>(alloc, alloc);
+  }
 
   template<typename NestedScheduler, typename Receiver>
   class opstate
@@ -75,29 +221,34 @@ class strand {
 
       template<typename... Args>
       friend auto tag_invoke([[maybe_unused]] set_value_t tag, scheduler_receiver&& self, Args&&... args) noexcept -> void {
-        self.state.s.mark_running();
-        try {
-          execution::set_value(std::move(self.state.r), std::forward<Args>(args)...);
-        } catch (...) {
-          execution::set_error(std::move(self.state.r), std::current_exception());
-        }
-        self.state.release();
+        self.do_(
+            []<typename LReceiver, typename... LArgs>(LReceiver&& r, LArgs&&... args) noexcept {
+              try {
+                execution::set_value(std::forward<LReceiver>(r), std::forward<LArgs>(args)...);
+              } catch (...) {
+                execution::set_error(std::forward<LReceiver>(r), std::current_exception());
+              }
+            });
       }
 
       template<typename Error>
-      friend auto tag_invoke([[maybe_unused]] set_error_t tag, scheduler_receiver&& self, Error&& error) noexcept -> void {
-        self.state.s.mark_running();
-        execution::set_error(std::move(self.state.r), std::forward<Error>(error));
-        self.state.release();
+      friend auto tag_invoke(set_error_t tag, scheduler_receiver&& self, Error&& error) noexcept -> void {
+        self.do_(tag, std::forward<Error>(error));
       }
 
-      friend auto tag_invoke([[maybe_unused]] set_done_t tag, scheduler_receiver&& self) noexcept -> void {
-        self.state.s.mark_running();
-        execution::set_done(std::move(self.state.r));
-        self.state.release();
+      friend auto tag_invoke(set_done_t tag, scheduler_receiver&& self) noexcept -> void {
+        self.do_(tag);
       }
 
       private:
+      template<typename Fn, typename... Args>
+      auto do_(Fn&& fn, Args&&... args) noexcept -> void {
+        const state_ptr s = state.s; // Make a local pointer, because set_done may destroy our operation-state.
+        s->mark_running();
+        std::invoke(std::forward<Fn>(fn), std::move(state.r), std::forward<Args>(args)...);
+        s->release();
+      }
+
       opstate& state;
     };
 
@@ -107,7 +258,7 @@ class strand {
     using scheduler_opstate_t = decltype(make_scheduler_opstate(std::declval<opstate&>(), std::declval<NestedScheduler>()));
 
     public:
-    explicit opstate(strand& s, NestedScheduler&& scheduler, Receiver&& r)
+    explicit opstate(state_ptr s, NestedScheduler&& scheduler, Receiver&& r)
     : s(s),
       r(std::move(r)),
       scheduler_opstate(make_scheduler_opstate(*this, std::move(scheduler)))
@@ -115,7 +266,7 @@ class strand {
 
     friend auto tag_invoke([[maybe_unused]] start_t tag, opstate& self) noexcept -> void {
       try {
-        self.s.run_or_enqueue(
+        self.s->run_or_enqueue(
             entry{
               .cb=[](void* self_vptr) noexcept -> void {
                 const auto self_ptr = static_cast<opstate*>(self_vptr);
@@ -130,10 +281,10 @@ class strand {
 
     private:
     auto release() noexcept -> void {
-      s.release();
+      s->release();
     }
 
-    strand& s;
+    state_ptr s;
     Receiver r;
     scheduler_opstate_t scheduler_opstate;
   };
@@ -145,13 +296,13 @@ class strand {
   template<execution::scheduler UnderlyingScheduler>
   class bound_scheduler_t {
     public:
-    explicit bound_scheduler_t(strand& s, const UnderlyingScheduler& underlying_sched)
+    explicit bound_scheduler_t(state_ptr s, const UnderlyingScheduler& underlying_sched)
     noexcept(std::is_nothrow_copy_constructible_v<UnderlyingScheduler>)
     : s(s),
       underlying_sched(underlying_sched)
     {}
 
-    explicit bound_scheduler_t(strand& s, UnderlyingScheduler&& underlying_sched)
+    explicit bound_scheduler_t(state_ptr s, UnderlyingScheduler&& underlying_sched)
     noexcept(std::is_nothrow_move_constructible_v<UnderlyingScheduler>)
     : s(s),
       underlying_sched(std::move(underlying_sched))
@@ -161,12 +312,16 @@ class strand {
       return &s == &y.s && underlying_sched == y.underlying_sched;
     }
 
+    auto operator!=(const bound_scheduler_t& y) const noexcept -> bool {
+      return !(*this == y);
+    }
+
     friend auto tag_invoke([[maybe_unused]] execution::schedule_t tag, bound_scheduler_t&& self) -> sender_impl<UnderlyingScheduler> {
       return sender_impl<UnderlyingScheduler>(self.s, self.underlying_sched);
     }
 
     private:
-    strand& s;
+    state_ptr s;
     UnderlyingScheduler underlying_sched;
   };
 
@@ -175,7 +330,7 @@ class strand {
   : public sender_traits<decltype(execution::schedule(std::declval<UnderlyingScheduler>()))>
   {
     public:
-    explicit sender_impl(strand& s, const UnderlyingScheduler& underlying_scheduler)
+    explicit sender_impl(state_ptr s, const UnderlyingScheduler& underlying_scheduler)
     : s(s),
       underlying_scheduler(underlying_scheduler)
     {}
@@ -202,86 +357,148 @@ class strand {
     }
 
     private:
-    strand& s;
+    state_ptr s;
     UnderlyingScheduler underlying_scheduler;
+  };
+
+  // Sender used in a `schedule(strand)` call.
+  // When using the strand in this way, it's unbound, and will select a nested scheduler at connect-time.
+  struct schedule_sender_ {
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<>>;
+
+    template<template<typename...> class Variant>
+    using error_types = Variant<std::exception_ptr>;
+
+    static constexpr bool sends_done = false;
+
+    explicit schedule_sender_(strand s) noexcept
+    : s(s)
+    {}
+
+    schedule_sender_(const schedule_sender_&) = delete;
+    schedule_sender_(schedule_sender_&&) = default;
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t connect, schedule_sender_&& self, Receiver&& r) {
+      auto get_scheduler = [&self, &r]() -> execution::scheduler auto {
+        if constexpr(std::invocable<execution::tag_t<execution::get_scheduler>, std::remove_cvref_t<Receiver>&>) {
+          return self.s.scheduler(execution::get_scheduler(r));
+        } else {
+          return self.s.scheduler(blocking_scheduler<allocator_type>(self.s.get_allocator()));
+        }
+      };
+
+      return connect(execution::schedule(get_scheduler()), std::forward<Receiver>(r));
+    }
+
+    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_value_t> tag, const schedule_sender_& self) -> strand {
+      return self.s;
+    }
+
+    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_error_t> tag, const schedule_sender_& self) -> strand {
+      return self.s;
+    }
+
+    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_done_t> tag, const schedule_sender_& self) -> strand {
+      return self.s;
+    }
+
+    private:
+    [[no_unique_address]] strand s;
+  };
+
+  // Sender used in a `on(strand)` call.
+  // When using the strand in this way, it's unbound, and will select a nested scheduler at connect-time.
+  template<typed_sender Sender>
+  struct on_sender_
+  : _generic_sender_wrapper<on_sender_<Sender>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    on_sender_(strand self, Sender&& s)
+    : _generic_sender_wrapper<on_sender_<Sender>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>(std::move(s)),
+      self(self)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke(connect_t connect, on_sender_&& self, Receiver&& r)
+    -> operation_state auto {
+      auto get_scheduler = [&self, &r]() -> execution::scheduler auto {
+        if constexpr(std::invocable<execution::tag_t<execution::get_scheduler>, std::remove_cvref_t<Receiver>&>) {
+          return self.s.scheduler(execution::get_scheduler(r));
+        } else {
+          return self.s.scheduler(blocking_scheduler<allocator_type>(self.s.get_allocator()));
+        }
+      };
+
+      return connect(execution::on(get_scheduler(), std::move(self.s)), std::forward<Receiver>(r));
+    }
+
+    private:
+    // Cannot do `some_sender | *this`.
+    template<sender OtherSender>
+    auto rebind(OtherSender&&) && = delete;
+
+    [[no_unique_address]] strand self;
   };
 
   public:
   explicit strand(allocator_type alloc = allocator_type())
-  noexcept(std::is_nothrow_default_constructible_v<std::mutex> && std::is_nothrow_constructible_v<queue_type, allocator_type>)
-  : q(std::move(alloc))
+  : s(new_state(alloc))
   {}
 
-  strand(const strand&) = delete;
-  strand(strand&&) = delete;
-
-#ifndef NDEBUG // If NDEBUG, we rely on the default destructor.
-  ~strand() {
-    // Destroying the strand, while it is in-progress, or has enqueued tasks,
-    // will result in undefined behaviour.
-    std::lock_guard lck{mtx};
-    assert(!engaged);
-    assert(q.empty());
+  auto operator==(const strand<allocator_type>& y) const noexcept -> bool {
+    return s == y.s;
   }
-#endif
+
+  auto operator!=(const strand<allocator_type>& y) const noexcept -> bool {
+    return !(*this == y);
+  }
 
   auto get_allocator() const -> allocator_type {
-    return q.get_allocator();
+    return s->get_allocator();
   }
 
   auto running_in_this_thread() const noexcept -> bool {
-    std::lock_guard lck{mtx};
-    return active_thread_ == std::this_thread::get_id();
+    return s->running_in_this_thread();
+  }
+
+  auto try_lock() -> bool {
+    return s->try_lock();
+  }
+
+  auto lock() -> void {
+    s->lock();
+  }
+
+  auto unlock() -> void {
+    s->unlock();
   }
 
   // Adapt an existing scheduler, so that its scheduled tasks run on this strand.
-  template<typename UnderlyingSched>
+  template<execution::scheduler UnderlyingSched>
   auto scheduler(UnderlyingSched&& underlying_sched)
   noexcept(std::is_nothrow_constructible_v<std::remove_cvref_t<UnderlyingSched>, UnderlyingSched>)
   -> bound_scheduler_t<std::remove_cvref_t<UnderlyingSched>> {
-    return bound_scheduler_t<std::remove_cvref_t<UnderlyingSched>>(*this, std::forward<UnderlyingSched>(underlying_sched));
+    return bound_scheduler_t<std::remove_cvref_t<UnderlyingSched>>(s, std::forward<UnderlyingSched>(underlying_sched));
+  }
+
+  friend auto tag_invoke(schedule_t tag, strand self) -> sender_of<> auto {
+    return schedule_sender_(self);
+  }
+
+  template<typed_sender Sender>
+  friend auto tag_invoke(on_t tag, strand&& self, Sender&& s) -> typed_sender auto {
+    return on_sender_<std::remove_cvref_t<Sender>>(self, std::forward<Sender>(s));
   }
 
   private:
-  auto run_or_enqueue(entry&& e) -> void {
-    std::unique_lock lck{mtx};
-    if (engaged) {
-      q.push(std::move(e));
-    } else {
-      engaged = true;
-
-      // Run the item, without holding the lock.
-      lck.unlock();
-      std::invoke(e);
-    }
-  }
-
-  auto release() noexcept -> void {
-    std::unique_lock lck{mtx};
-    assert(engaged);
-    active_thread_ = std::thread::id{}; // Clear the active-thread-ID
-    if (q.empty()) {
-      engaged = false;
-    } else {
-      auto todo = std::move(q.front());
-      q.pop();
-
-      // Run the item, without holding the lock.
-      lck.unlock();
-      std::invoke(todo); // never throws
-    }
-  }
-
-  auto mark_running() noexcept -> void {
-    std::lock_guard lck{mtx};
-    active_thread_ = std::this_thread::get_id();
-  }
-
-  mutable std::mutex mtx;
-  bool engaged = false;
-  queue_type q;
-  std::thread::id active_thread_{};
+  state_ptr s;
 };
+
+static_assert(scheduler<strand<>>, "strand should be a scheduler");
 
 
 } /* inline namespace extensions */

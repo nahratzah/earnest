@@ -19,3 +19,6 @@
 [submodule "modules/opentelemetry-cpp"]
 	path = modules/opentelemetry-cpp
 	url = https://github.com/open-telemetry/opentelemetry-cpp.git
+[submodule "modules/GSL"]
+	path = modules/GSL
+	url = https://github.com/Microsoft/GSL.git

@@ -3060,16 +3060,13 @@ struct transfer_just_t {
   template<typename> friend struct _generic_operand_base_t;
 
   template<scheduler Scheduler, typename... Args>
-  constexpr auto operator()(Scheduler&& sch, Args&&... args)
+  constexpr auto operator()(Scheduler&& sch, Args&&... args) const
   -> sender decltype(auto) {
-    return _generic_operand_base<>(*this, std::forward<Scheduler>(sch), std::forward<Args>(args)...);
-  }
-
-  private:
-  template<scheduler Scheduler, typename... Args>
-  constexpr auto default_impl(Scheduler&& sch, Args&&... args)
-  -> sender decltype(auto) {
-    return transfer(just(std::forward<Args>(args)...), std::forward<Scheduler>(sch));
+    if constexpr(tag_invocable<transfer_just_t, Scheduler, Args...>) {
+      return tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<Args>(args)...);
+    } else {
+      return transfer(just(std::forward<Args>(args)...), std::forward<Scheduler>(sch));
+    }
   }
 };
 inline constexpr transfer_just_t transfer_just{};
@@ -3090,6 +3087,13 @@ struct _let_adapter_common_t {
     using type = typename TypeAdapter::template type<Tuple>;
   };
 
+  // Prepend the Signal type in the front of a type-appender.
+  template<typename Signal>
+  struct prepend {
+    template<typename T>
+    using type = typename _type_appender<Signal>::template merge<T>;
+  };
+
   // Create a helper type, that'll figure out the function-arguments,
   // as well as the retained errors and values.
   //
@@ -3105,42 +3109,62 @@ struct _let_adapter_common_t {
   //   The outer collection is the variant.
   // - retained_sends_done bool, describing if the set_done signal is retained.
   //   If the Sender doesn't emit set_done, then this will be false.
-  template<typed_sender Sender, typename Signal> struct sender_types_helper;
-  // Specialize the sender_types_helper for set_value signal.
-  template<typed_sender Sender>
-  struct sender_types_helper<Sender, set_value_t> {
-    // The arguments passed to the function.
-    using function_arguments = typename sender_traits<Sender>::template value_types<_type_appender, _type_appender>;
-    // There are no values retained: everything is fed to the function.
-    using retained_value_types = _type_appender<>;
-    // All errors are retained.
-    using retained_error_types = typename sender_traits<Sender>::template error_types<_type_appender>;
-    // Done is forwarded as-is.
-    static inline constexpr bool retained_sends_done = sender_traits<Sender>::sends_done;
-  };
-  // Specialize the sender_types_helper for set_error signal.
-  template<typed_sender Sender>
-  struct sender_types_helper<Sender, set_error_t> {
-    // The arguments passed to the function.
-    using function_arguments = typename sender_traits<Sender>::template error_types<_type_appender>::template transform<_type_appender>;
-    // All values are retained.
-    using retained_value_types = typename sender_traits<Sender>::template value_types<_type_appender, _type_appender>;
-    // No errors are retained: everything is fed to the function.
-    using retained_error_types = _type_appender<>;
-    // Done is forwarded as-is.
-    static inline constexpr bool retained_sends_done = sender_traits<Sender>::sends_done;
-  };
-  // Specialize the sender_types_helper for set_done signal.
-  template<typed_sender Sender>
-  struct sender_types_helper<Sender, set_done_t> {
-    // The done signal doesn't have arguments, so there's only a single no-argument invocation.
-    using function_arguments = _type_appender<_type_appender<>>;
-    // All values are retained.
-    using retained_value_types = typename sender_traits<Sender>::template value_types<_type_appender, _type_appender>;
-    // All errors are retained.
-    using retained_error_types = typename sender_traits<Sender>::template error_types<_type_appender>;
-    // Done is intercepted
-    static inline constexpr bool retained_sends_done = false;
+  template<typed_sender Sender, typename... Signal>
+  requires (sizeof...(Signal) > 0) &&
+      ((std::same_as<set_value_t, Signal> || std::same_as<set_error_t, Signal> || std::same_as<set_done_t, Signal>) &&...)
+  struct sender_types_helper {
+    using function_arguments = _type_appender<>::merge<
+        // Add value-invocations, if the set_value is part of the signals.
+        std::conditional_t<
+            (std::same_as<set_value_t, Signal> ||...),
+            typename sender_traits<Sender>::
+                template value_types<_type_appender, _type_appender>::   // Take each of the value-types:
+                                                                         // `_type_appender<
+                                                                         //     _type_appender<T1...>,
+                                                                         //     _type_appender<T2...>,
+                                                                         //     ...>'
+                template transform<prepend<set_value_t>::template type>, // Prepend the set_value_t in front of each:
+                                                                         // `_type_appender<
+                                                                         //     _type_appender<set_value_t, T1...>,
+                                                                         //     _type_appender<set_value_t, T2...>,
+                                                                         //     ...>'
+            _type_appender<>>,
+        // Add error-invocations, if the set_error is part of the signals.
+        std::conditional_t<
+            (std::same_as<set_error_t, Signal> ||...),
+            typename sender_traits<Sender>::
+                template error_types<_type_appender>::                   // Take each of the error-types: `_type_appender<E1, E2, ...>'
+                template transform<_type_appender>::                     // Wrap each of the errors in its own type-appender:
+                                                                         // `_type_appender<
+                                                                         //     _type_appender<E1>,
+                                                                         //     _type_appender<E2>,
+                                                                         //     ...>'
+                template transform<prepend<set_error_t>::template type>, // Prepend the set_error_t in front of each:
+                                                                         // `_type_appender<
+                                                                         //     _type_appender<set_error_t, E1>,
+                                                                         //     _type_appender<set_error_t, E2>,
+                                                                         //     ...>'
+            _type_appender<>>,
+        // Add done-invocation, if the set_done is part of the signals.
+        std::conditional_t<
+            (std::same_as<set_done_t, Signal> ||...),
+            _type_appender<_type_appender<set_done_t>>,                  // The only done-invocation is without arguments, and only the set_done_t tag:
+                                                                         // `_type_appender<_type_appender<set_done_t>>'
+            _type_appender<>>
+        >;
+
+    // If set_value_t is not one of the signals, then all value types are retained.
+    using retained_value_types = std::conditional_t<
+        (std::same_as<set_value_t, Signal> ||...),
+        _type_appender<>,
+        typename sender_traits<Sender>::template value_types<_type_appender, _type_appender>>;
+    // If set_error_t is not one of the signals, then all error types are retained.
+    using retained_error_types = std::conditional_t<
+        (std::same_as<set_error_t, Signal> ||...),
+        _type_appender<>,
+        typename sender_traits<Sender>::template error_types<_type_appender>>;
+    // If done is intercepted, we don't retain it.
+    static inline constexpr bool retained_sends_done = !(std::same_as<set_done_t, Signal> ||...) && sender_traits<Sender>::sends_done;
   };
 
   // The operation state for a specific invocation of the arguments and the function.
@@ -3254,19 +3278,19 @@ struct _let_adapter_common_t {
   // We use a struct, to make sure the template cannot result until all arguments
   // are specified. This is because if we use the using-type directly, the compiler
   // will partially apply what it can. And then complain if it can't.
-  template<sender Sender, typename Signal, typename Fn, receiver Receiver>
+  template<sender Sender, typename Fn, receiver Receiver, typename... Signal>
   struct op_state_type_ {
     static_assert(!std::is_same_v<
         _type_appender<>,
-        typename sender_types_helper<Sender, Signal>::function_arguments>,
+        typename sender_types_helper<Sender, Signal...>::function_arguments>,
         "function must be invoked with non-zero variations on arguments (i.e. is must be invoked)");
 
-    using type = typename sender_types_helper<Sender, Signal>::function_arguments::
+    using type = typename sender_types_helper<Sender, Signal...>::function_arguments::
         template transform<type_appender_to_tuple_<values_and_opstate_type<Fn, Receiver>::template type>::template type>::
         template type<op_state>;
   };
-  template<sender Sender, typename Signal, typename Fn, receiver Receiver>
-  using op_state_type = typename op_state_type_<Sender, Signal, Fn, Receiver>::type;
+  template<sender Sender, typename Fn, receiver Receiver, typename... Signal>
+  using op_state_type = typename op_state_type_<Sender, Fn, Receiver, Signal...>::type;
 
   // Implementation of a let_* receiver.
   //
@@ -3275,30 +3299,31 @@ struct _let_adapter_common_t {
   // - OpState: op_state_type outcome deciding on the operation stateus this receiver will contain.
   // - Receiver: the receiver that is being wrapped. The sender returned by Fn will flow into this Receiver.
   // - Fn: a function type that handles transforming arguments into a sender.
-  template<typename Signal, typename OpState, receiver Receiver, typename Fn>
+  template<typename OpState, receiver Receiver, typename Fn, typename... Signal>
   class receiver_impl
-  : public _generic_receiver_wrapper<Receiver, Signal>
+  : public _generic_receiver_wrapper<Receiver, Signal...>
   {
     public:
     receiver_impl(Receiver&& r, Fn&& fn)
-    : _generic_receiver_wrapper<Receiver, Signal>(std::move(r)),
+    : _generic_receiver_wrapper<Receiver, Signal...>(std::move(r)),
       fn(std::move(fn))
     {}
 
     receiver_impl(const Receiver& r, Fn&& fn)
-    : _generic_receiver_wrapper<Receiver, Signal>(r),
+    : _generic_receiver_wrapper<Receiver, Signal...>(r),
       fn(std::move(fn))
     {}
 
     // tag-invoke specialization for the given Tag.
-    template<typename... Args>
-    requires(
-        std::is_same_v<set_value_t, Signal> ||
-        (std::is_same_v<set_error_t, Signal> && sizeof...(Args) == 1) ||
-        (std::is_same_v<set_done_t, Signal> && sizeof...(Args) == 0))
-    friend auto tag_invoke([[maybe_unused]] Signal, receiver_impl&& self, Args&&... args) noexcept -> void {
+    template<typename Tag, typename... Args>
+    requires
+        (std::is_same_v<Tag, Signal> ||...) &&
+        (std::is_same_v<set_value_t, Tag> ||
+         (std::is_same_v<set_error_t, Tag> && sizeof...(Args) == 1) ||
+         (std::is_same_v<set_done_t, Tag> && sizeof...(Args) == 0))
+    friend auto tag_invoke(Tag tag, receiver_impl&& self, Args&&... args) noexcept -> void {
       try {
-        self.next_state.apply(std::move(self.fn), self.make_copy_of_receiver(), std::forward<Args>(args)...);
+        self.next_state.apply(std::move(self.fn), self.make_copy_of_receiver(), std::move(tag), std::forward<Args>(args)...);
       } catch (...) {
         set_error(std::move(self.r), std::current_exception());
       }
@@ -3321,26 +3346,26 @@ struct _let_adapter_common_t {
   };
 
   // Forward-declare sender implementation.
-  template<sender Sender, typename Signal, typename Fn> class sender_impl;
+  template<sender Sender, typename Fn, typename... Signal> class sender_impl;
 
   // Figure out the sender_traits types for the sender.
   //
   // We must block access to all `get_completion_scheduler's:
   // we cannot query the result from the let-invocation.
-  template<sender Sender, typename Signal, typename Fn>
+  template<sender Sender, typename Fn, typename... Signal>
   struct sender_types_for_impl
-  : public _generic_sender_wrapper<sender_impl<Sender, Signal, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
+  : public _generic_sender_wrapper<sender_impl<Sender, Fn, Signal...>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
   {
-    using _generic_sender_wrapper<sender_impl<Sender, Signal, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>::_generic_sender_wrapper;
+    using _generic_sender_wrapper<sender_impl<Sender, Fn, Signal...>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>::_generic_sender_wrapper;
   };
 
   // Specialization for the case where the wrapped sender has known value-types.
-  template<typed_sender Sender, typename Signal, typename Fn>
-  struct sender_types_for_impl<Sender, Signal, Fn>
-  : public _generic_sender_wrapper<sender_impl<Sender, Signal, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
+  template<typed_sender Sender, typename Fn, typename... Signal>
+  struct sender_types_for_impl<Sender, Fn, Signal...>
+  : public _generic_sender_wrapper<sender_impl<Sender, Fn, Signal...>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
   {
     private:
-    using traits_helper = sender_types_helper<Sender, Signal>;
+    using traits_helper = sender_types_helper<Sender, Signal...>;
 
     // Helper struct, given a type-appender of function-arguments, will figure out the invoke-result of Fn with those arguments.
     // We need this to compute the all_senders type (since the invoke-result of Fn with Args will produce a sender).
@@ -3412,14 +3437,14 @@ struct _let_adapter_common_t {
     // or is sent by any of the created senders.
     static inline constexpr bool sends_done = traits_helper::retained_sends_done || collect_sends_done;
 
-    using _generic_sender_wrapper<sender_impl<Sender, Signal, Fn>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>::_generic_sender_wrapper;
+    using _generic_sender_wrapper<sender_impl<Sender, Fn, Signal...>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>::_generic_sender_wrapper;
   };
 
   // Sender for the let_value operation.
   // When connected to, it creates a receiver_impl, and connects that to the wrapped sender.
-  template<sender Sender, typename Signal, typename Fn>
+  template<sender Sender, typename Fn, typename... Signal>
   class sender_impl
-  : public sender_types_for_impl<Sender, Signal, Fn>
+  : public sender_types_for_impl<Sender, Fn, Signal...>
   {
     template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
 
@@ -3427,16 +3452,16 @@ struct _let_adapter_common_t {
     template<receiver Receiver>
     using wrapped_receiver_type =
         receiver_impl<
-            Signal,
-            op_state_type<Sender, Signal, Fn, _generic_rawptr_receiver<Receiver>>,
+            op_state_type<Sender, Fn, _generic_rawptr_receiver<Receiver>, Signal...>,
             Receiver,
-            Fn>;
+            Fn,
+            Signal...>;
 
     public:
     template<typename Sender_, typename Fn_>
     requires std::constructible_from<Sender, Sender_> && std::constructible_from<Fn, Fn_>
     constexpr sender_impl(Sender_&& s, Fn_&& fn)
-    : sender_types_for_impl<Sender, Signal, Fn>(std::forward<Sender_>(s)),
+    : sender_types_for_impl<Sender, Fn, Signal...>(std::forward<Sender_>(s)),
       fn(std::forward<Fn_>(fn))
     {}
 
@@ -3451,8 +3476,8 @@ struct _let_adapter_common_t {
     private:
     template<sender OtherSender>
     auto rebind(OtherSender&& other_sender) &&
-    -> sender_impl<std::remove_cvref_t<OtherSender>, Signal, Fn> {
-      return sender_impl<std::remove_cvref_t<OtherSender>, Signal, Fn>(std::forward<OtherSender>(other_sender), std::move(fn));
+    -> sender_impl<std::remove_cvref_t<OtherSender>, Fn, Signal...> {
+      return sender_impl<std::remove_cvref_t<OtherSender>, Fn, Signal...>(std::forward<OtherSender>(other_sender), std::move(fn));
     }
 
     // The function that will return the sender for the let_value-operation.
@@ -3460,10 +3485,11 @@ struct _let_adapter_common_t {
   };
 
   public:
-  template<typename Signal, sender Sender, typename Fn>
+  template<typename... Signal, sender Sender, typename Fn>
+  requires ((sizeof...(Signal) > 0) &&...&& (std::same_as<Signal, set_value_t> || std::same_as<Signal, set_error_t> || std::same_as<Signal, set_done_t>))
   static constexpr auto impl(Sender&& s, Fn&& fn)
   -> sender decltype(auto) {
-    return sender_impl<std::remove_cvref_t<Sender>, Signal, std::remove_cvref_t<Fn>>(std::forward<Sender>(s), std::forward<Fn>(fn));
+    return sender_impl<std::remove_cvref_t<Sender>, std::remove_cvref_t<Fn>, Signal...>(std::forward<Sender>(s), std::forward<Fn>(fn));
   }
 };
 
@@ -3496,10 +3522,42 @@ struct lazy_let_value_t {
   }
 
   private:
+  template<typename Fn>
+  class fn_wrapper {
+    static_assert(!std::is_const_v<Fn> && !std::is_reference_v<Fn>);
+
+    public:
+    explicit fn_wrapper(Fn&& fn)
+    : fn(std::move(fn))
+    {}
+
+    explicit fn_wrapper(const Fn& fn)
+    : fn(fn)
+    {}
+
+    template<typename... Args>
+    auto operator()([[maybe_unused]] set_value_t tag, Args&&... args) & -> decltype(auto) {
+      return std::invoke(fn, std::forward<Args>(args)...);
+    }
+
+    template<typename... Args>
+    auto operator()([[maybe_unused]] set_value_t tag, Args&&... args) const & -> decltype(auto) {
+      return std::invoke(fn, std::forward<Args>(args)...);
+    }
+
+    template<typename... Args>
+    auto operator()([[maybe_unused]] set_value_t tag, Args&&... args) && -> decltype(auto) {
+      return std::invoke(std::move(fn), std::forward<Args>(args)...);
+    }
+
+    private:
+    Fn fn;
+  };
+
   template<sender Sender, typename Fn>
   constexpr auto default_impl(Sender&& s, Fn&& fn) const
   -> sender decltype(auto) {
-    return _let_adapter_common_t::impl<set_value_t>(std::forward<Sender>(s), std::forward<Fn>(fn));
+    return _let_adapter_common_t::impl<set_value_t>(std::forward<Sender>(s), fn_wrapper(std::forward<Fn>(fn)));
   }
 };
 inline constexpr lazy_let_value_t lazy_let_value{};
@@ -3568,10 +3626,42 @@ struct lazy_let_error_t {
   }
 
   private:
+  template<typename Fn>
+  class fn_wrapper {
+    static_assert(!std::is_const_v<Fn> && !std::is_reference_v<Fn>);
+
+    public:
+    explicit fn_wrapper(Fn&& fn)
+    : fn(std::move(fn))
+    {}
+
+    explicit fn_wrapper(const Fn& fn)
+    : fn(fn)
+    {}
+
+    template<typename... Args>
+    auto operator()([[maybe_unused]] set_error_t tag, Args&&... args) & -> decltype(auto) {
+      return std::invoke(fn, std::forward<Args>(args)...);
+    }
+
+    template<typename... Args>
+    auto operator()([[maybe_unused]] set_error_t tag, Args&&... args) const & -> decltype(auto) {
+      return std::invoke(fn, std::forward<Args>(args)...);
+    }
+
+    template<typename... Args>
+    auto operator()([[maybe_unused]] set_error_t tag, Args&&... args) && -> decltype(auto) {
+      return std::invoke(std::move(fn), std::forward<Args>(args)...);
+    }
+
+    private:
+    Fn fn;
+  };
+
   template<sender Sender, typename Fn>
   constexpr auto default_impl(Sender&& s, Fn&& fn) const
   -> sender decltype(auto) {
-    return _let_adapter_common_t::impl<set_error_t>(std::forward<Sender>(s), std::forward<Fn>(fn));
+    return _let_adapter_common_t::impl<set_error_t>(std::forward<Sender>(s), fn_wrapper(std::forward<Fn>(fn)));
   }
 };
 inline constexpr lazy_let_error_t lazy_let_error{};
@@ -3636,10 +3726,42 @@ struct lazy_let_done_t {
   }
 
   private:
+  template<typename Fn>
+  class fn_wrapper {
+    static_assert(!std::is_const_v<Fn> && !std::is_reference_v<Fn>);
+
+    public:
+    explicit fn_wrapper(Fn&& fn)
+    : fn(std::move(fn))
+    {}
+
+    explicit fn_wrapper(const Fn& fn)
+    : fn(fn)
+    {}
+
+    template<typename... Args>
+    auto operator()([[maybe_unused]] set_done_t tag, Args&&... args) & -> decltype(auto) {
+      return std::invoke(fn, std::forward<Args>(args)...);
+    }
+
+    template<typename... Args>
+    auto operator()([[maybe_unused]] set_done_t tag, Args&&... args) const & -> decltype(auto) {
+      return std::invoke(fn, std::forward<Args>(args)...);
+    }
+
+    template<typename... Args>
+    auto operator()([[maybe_unused]] set_done_t tag, Args&&... args) && -> decltype(auto) {
+      return std::invoke(std::move(fn), std::forward<Args>(args)...);
+    }
+
+    private:
+    Fn fn;
+  };
+
   template<sender Sender, typename Fn>
   constexpr auto default_impl(Sender&& s, Fn&& fn) const
   -> sender decltype(auto) {
-    return _let_adapter_common_t::impl<set_done_t>(std::forward<Sender>(s), std::forward<Fn>(fn));
+    return _let_adapter_common_t::impl<set_done_t>(std::forward<Sender>(s), fn_wrapper(std::forward<Fn>(fn)));
   }
 };
 inline constexpr lazy_let_done_t lazy_let_done{};
@@ -5351,11 +5473,9 @@ struct lazy_split_t {
     using nested_opstate_type = decltype(::earnest::execution::connect(std::declval<Sender>(), std::declval<receiver_type>()));
 
     public:
-    template<typename Sender_>
-    requires tag_invocable<connect_t, Sender_, receiver_type>
-    explicit shared_opstate(Sender_&& s)
+    explicit shared_opstate(Sender&& s)
     : shared_opstate_outcomes_for_sender<Sender>(),
-      nested_opstate(::earnest::execution::connect(std::forward<Sender_>(s), receiver_type(*this)))
+      nested_opstate(::earnest::execution::connect(std::move(s), receiver_type(*this)))
     {}
 
     // Ensure the shared_opstate is started.

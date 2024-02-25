@@ -26,6 +26,7 @@
 namespace earnest::detail {
 
 
+#if 0
 inline auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::ostream& {
   using namespace std::literals;
 
@@ -55,17 +56,6 @@ inline auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::os
   return out;
 }
 
-
-template<typename Executor, typename Allocator>
-inline wal_file_entry<Executor, Allocator>::wal_file_entry(const executor_type& ex, allocator_type alloc)
-: file(ex),
-  alloc_(alloc),
-  asio_strand_(asio::strand<Executor>(ex)),
-  link_done_event_(ex, alloc),
-  wal_flusher_(this->file, alloc),
-  unwritten_links_(alloc),
-  seal_barrier_(ex, alloc)
-{}
 
 template<typename Executor, typename Allocator>
 inline auto wal_file_entry<Executor, Allocator>::header_reader_() {
@@ -98,7 +88,9 @@ inline auto wal_file_entry<Executor, Allocator>::header_writer_() const {
       & xdr_uint32(version)
       & xdr_uint64(sequence);
 }
+#endif
 
+#if 0
 template<typename Executor, typename Allocator>
 template<typename Stream, typename Acceptor, typename Callback>
 #if 0
@@ -138,7 +130,9 @@ auto wal_file_entry<Executor, Allocator>::read_records_until_(Stream& stream, Ac
             wf->read_records_until_(stream, std::move(acceptor), std::move(h), end_offset);
           }));
 }
+#endif
 
+#if 0
 template<typename Executor, typename Allocator>
 inline auto wal_file_entry<Executor, Allocator>::decorate_(variant_type& v) const -> void {
   if (std::holds_alternative<wal_record_modify_file32<executor_type>>(v)) {
@@ -147,7 +141,9 @@ inline auto wal_file_entry<Executor, Allocator>::decorate_(variant_type& v) cons
         &this->file);
   }
 }
+#endif
 
+#if 0
 template<typename Executor, typename Allocator>
 template<typename Range, typename CompletionToken, typename TransactionValidator>
 #if __cpp_concepts >= 201907L
@@ -183,7 +179,9 @@ inline auto wal_file_entry<Executor, Allocator>::async_append(write_records_vect
       std::move(on_successful_write_callback),
       delay_flush);
 }
+#endif
 
+#if 0
 template<typename Executor, typename Allocator>
 template<typename OnSpaceAssigned, typename TransactionValidator>
 inline auto wal_file_entry<Executor, Allocator>::async_append_impl_(write_records_vector records, move_only_function<void(std::error_code)>&& completion_handler, OnSpaceAssigned&& on_space_assigned, TransactionValidator&& transaction_validator, move_only_function<void(records_vector)> on_successful_write_callback, bool delay_flush) -> void {
@@ -205,6 +203,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_append_impl_(write_record
                 wf->append_bytes_(std::move(byte_vector), std::move(handler), std::move(on_space_assigned), ec, wal_file_entry_state::ready, std::move(transaction_validator), std::move(on_successful_write_callback), std::move(records), delay_flush);
               })));
 }
+#endif
 
 template<typename Executor, typename Allocator>
 template<typename CompletionToken>
@@ -304,6 +303,7 @@ inline auto wal_file_entry<Executor, Allocator>::async_discard_all(CompletionTok
       token, this->shared_from_this());
 }
 
+#if 0
 template<typename Executor, typename Allocator>
 inline auto wal_file_entry<Executor, Allocator>::write_offset() const noexcept -> typename fd_type::offset_type {
   return write_offset_;
@@ -318,7 +318,9 @@ template<typename Executor, typename Allocator>
 inline auto wal_file_entry<Executor, Allocator>::has_unlinked_data() const -> bool {
   return write_offset_ != file.size();
 }
+#endif
 
+#if 0
 template<typename Executor, typename Allocator>
 template<typename Acceptor, typename CompletionToken>
 inline auto wal_file_entry<Executor, Allocator>::async_records(Acceptor&& acceptor, CompletionToken&& token) const {
@@ -490,7 +492,9 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_(std::vector<std::
       },
       token, std::move(bytes), std::forward<OnSpaceAssigned>(space_assigned_event), ec, expected_state, this->shared_from_this(), std::forward<TransactionValidator>(transaction_validator), std::move(on_successful_write_callback), std::move(records), delay_flush);
 }
+#endif
 
+#if 0
 template<typename Executor, typename Allocator>
 template<typename CompletionToken, typename Barrier, typename Fanout, typename DeferredTransactionValidator>
 inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
@@ -614,6 +618,7 @@ inline auto wal_file_entry<Executor, Allocator>::append_bytes_at_(
       },
       token, write_offset, std::move(bytes), std::forward<Barrier>(barrier), std::forward<Fanout>(f), this->shared_from_this(), std::forward<DeferredTransactionValidator>(deferred_transaction_validator), std::move(converted_records), delay_flush);
 }
+#endif
 
 
 } /* namespace earnest::detail */

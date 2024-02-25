@@ -92,13 +92,13 @@ class buffered_readstream_adapter {
   friend auto tag_invoke(execution::io::lazy_read_some_ec_t tag, buffered_readstream_adapter& self, std::span<std::byte> buf) {
     using namespace execution;
 
-    auto when_data_avail = [](buffered_readstream_adapter& self, std::span<std::byte> buf) -> std::size_t {
-      const auto rlen = std::min(self.buffer_.size(), buf.size());
+    auto when_data_avail = [](buffered_readstream_adapter& self, std::span<std::byte> buf) {
+      const std::size_t rlen = std::min(self.buffer_.size(), buf.size());
       std::copy_n(self.buffer_.data(), rlen, buf.data());
       self.buffer_ = self.buffer_.subspan(rlen);
-      return rlen;
+      return just(rlen);
     };
-    auto when_no_data_avail = [](buffered_readstream_adapter& self, std::span<std::byte> buf) -> std::size_t {
+    auto when_no_data_avail = [](buffered_readstream_adapter& self, std::span<std::byte> buf) {
       if constexpr(tag_invocable<tag_t<io::lazy_read_some_ec>, next_layer_type&, std::array<std::span<std::byte>, 2>>) {
         // If the underlying stream can read multiple buffers,
         // we'll read both the requested data and our buffer directly.
@@ -147,7 +147,7 @@ class buffered_readstream_adapter {
     auto when_data_avail = [](buffered_readstream_adapter& self, auto& buffers) {
       return just(std::ref(self), std::move(buffers))
       | lazy_then(
-          [](buffered_readstream_adapter& self, Buffers&& buffers) -> std::size_t {
+          [](buffered_readstream_adapter& self, auto&& buffers) -> std::size_t {
             std::size_t total_rlen = 0;
 
             for (std::span<std::byte> buf : buffers) {
@@ -170,7 +170,7 @@ class buffered_readstream_adapter {
         // we'll read both the requested data and our buffer directly.
         return just(std::ref(self), std::move(buffer_vector))
         | let_variant(
-            []<typename LocalBuffers>(buffered_readstream_adapter& self, auto& buffers) -> std::size_t {
+            [](buffered_readstream_adapter& self, auto& buffers) {
               std::size_t local_buffers_size = std::reduce(
                   buffers.begin(), buffers.end(),
                   std::size_t(0),
@@ -209,7 +209,7 @@ class buffered_readstream_adapter {
         // we'll read into our local buffer, and next do a copy.
         return just(std::ref(self), std::move(buffer_vector))
         | lazy_let_value(
-            []<typename LocalBuffers>(buffered_readstream_adapter& self, auto& buffers) -> std::size_t {
+            [](buffered_readstream_adapter& self, auto& buffers) {
               std::size_t local_buffers_size = std::reduce(
                   buffers.begin(), buffers.end(),
                   std::size_t(0),
@@ -252,16 +252,16 @@ class buffered_readstream_adapter {
     };
 
     using variant_type = std::variant<
-        decltype(when_data_avail(std::declval<buffered_readstream_adapter&>(), std::declval<std::remove_cvref_t<Buffers&>>())),
-        decltype(when_no_data_avail(std::declval<buffered_readstream_adapter&>(), std::declval<std::remove_cvref_t<Buffers&>>()))>;
+        decltype(when_data_avail(std::declval<buffered_readstream_adapter&>(), std::declval<std::remove_cvref_t<Buffers>&>())),
+        decltype(when_no_data_avail(std::declval<buffered_readstream_adapter&>(), std::declval<std::remove_cvref_t<Buffers>&>()))>;
 
     return just(std::ref(self), std::forward<Buffers>(buffers))
     | let_variant(
         [when_data_avail, when_no_data_avail](buffered_readstream_adapter& self, std::remove_cvref_t<Buffers>& buf) -> variant_type {
           if (!self.buffer_.empty())
-            return variant_type(std::in_place_index<0>, self, buf);
+            return variant_type(std::in_place_index<0>, when_data_avail(self, buf));
           else
-            return variant_type(std::in_place_index<1>, self, buf);
+            return variant_type(std::in_place_index<1>, when_no_data_avail(self, buf));
         });
   }
 

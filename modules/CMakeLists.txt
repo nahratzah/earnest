@@ -12,6 +12,7 @@ add_subdirectory(unittest-cpp)
 add_subdirectory(prometheus-cpp)
 add_subdirectory(spdlog)
 add_subdirectory(opentelemetry-cpp)
+add_subdirectory(GSL)
 
 add_subdirectory(execution)
 add_subdirectory(xdr_v2)

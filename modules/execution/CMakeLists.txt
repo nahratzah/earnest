@@ -9,6 +9,7 @@ target_sources(execution
     FILES
     include/earnest/execution.h)
 target_compile_features(execution INTERFACE cxx_std_17)
+target_link_libraries(execution INTERFACE GSL)
 
 add_executable(execution_test)
 target_link_libraries(execution_test PUBLIC execution UnitTest++)
