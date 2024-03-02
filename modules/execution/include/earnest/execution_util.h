@@ -2565,7 +2565,7 @@ struct late_binding_t<std::variant<ValueTypes...>, std::variant<ErrorTypes...>> 
     }
 
     public:
-    auto start() -> void {
+    auto start() noexcept -> void {
       std::unique_lock lck{mtx};
       assert(!start_requested_);
       assert(!is_started());
@@ -2724,16 +2724,18 @@ struct late_binding_t<std::variant<ValueTypes...>, std::variant<ErrorTypes...>> 
   };
 
   template<receiver Receiver>
-  class opstate {
+  class opstate
+  : public operation_state_base_
+  {
     public:
     explicit opstate(gsl::not_null<std::shared_ptr<shared_state>> state, Receiver&& rcv)
     : state(state),
       rcv(std::move(rcv))
     {
-      state->attach_rcv(&rcv);
+      state->attach_rcv(&this->rcv);
     }
 
-    friend auto tag_invoke([[maybe_unused]] start_t start, opstate& self) -> void {
+    friend auto tag_invoke([[maybe_unused]] start_t start, opstate& self) noexcept -> void {
       self.state->start();
     }
 

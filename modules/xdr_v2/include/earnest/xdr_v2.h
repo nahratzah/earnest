@@ -3588,12 +3588,12 @@ struct tuple_t
 
   private:
   template<std::size_t... Idx, typename... T, typename... Invocation>
-  auto read_([[maybe_unused]] std::index_sequence<Idx...> indices, std::tuple<T...>& v, Invocation... invocation) {
+  auto read_([[maybe_unused]] std::index_sequence<Idx...> indices, std::tuple<T...>& v, Invocation... invocation) const {
     return (unresolved_operation_block<false, std::tuple<>>{} |...| invocation.read(std::get<Idx>(v)));
   }
 
   template<std::size_t... Idx, typename... T, typename... Invocation>
-  auto write_([[maybe_unused]] std::index_sequence<Idx...> indices, const std::tuple<T...>& v, Invocation... invocation) {
+  auto write_([[maybe_unused]] std::index_sequence<Idx...> indices, const std::tuple<T...>& v, Invocation... invocation) const {
     return (unresolved_operation_block<true, std::tuple<>>{} |...| invocation.write(std::get<Idx>(v)));
   }
 };

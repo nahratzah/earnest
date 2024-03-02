@@ -234,7 +234,7 @@ struct write_records_buffer<Executor, Allocator>::xdr_invocation_ {
 };
 
 
-static auto make_link_sender(execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> input) {
+static auto make_link_sender(execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> input) -> execution::sender_of<> auto {
   using namespace execution;
 
   // We _must_ start the chain:
@@ -538,7 +538,7 @@ class wal_file_entry_file {
 
   wal_file_entry_file(
       fd_type&& file, offset_type end_offset,
-      execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> initial_link,
+      link_sender initial_link,
       allocator_type alloc = allocator_type())
   : file(std::move(file)),
     end_offset(end_offset),
@@ -546,7 +546,7 @@ class wal_file_entry_file {
     link_offset(end_offset - 4u),
     wal_flusher_(this->file, alloc),
     strand_(alloc),
-    link(make_link_sender(std::move(initial_link)))
+    link(std::move(initial_link))
   {
     if (end_offset < 4) throw std::range_error("bug: wal file end-offset too low");
   }
@@ -1029,15 +1029,15 @@ class wal_file_entry
     unwritten_data(alloc)
   {}
 
-  wal_file_entry(fd_type fd, std::filesystem::path name, xdr_header_tuple hdr, execution::io::offset_type end_offset, bool sealed, gsl::not_null<std::shared_ptr<spdlog::logger>> logger, allocator_type alloc)
+  wal_file_entry(fd_type fd, std::filesystem::path name, xdr_header_tuple hdr, execution::io::offset_type end_offset, link_sender link, bool sealed, gsl::not_null<std::shared_ptr<spdlog::logger>> logger, allocator_type alloc)
   : name(name),
     version(std::get<0>(hdr)),
     sequence(std::get<1>(hdr)),
     alloc_(alloc),
     state_(sealed ? wal_file_entry_state::sealed : wal_file_entry_state::ready),
-    file(std::move(fd), end_offset, execution::just(), alloc),
+    file(std::move(fd), end_offset, link, alloc),
     unwritten_data(alloc),
-    fake_link(make_link_sender(execution::just())),
+    fake_link(link),
     logger(logger)
   {}
 
@@ -1301,6 +1301,7 @@ class wal_file_entry
                     std::move(repeat_state.name),
                     repeat_state.hdr,
                     repeat_state.end_offset,
+                    make_link_sender(just()),
                     repeat_state.sealed,
                     repeat_state.logger,
                     repeat_state.alloc);
@@ -1308,104 +1309,156 @@ class wal_file_entry
         });
   }
 
-  auto async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence)
+  [[nodiscard]]
+  static auto create(executor_type ex, dir d, const std::filesystem::path& name, std::uint_fast64_t sequence, allocator_type alloc)
   -> execution::type_erased_sender<
-      std::variant<std::tuple<std::shared_ptr<wal_file_entry>>>,
+      std::variant<std::tuple<
+          gsl::not_null<std::shared_ptr<wal_file_entry>>,
+          execution::late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>::acceptor>>,
       std::variant<std::exception_ptr, std::error_code>,
-      false>
-  {
-    using type_erased_sender = execution::type_erased_sender<
-        std::variant<std::tuple<std::shared_ptr<wal_file_entry>>>,
-        std::variant<std::exception_ptr, std::error_code>,
-        false>;
+      false> {
     using namespace execution;
     using pos_stream = positional_stream_adapter<fd_type&>;
 
-    return just(this->shared_from_this(), d, name, sequence)
-    | validation(
-        [](const std::shared_ptr<wal_file_entry>& wf,
+    return just(ex, get_wal_logger(), d, name, sequence, alloc)
+    | lazy_observe_value(
+        [](
+            [[maybe_unused]] const executor_type& ex,
+            const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
             [[maybe_unused]] const dir& d,
             const std::filesystem::path& name,
-            [[maybe_unused]] std::uint_fast64_t sequence) -> std::optional<std::exception_ptr> {
+            std::uint_fast64_t sequence,
+            [[maybe_unused]] const allocator_type& alloc) {
+          logger->info("creating wal file[{}] {}", sequence, name.native());
+        })
+    | validation(
+        [](
+            [[maybe_unused]] const executor_type& ex,
+            [[maybe_unused]] const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
+            [[maybe_unused]] const dir& d,
+            const std::filesystem::path& name,
+            [[maybe_unused]] std::uint_fast64_t sequence,
+            [[maybe_unused]] const allocator_type& alloc) -> std::optional<std::exception_ptr> {
           if (name.has_parent_path()) return std::make_exception_ptr(std::runtime_error("wal file must be a filename"));
-          if (wf->file.is_open()) return std::make_exception_ptr(std::logic_error("wal is already open"));
-          return std::nullopt;
-        })
-    | validation(
-        [](const std::shared_ptr<wal_file_entry>& wf,
-            [[maybe_unused]] const dir& d,
-            [[maybe_unused]] const std::filesystem::path& name,
-            [[maybe_unused]] std::uint_fast64_t sequence) -> std::optional<std::error_code> {
-          if (wf->state_ != wal_file_entry_state::uninitialized) return make_error_code(wal_errc::bad_state);
           return std::nullopt;
         })
     | then(
-        [](std::shared_ptr<wal_file_entry> wf,
-            [[maybe_unused]] const dir& d,
-            [[maybe_unused]] const std::filesystem::path& name,
-            [[maybe_unused]] std::uint_fast64_t sequence) {
-          wf->state_ = wal_file_entry_state::opening;
+        [](
+            executor_type ex,
+            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
+            const dir& d,
+            std::filesystem::path name,
+            std::uint_fast64_t sequence,
+            allocator_type alloc) {
+          fd_type fd{ex};
           std::error_code ec;
-          wf->file.create(d, name, ec);
-          return std::make_tuple(ec, wf, name, sequence);
+          fd.create(d, name, ec);
+          return std::make_tuple(ec, logger, std::move(fd), name, sequence, alloc);
         })
     | explode_tuple()
     | validation(
-        [](std::error_code ec, [[maybe_unused]] const std::shared_ptr<wal_file_entry>& wf, [[maybe_unused]] const std::filesystem::path& name, [[maybe_unused]] std::uint_fast64_t sequence) -> std::optional<std::error_code> {
+        [](
+            std::error_code ec,
+            [[maybe_unused]] const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
+            [[maybe_unused]] const fd_type& fd,
+            [[maybe_unused]] const std::filesystem::path& name,
+            [[maybe_unused]] std::uint_fast64_t sequence,
+            [[maybe_unused]] const allocator_type alloc) -> std::optional<std::error_code> {
           if (ec) return ec;
           return std::nullopt;
         })
     | then(
-        []([[maybe_unused]] std::error_code ec, std::shared_ptr<wal_file_entry> wf, const std::filesystem::path& name, std::uint_fast64_t sequence) {
-          return std::make_tuple(wf, name, sequence);
+        [](
+            [[maybe_unused]] std::error_code ec,
+            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
+            fd_type fd,
+            std::filesystem::path name,
+            std::uint_fast64_t sequence,
+            allocator_type alloc) {
+          return std::make_tuple(logger, std::move(fd), name, sequence, alloc);
+        })
+    | explode_tuple()
+    | then(
+        [](
+            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
+            fd_type fd,
+            std::filesystem::path name,
+            std::uint_fast64_t sequence,
+            allocator_type alloc) {
+          std::error_code ec;
+          bool was_locked = fd.ftrylock(ec);
+          if (!ec && !was_locked) ec = make_error_code(wal_errc::unable_to_lock);
+          return std::make_tuple(ec, logger, std::move(fd), std::move(name), sequence, std::move(alloc));
         })
     | explode_tuple()
     | validation(
-        [](const std::shared_ptr<wal_file_entry>& wf, [[maybe_unused]] const std::filesystem::path& name, [[maybe_unused]] std::uint_fast64_t sequence) -> std::optional<std::error_code> {
-          std::error_code ec;
-          const bool was_locked = wf->file.ftrylock(ec);
+        [](
+            std::error_code ec,
+            [[maybe_unused]] const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
+            [[maybe_unused]] const fd_type& fd,
+            [[maybe_unused]] const std::filesystem::path& name,
+            [[maybe_unused]] std::uint_fast64_t sequence,
+            [[maybe_unused]] const allocator_type& alloc) -> std::optional<std::error_code> {
           if (ec) return ec;
-          if (!was_locked) return make_error_code(wal_errc::unable_to_lock);
           return std::nullopt;
         })
     | then(
-        [](std::shared_ptr<wal_file_entry> wf, std::filesystem::path name, std::uint_fast64_t sequence) {
-          wf->name = name;
-          wf->version = max_version;
-          wf->sequence = sequence;
-          return wf;
+        [](
+            [[maybe_unused]] std::error_code ec,
+            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
+            fd_type fd,
+            std::filesystem::path name,
+            std::uint_fast64_t sequence,
+            allocator_type alloc) {
+          return std::make_tuple(logger, std::move(fd), std::move(name), sequence, std::move(alloc));
         })
+    | explode_tuple()
     | let_value(
-        [](std::shared_ptr<wal_file_entry>& wf) -> sender_of<std::shared_ptr<wal_file_entry>> auto {
-          return xdr_v2::write(pos_stream(wf->file), *wf, xdr_header_invocation{})
-          | then(
-              [&wf](pos_stream&& stream) -> pos_stream&& {
-                wf->link_offset_ = stream.position();
-                return std::move(stream);
+        [](
+            gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
+            fd_type& fd,
+            std::filesystem::path& name,
+            std::uint_fast64_t sequence,
+            allocator_type& alloc)
+        -> sender_of<
+            gsl::not_null<std::shared_ptr<wal_file_entry>>,
+            late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>::acceptor> auto {
+          return xdr_v2::write(pos_stream(fd),
+              std::make_tuple(
+                  xdr_header_tuple(max_version, sequence),
+                  wal_record_end_of_records::opcode,
+                  wal_record_end_of_records{}),
+              xdr_v2::constant(
+                  xdr_v2::tuple(
+                      xdr_header_invocation{},
+                      xdr_v2::uint32,
+                      xdr_v2::identity)))
+          | let_value(
+              [](pos_stream& stream) {
+                return io::lazy_sync(stream.next_layer())
+                | then(
+                    [&stream]() -> pos_stream&& {
+                      return std::move(stream);
+                    });
               })
-          | xdr_v2::write(xdr_v2::no_fd, write_variant_type(), xdr_v2::constant(xdr_v2::identity))
           | then(
-              [&wf](pos_stream&& stream) -> std::shared_ptr<wal_file_entry> {
-                wf->write_offset_ = stream.position();
-                return std::move(wf);
-              });
-        })
-    | let_value(
-        [](std::shared_ptr<wal_file_entry>& wf) -> sender_of<std::shared_ptr<wal_file_entry>> auto {
-          return wf->wal_flusher_.lazy_flush(false)
-          | then(
-              [&wf]() -> std::shared_ptr<wal_file_entry>&& {
-                return std::move(wf);
-              });
-        })
-    | then(
-        [](std::shared_ptr<wal_file_entry> wf) {
-          link_done_event_type acceptor;
-          std::tie(acceptor, wf->link_done_event_) = late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>();
-          wf->state_ = wal_file_entry_state::ready;
-          return std::make_tuple(wf, std::move(acceptor));
-        })
-    | explode_tuple();
+              [&alloc, &name, sequence, &logger](pos_stream&& stream) {
+                auto end_offset = stream.position();
+                auto [link_acceptor, link_sender] = late_binding<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>();
+                gsl::not_null<std::shared_ptr<wal_file_entry>> wf = std::allocate_shared<wal_file_entry>(
+                    alloc,
+                    std::move(stream.next_layer()),
+                    std::move(name),
+                    xdr_header_tuple(max_version, sequence),
+                    end_offset,
+                    make_link_sender(std::move(link_sender)),
+                    false, // new file is not sealed
+                    logger,
+                    alloc);
+                return std::make_tuple(wf, std::move(link_acceptor));
+              })
+          | explode_tuple();
+        });
   }
 
   template<typename CompletionToken>
