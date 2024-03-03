@@ -254,8 +254,10 @@ class wal_flusher {
 
   auto start_timer_(std::unique_lock<std::mutex>& lck) noexcept -> void {
     // XXX Since timer logic isn't implemented at this point, just start immediately.
-    delay_ = false;
-    start_(lck);
+    if (pending_.size() > 128) {
+      delay_ = false;
+      start_(lck);
+    }
   }
 
   auto start_(std::unique_lock<std::mutex>& lck) noexcept -> void {

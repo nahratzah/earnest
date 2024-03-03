@@ -554,6 +554,411 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
   }
 }
 
+TEST(non_durable_append_wal_file_entry) {
+  using namespace std::string_literals;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using ::earnest::detail::wal_record_noop;
+  using ::earnest::detail::wal_record_skip32;
+
+  // We have to make sure the file doesn't exist, or the test will fail.
+  ensure_file_is_gone("durable_append_log");
+
+  asio::io_context ioctx;
+  auto [f, acceptor] = earnest::execution::sync_wait(
+      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
+          ioctx.get_executor(),
+          write_dir, "durable_append_log", 17,
+          std::allocator<std::byte>())).value();
+  acceptor.assign_values();
+
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
+              },
+              ioctx.get_executor(),
+              f->get_allocator()),
+          nullptr,
+          nullptr,
+          true)
+      | earnest::execution::let_value([f]() { return f->records(); })
+      | earnest::execution::observe_value(
+          [](const auto& records) {
+            CHECK_EQUAL(3u, records.size());
+            if (records.size() == 3) {
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_noop>(records.at(0)));
+              CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+              CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(2)));
+              CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(2)));
+            }
+          }));
+}
+
+TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
+  using namespace std::string_literals;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using ::earnest::detail::wal_record_noop;
+  using ::earnest::detail::wal_record_skip32;
+
+  // We have to make sure the file doesn't exist, or the test will fail.
+  ensure_file_is_gone("durable_txvalidating_append_log");
+
+  asio::io_context ioctx;
+  auto [f, acceptor] = earnest::execution::sync_wait(
+      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
+          ioctx.get_executor(),
+          write_dir, "durable_txvalidating_append_log", 17,
+          std::allocator<std::byte>())).value();
+  acceptor.assign_values();
+
+  bool tx_validator_called = false;
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
+              },
+              ioctx.get_executor(),
+              f->get_allocator()),
+          [&tx_validator_called]() {
+            CHECK(!tx_validator_called);
+            tx_validator_called = true;
+            return earnest::execution::just();
+          },
+          nullptr,
+          true)
+      | earnest::execution::let_value([f]() { return f->records(); })
+      | earnest::execution::observe_value(
+          [](const auto& records) {
+            CHECK_EQUAL(2u, records.size());
+            if (records.size() == 2) {
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_noop>(records.at(0)));
+              CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+              CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+            }
+          }));
+  // Confirm we can do another write after.
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_skip32{ .bytes = 0 }
+              },
+              ioctx.get_executor(),
+              f->get_allocator())));
+
+  CHECK(tx_validator_called);
+
+  auto [records] = earnest::execution::sync_wait(f->records()).value();
+  CHECK_EQUAL(3u, records.size());
+  if (records.size() == 3) {
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_noop>(records.at(0)));
+    CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+    CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(2)));
+    CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(2)));
+  }
+}
+
+TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
+  struct error {};
+  using namespace std::string_literals;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using ::earnest::detail::wal_record_noop;
+  using ::earnest::detail::wal_record_skip32;
+
+  // We have to make sure the file doesn't exist, or the test will fail.
+  ensure_file_is_gone("durable_failing_txvalidating_append_log");
+
+  asio::io_context ioctx;
+  auto [f, acceptor] = earnest::execution::sync_wait(
+      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
+          ioctx.get_executor(),
+          write_dir, "durable_failing_txvalidating_append_log", 17,
+          std::allocator<std::byte>())).value();
+  acceptor.assign_values();
+
+  bool tx_validator_called = false;
+  CHECK_THROW(
+      earnest::execution::sync_wait(
+          f->append(
+              wal_file_entry_t::write_records_buffer_t(
+                  std::initializer_list<wal_file_entry_t::write_variant_type>{
+                    wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
+                  },
+                  ioctx.get_executor(),
+                  f->get_allocator()),
+              [&tx_validator_called]() -> decltype(earnest::execution::just()) {
+                CHECK(!tx_validator_called);
+                tx_validator_called = true;
+                throw error{};
+              },
+              nullptr,
+              true)),
+      error);
+  // Confirm we can do another write after.
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_skip32{ .bytes = 0 }
+              },
+              ioctx.get_executor(),
+              f->get_allocator())));
+
+  CHECK(tx_validator_called);
+
+  auto [records] = earnest::execution::sync_wait(f->records()).value();
+  CHECK_EQUAL(2u, records.size());
+  if (records.size() == 2) {
+    // Record from the tx-validation-failure is a skip record.
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(0)));
+    CHECK(wal_record_skip32{12} == std::get<wal_record_skip32>(records.at(0)));
+
+    // This record follows, so it must be written.
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+    CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(1)));
+  }
+}
+
+TEST(non_durable_append_wal_file_entry_callback) {
+  using namespace std::string_literals;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using ::earnest::detail::wal_record_noop;
+  using ::earnest::detail::wal_record_skip32;
+
+  // We have to make sure the file doesn't exist, or the test will fail.
+  ensure_file_is_gone("durable_append_log");
+
+  asio::io_context ioctx;
+  auto [f, acceptor] = earnest::execution::sync_wait(
+      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
+          ioctx.get_executor(),
+          write_dir, "durable_append_log", 17,
+          std::allocator<std::byte>())).value();
+  acceptor.assign_values();
+
+  bool callback_called = false;
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
+              },
+              ioctx.get_executor(),
+              f->get_allocator()),
+          nullptr,
+          [&callback_called](const auto& records) {
+            CHECK_EQUAL(3u, records.size());
+            CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+            CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+            CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(2)));
+            callback_called = true;
+            return earnest::execution::just();
+          },
+          true)
+      | earnest::execution::let_value([f]() { return f->records(); })
+      | earnest::execution::observe_value(
+          [](const auto& records) {
+            CHECK_EQUAL(3u, records.size());
+            if (records.size() == 3) {
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_noop>(records.at(0)));
+              CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+              CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(2)));
+              CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(2)));
+            }
+          }));
+
+  CHECK(callback_called);
+
+  auto [records] = earnest::execution::sync_wait(f->records()).value();
+  CHECK_EQUAL(3u, records.size());
+  if (records.size() == 3) {
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_noop>(records.at(0)));
+    CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+    CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(2)));
+    CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(2)));
+  }
+}
+
+TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
+  using namespace std::string_literals;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using ::earnest::detail::wal_record_noop;
+  using ::earnest::detail::wal_record_skip32;
+
+  // We have to make sure the file doesn't exist, or the test will fail.
+  ensure_file_is_gone("durable_txvalidating_append_log");
+
+  asio::io_context ioctx;
+  auto [f, acceptor] = earnest::execution::sync_wait(
+      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
+          ioctx.get_executor(),
+          write_dir, "durable_txvalidating_append_log", 17,
+          std::allocator<std::byte>())).value();
+  acceptor.assign_values();
+
+  bool tx_validator_called = false;
+  bool callback_called = false;
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
+              },
+              ioctx.get_executor(),
+              f->get_allocator()),
+          [&tx_validator_called]() {
+            CHECK(!tx_validator_called);
+            tx_validator_called = true;
+            return earnest::execution::just();
+          },
+          [&callback_called](const auto& records) {
+            CHECK_EQUAL(2u, records.size());
+            CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+            CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+            callback_called = true;
+            return earnest::execution::just();
+          },
+          true)
+      | earnest::execution::let_value([f]() { return f->records(); })
+      | earnest::execution::observe_value(
+          [](const auto& records) {
+            CHECK_EQUAL(2u, records.size());
+            if (records.size() == 2) {
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_noop>(records.at(0)));
+              CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+
+              REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+              CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+            }
+          }));
+  // Confirm we can do another write after.
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_skip32{ .bytes = 0 }
+              },
+              ioctx.get_executor(),
+              f->get_allocator())));
+
+  CHECK(tx_validator_called);
+  CHECK(callback_called);
+  CHECK_EQUAL(60u, f->end_offset());
+  CHECK_EQUAL(56u, f->link_offset());
+
+  {
+    earnest::fd<asio::io_context::executor_type> raw_file{ioctx.get_executor()};
+    raw_file.open(write_dir, "durable_txvalidating_append_log", earnest::open_mode::READ_ONLY);
+    CHECK_EQUAL(
+        hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
+            + "\000\000\000\001"s // wal_record_noop
+            + "\000\000\000\002\000\000\000\010\000\000\000\000\000\000\000\000"s // wal_record_skip32(8)
+            + "\000\000\000\002\000\000\000\000"s // wal_record_skip32(0)
+            + "\000\000\000\000"s // sentinel (wal_record_end_of_records)
+            ),
+        hex_string(raw_file.contents<std::string>()));
+  }
+
+  auto [records] = earnest::execution::sync_wait(f->records()).value();
+  CHECK_EQUAL(3u, records.size());
+  if (records.size() == 3) {
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_noop>(records.at(0)));
+    CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+    CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(2)));
+    CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(2)));
+  }
+}
+
+TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
+  struct error {};
+  using namespace std::string_literals;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using ::earnest::detail::wal_record_noop;
+  using ::earnest::detail::wal_record_skip32;
+
+  // We have to make sure the file doesn't exist, or the test will fail.
+  ensure_file_is_gone("durable_failing_txvalidating_append_log");
+
+  asio::io_context ioctx;
+  auto [f, acceptor] = earnest::execution::sync_wait(
+      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
+          ioctx.get_executor(),
+          write_dir, "durable_failing_txvalidating_append_log", 17,
+          std::allocator<std::byte>())).value();
+  acceptor.assign_values();
+
+  bool tx_validator_called = false;
+  bool callback_called = false;
+  CHECK_THROW(
+      earnest::execution::sync_wait(
+          f->append(
+              wal_file_entry_t::write_records_buffer_t(
+                  std::initializer_list<wal_file_entry_t::write_variant_type>{
+                    wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
+                  },
+                  ioctx.get_executor(),
+                  f->get_allocator()),
+              [&tx_validator_called]() -> decltype(earnest::execution::just()) {
+                CHECK(!tx_validator_called);
+                tx_validator_called = true;
+                throw error{};
+              },
+              [&callback_called]([[maybe_unused]] const auto& records) {
+                callback_called = true;
+                return earnest::execution::just();
+              },
+              true)),
+      error);
+  // Confirm we can do another write after.
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_skip32{ .bytes = 0 }
+              },
+              ioctx.get_executor(),
+              f->get_allocator())));
+
+  CHECK(tx_validator_called);
+  CHECK(!callback_called);
+
+  auto [records] = earnest::execution::sync_wait(f->records()).value();
+  CHECK_EQUAL(2u, records.size());
+  if (records.size() == 2) {
+    // Record from the tx-validation-failure is a skip record.
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(0)));
+    CHECK(wal_record_skip32{12} == std::get<wal_record_skip32>(records.at(0)));
+
+    // This record follows, so it must be written.
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+    CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(1)));
+  }
+}
+
 #if 0
 TEST(seal_wal_file_entry) {
   using namespace std::string_literals;

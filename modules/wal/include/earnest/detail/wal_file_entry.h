@@ -1738,17 +1738,14 @@ class wal_file_entry
     return file.get_link_offset();
   }
 
-  template<std::invocable<variant_type> Acceptor>
-  requires requires(Acceptor& acceptor, const variant_type& v) {
-    { std::invoke(acceptor, v) } -> execution::sender;
-  }
-  auto records(Acceptor&& acceptor) const -> execution::sender_of<> auto {
+  auto records(move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>(variant_type)> acceptor) const
+  -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> {
     using namespace execution;
     using namespace execution::io;
 
     struct state {
       async_records_reader<allocator_type> reader;
-      std::remove_cvref_t<Acceptor> acceptor;
+      move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>(variant_type)> acceptor;
       bool should_stop = false;
     };
 
@@ -1757,7 +1754,7 @@ class wal_file_entry
         just(
             state{
               .reader=async_records_reader<allocator_type>(this->shared_from_this(), this->get_allocator()),
-              .acceptor=std::forward<Acceptor>(acceptor)
+              .acceptor=std::move(acceptor)
             })
         | lazy_let_value(
             // Read the header, since we want to skip it.
@@ -1812,7 +1809,7 @@ class wal_file_entry
             }));
   }
 
-  auto records() const -> execution::sender_of<records_vector> auto {
+  auto records() const -> execution::type_erased_sender<std::variant<std::tuple<records_vector>>, std::variant<std::exception_ptr, std::error_code>> {
     using namespace execution;
 
     return just(gsl::not_null<std::shared_ptr<const wal_file_entry>>(this->shared_from_this()))
