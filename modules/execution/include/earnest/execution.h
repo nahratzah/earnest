@@ -2310,19 +2310,14 @@ inline constexpr start_detached_t start_detached;
 //
 // The function will be run in the execution-context of the scheduler.
 struct execute_t {
-  template<typename> friend struct _generic_operand_base_t;
-
   template<scheduler Scheduler, std::invocable<> Fn>
-  auto operator()(Scheduler&& sch, Fn&& fn)
+  auto operator()(Scheduler sch, Fn&& fn) const
   -> void {
-    _generic_operand_base<>(*this, sch, std::forward<Fn>(fn));
-  }
-
-  private:
-  template<scheduler Scheduler, std::invocable<> Fn>
-  auto default_impl(Scheduler&& sch, Fn&& fn)
-  -> void {
-    ::earnest::execution::start_detached(::earnest::execution::then(::earnest::execution::schedule(std::forward<Scheduler>(sch)), std::forward<Fn>(fn)));
+    if constexpr(tag_invocable<execute_t, Scheduler, Fn>) {
+      tag_invoke(*this, sch, std::forward<Fn>(fn));
+    } else {
+      ::earnest::execution::start_detached(::earnest::execution::then(::earnest::execution::schedule(std::forward<Scheduler>(sch)), std::forward<Fn>(fn)));
+    }
   }
 };
 inline constexpr execute_t execute{};
@@ -2437,7 +2432,7 @@ struct sync_wait_t {
 
       template<std::invocable<> Fn>
       friend auto tag_invoke([[maybe_unused]] execute_t, scheduler& self, Fn&& fn) -> void {
-        self.ctx->push(std::forward<Fn>());
+        self.ctx->push(std::forward<Fn>(fn));
       }
 
       friend auto tag_invoke([[maybe_unused]] schedule_t, const scheduler& self) noexcept -> sender {
@@ -4457,15 +4452,6 @@ class ensure_started_t::outcome<set_done_t> {
 //   I don't think that's in violation of the spec, as the observed behaviour
 //   of the pipeline is no different.
 struct when_all_t {
-  template<typename> friend struct _generic_operand_base_t;
-
-  template<typed_sender... Sender>
-  requires ((std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1) &&...)
-  constexpr auto operator()(Sender&&... s) const
-  -> typed_sender decltype(auto) {
-    return _generic_operand_base<>(*this, std::forward<Sender>(s)...);
-  }
-
   private:
   // A local receiver is a receiver that'll accept the values for a single sender.
   //
@@ -5013,11 +4999,14 @@ struct when_all_t {
     std::tuple<Sender...> senders;
   };
 
+  public:
   // When at least two senders are specified, we'll do the work of concatenating them
   // into the when-all operation.
-  template<typed_sender... Sender, typename = std::enable_if_t<(sizeof...(Sender) >= 2)>>
-  requires ((std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1) &&...)
-  constexpr auto default_impl(Sender&&... s) const
+  template<typed_sender... Sender>
+  requires
+      (sizeof...(Sender) >= 2) &&
+      ((std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1) &&...)
+  constexpr auto operator()(Sender&&... s) const
   -> sender_impl<std::remove_cvref_t<Sender>...> {
     return sender_impl<std::remove_cvref_t<Sender>...>(std::forward<Sender>(s)...);
   }
@@ -5031,7 +5020,8 @@ struct when_all_t {
   // If there is one sender specified, when-all is just a very expensive way of creating an identity-operation.
   // In this case, we can just forward the sender back, and spare the compiler (and runtime) some work.
   template<typed_sender Sender>
-  constexpr auto default_impl(Sender&& s) noexcept -> std::add_rvalue_reference_t<Sender> {
+  requires (std::variant_size_v<typename sender_traits<Sender>::template value_types<std::tuple, std::variant>> == 1)
+  constexpr auto operator()(Sender&& s) noexcept -> std::add_rvalue_reference_t<Sender> {
     return std::forward<Sender>(s);
   }
 };
@@ -5601,10 +5591,10 @@ inline constexpr split_t split{};
 
 struct lazy_on_t {
   template<scheduler Scheduler, typed_sender Sender>
-  constexpr auto operator()(Scheduler&& sch, Sender&& s) const
+  constexpr auto operator()(Scheduler sch, Sender&& s) const
   -> typed_sender decltype(auto) {
     if constexpr(tag_invocable<lazy_on_t, Scheduler, Sender>)
-      return ::earnest::execution::tag_invoke(*this, std::forward<Scheduler>(sch), std::forward<Sender>(s));
+      return ::earnest::execution::tag_invoke(*this, std::move(sch), std::forward<Sender>(s));
     else
       return this->default_impl(std::forward<Scheduler>(sch), std::forward<Sender>(s));
   }

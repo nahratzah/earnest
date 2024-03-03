@@ -68,10 +68,7 @@ struct lazy_repeat_t {
     using scheduler_type = decltype(execution::get_scheduler(std::declval<const Receiver<values_container>&>()));
     using fn_sender_optional = std::invoke_result_t<Fn&, std::size_t, T&...>;
     using fn_sender = typename fn_sender_optional::value_type;
-    using opstate_type = std::remove_cvref_t<std::invoke_result_t<
-        connect_t,
-        decltype(execution::lazy_on(std::declval<scheduler_type>(), std::declval<fn_sender>())),
-        Receiver<values_container>>>;
+    using opstate_type = std::remove_cvref_t<std::invoke_result_t<connect_t, fn_sender, Receiver<values_container>>>;
 
     public:
     template<typename... T_>
@@ -89,12 +86,7 @@ struct lazy_repeat_t {
           values);
       if (!opt_fn_sender.has_value()) return nullptr;
 
-      auto receiver = Receiver<values_container>(parent_state, *this);
-      auto scheduler = execution::get_scheduler(std::as_const(receiver));
-      auto ptr = &state.emplace(
-          execution::lazy_on(std::move(scheduler), *std::move(opt_fn_sender)),
-          Receiver<values_container>(parent_state, *this));
-      return ptr;
+      return &state.emplace(*std::move(opt_fn_sender), Receiver<values_container>(parent_state, *this));
     }
 
     template<std::invocable<T&&...> Fn_>
@@ -299,7 +291,9 @@ struct lazy_repeat_t {
               ::earnest::execution::set_value(std::move(this->r), std::forward<Args>(args)...);
             });
       } else {
-        execution::start(*repeated_opstate_ptr);
+        execution::execute(
+            execution::get_scheduler(std::as_const(r)),
+            [repeated_opstate_ptr]() noexcept { execution::start(*repeated_opstate_ptr); });
       }
     }
 
@@ -1549,6 +1543,11 @@ class type_erased_sender_base_::sender_intf<ReceiverIntf>::impl
   : sender_impl(std::move(sender_impl))
   {}
 
+  template<bool IsCopyConstructible = std::is_copy_constructible_v<SenderImpl>, typename = std::enable_if_t<IsCopyConstructible>>
+  explicit impl(const SenderImpl& sender_impl)
+  : sender_impl(sender_impl)
+  {}
+
   auto connect(ReceiverIntf* r) && -> std::unique_ptr<operation_state_intf> override {
     return std::make_unique<operation_state_intf::impl<SenderImpl, receiver_wrapper_t<ReceiverIntf>>>(
         std::move(sender_impl),
@@ -2272,7 +2271,7 @@ struct chain_breaker_t {
       friend auto tag_invoke(Tag tag, const local_receiver& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, const Receiver&, Args...>)
       -> tag_invoke_result_t<Tag, const Receiver&, Args...> {
-        return tag(std::as_const(self.state.r), std::forward<Args>(args)...);
+        return tag(std::as_const(self.state->r), std::forward<Args>(args)...);
       }
 
       template<typename Tag, typename... Args>
@@ -2283,7 +2282,7 @@ struct chain_breaker_t {
       friend auto tag_invoke(Tag tag, local_receiver& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, Receiver&, Args...>)
       -> tag_invoke_result_t<Tag, Receiver&, Args...> {
-        return tag(self.state.r, std::forward<Args>(args)...);
+        return tag(self.state->r, std::forward<Args>(args)...);
       }
 
       template<typename Tag, typename... Args>
@@ -2294,7 +2293,7 @@ struct chain_breaker_t {
       friend auto tag_invoke(Tag tag, local_receiver&& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, Receiver&&, Args...>)
       -> tag_invoke_result_t<Tag, Receiver&&, Args...> {
-        return tag(std::move(self.state.r), std::forward<Args>(args)...);
+        return tag(std::move(self.state->r), std::forward<Args>(args)...);
       }
 
       private:

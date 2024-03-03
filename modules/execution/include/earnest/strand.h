@@ -16,6 +16,10 @@ namespace earnest::execution {
 inline namespace extensions {
 
 
+template<typename Alloc, execution::scheduler UnderlyingScheduler>
+class strand_bound_scheduler_;
+
+
 // A strand ensures no two functions can be running at the same time.
 // (It sorta pretends to be a single thread. Or like a critical-section.)
 //
@@ -41,6 +45,8 @@ inline namespace extensions {
 // `running_in_this_thread' method won't work properly if you use co-routines that are thread-hopping.)
 template<typename Alloc = std::allocator<std::byte>>
 class strand {
+  template<typename, execution::scheduler> friend class strand_bound_scheduler_;
+
   public:
   // Strands use an allocator.
   using allocator_type = Alloc;
@@ -67,7 +73,8 @@ class strand {
 
     public:
     explicit state(allocator_type alloc)
-    : q(alloc)
+    : q(alloc),
+      alloc(alloc)
     {}
 
     state(const state&) = delete;
@@ -82,7 +89,7 @@ class strand {
 #endif
 
     auto get_allocator() const -> allocator_type {
-      return q.get_allocator();
+      return alloc;
     }
 
     auto try_lock() -> bool {
@@ -105,7 +112,7 @@ class strand {
         auto wait(std::unique_lock<std::mutex>& lck) noexcept -> void {
           // wait_until may throw (which ought to be impossible under normal circumstances).
           // If it does, we cannot recover, so we mark this function as noexcept.
-          cond_var.wait_until(
+          cond_var.wait(
               lck,
               [this]() -> bool {
                 return this->active;
@@ -194,6 +201,7 @@ class strand {
     mutable std::condition_variable cond_var;
     bool engaged = false;
     queue_type q;
+    [[no_unique_address]] allocator_type alloc;
     std::thread::id active_thread_{};
   };
 
@@ -294,36 +302,7 @@ class strand {
   class sender_impl;
 
   template<execution::scheduler UnderlyingScheduler>
-  class bound_scheduler_t {
-    public:
-    explicit bound_scheduler_t(state_ptr s, const UnderlyingScheduler& underlying_sched)
-    noexcept(std::is_nothrow_copy_constructible_v<UnderlyingScheduler>)
-    : s(s),
-      underlying_sched(underlying_sched)
-    {}
-
-    explicit bound_scheduler_t(state_ptr s, UnderlyingScheduler&& underlying_sched)
-    noexcept(std::is_nothrow_move_constructible_v<UnderlyingScheduler>)
-    : s(s),
-      underlying_sched(std::move(underlying_sched))
-    {}
-
-    auto operator==(const bound_scheduler_t& y) const noexcept -> bool {
-      return &s == &y.s && underlying_sched == y.underlying_sched;
-    }
-
-    auto operator!=(const bound_scheduler_t& y) const noexcept -> bool {
-      return !(*this == y);
-    }
-
-    friend auto tag_invoke([[maybe_unused]] execution::schedule_t tag, bound_scheduler_t&& self) -> sender_impl<UnderlyingScheduler> {
-      return sender_impl<UnderlyingScheduler>(self.s, self.underlying_sched);
-    }
-
-    private:
-    state_ptr s;
-    UnderlyingScheduler underlying_sched;
-  };
+  using bound_scheduler_t = strand_bound_scheduler_<allocator_type, UnderlyingScheduler>;
 
   template<execution::scheduler UnderlyingScheduler>
   class sender_impl
@@ -427,9 +406,9 @@ class strand {
     -> operation_state auto {
       auto get_scheduler = [&self, &r]() -> execution::scheduler auto {
         if constexpr(std::invocable<execution::tag_t<execution::get_scheduler>, std::remove_cvref_t<Receiver>&>) {
-          return self.s.scheduler(execution::get_scheduler(r));
+          return self.self.scheduler(execution::get_scheduler(r));
         } else {
-          return self.s.scheduler(blocking_scheduler<allocator_type>(self.s.get_allocator()));
+          return self.self.scheduler(blocking_scheduler<allocator_type>(self.self.get_allocator()));
         }
       };
 
@@ -490,7 +469,7 @@ class strand {
   }
 
   template<typed_sender Sender>
-  friend auto tag_invoke(on_t tag, strand&& self, Sender&& s) -> typed_sender auto {
+  friend auto tag_invoke(lazy_on_t tag, strand self, Sender&& s) -> typed_sender auto {
     return on_sender_<std::remove_cvref_t<Sender>>(self, std::forward<Sender>(s));
   }
 
@@ -499,6 +478,63 @@ class strand {
 };
 
 static_assert(scheduler<strand<>>, "strand should be a scheduler");
+// Confirm we did the specialization for schedule_t correct.
+static_assert(tag_invocable<schedule_t, strand<>>);
+static_assert(tag_invocable<schedule_t, const strand<>&>);
+static_assert(tag_invocable<schedule_t, strand<>&&>);
+static_assert(tag_invocable<schedule_t, strand<>&>);
+// Confirm we did the override for lazy_on_t correct.
+static_assert(tag_invocable<lazy_on_t, strand<>, decltype(just())>);
+static_assert(tag_invocable<lazy_on_t, const strand<>&, decltype(just())>);
+static_assert(tag_invocable<lazy_on_t, strand<>&&, decltype(just())>);
+static_assert(tag_invocable<lazy_on_t, strand<>&, decltype(just())>);
+
+
+template<typename>
+struct is_strand_bound_scheduler_ : std::false_type {};
+template<typename Alloc, typename UnderlyingScheduler>
+struct is_strand_bound_scheduler_<strand_bound_scheduler_<Alloc, UnderlyingScheduler>> : std::true_type {};
+
+template<typename>
+struct is_strand_ : std::false_type {};
+template<typename Alloc>
+struct is_strand_<strand<Alloc>> : std::true_type {};
+
+template<typename Alloc, execution::scheduler UnderlyingScheduler>
+class strand_bound_scheduler_ {
+  static_assert(!is_strand_bound_scheduler_<UnderlyingScheduler>::value);
+  static_assert(!is_strand_<UnderlyingScheduler>::value);
+
+  public:
+  explicit strand_bound_scheduler_(typename strand<Alloc>::state_ptr s, const UnderlyingScheduler& underlying_sched)
+  noexcept(std::is_nothrow_copy_constructible_v<UnderlyingScheduler>)
+  : s(s),
+    underlying_sched(underlying_sched)
+  {}
+
+  explicit strand_bound_scheduler_(typename strand<Alloc>::state_ptr s, UnderlyingScheduler&& underlying_sched)
+  noexcept(std::is_nothrow_move_constructible_v<UnderlyingScheduler>)
+  : s(s),
+    underlying_sched(std::move(underlying_sched))
+  {}
+
+  auto operator==(const strand_bound_scheduler_& y) const noexcept -> bool {
+    return &s == &y.s && underlying_sched == y.underlying_sched;
+  }
+
+  auto operator!=(const strand_bound_scheduler_& y) const noexcept -> bool {
+    return !(*this == y);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] execution::schedule_t tag, strand_bound_scheduler_&& self)
+  -> typename strand<Alloc>::template sender_impl<UnderlyingScheduler> {
+    return typename strand<Alloc>::template sender_impl<UnderlyingScheduler>(self.s, self.underlying_sched);
+  }
+
+  private:
+  typename strand<Alloc>::state_ptr s;
+  UnderlyingScheduler underlying_sched;
+};
 
 
 } /* inline namespace extensions */

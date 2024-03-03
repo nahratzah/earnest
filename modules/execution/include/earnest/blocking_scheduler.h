@@ -100,7 +100,7 @@ class blocking_scheduler {
         return std::nullopt;
       }
       entry e = std::move(q.front());
-      q.pop_front();
+      q.pop();
       return e;
     }
 

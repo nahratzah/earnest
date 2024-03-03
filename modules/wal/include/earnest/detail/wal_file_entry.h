@@ -112,7 +112,7 @@ class write_records_buffer {
   using write_record_with_offset_vector = std::vector<write_record_with_offset, allocator_for<write_record_with_offset>>;
 
   explicit write_records_buffer(executor_type ex, allocator_type alloc = allocator_type())
-  : bytes_(alloc),
+  : bytes_(ex, alloc),
     records_(alloc)
   {}
 
@@ -296,6 +296,9 @@ class wal_file_entry_file {
       }
     }
 
+    prepared_space(const prepared_space&) = delete;
+    prepared_space(prepared_space&&) noexcept = default;
+
     auto offset() const noexcept -> offset_type {
       return write_offset;
     }
@@ -328,19 +331,14 @@ class wal_file_entry_file {
     // This performs an atomic write of some bytes of data.
     // The data to-be-written must be at least 4 bytes.
     //
-    // - scheduler: a scheduler to run the whole operation on.
     // - data: the data that is to be written.
     // - delay_flush: allows for flush-to-disk to be delayed, in order to combine more writes into a single flush operation.
-    template<execution::scheduler Scheduler>
-    auto write(Scheduler scheduler, std::span<const std::byte> data, bool delay_flush = false) &&
-    -> execution::sender_of<offset_type> auto {
+    auto write(std::span<const std::byte> data, bool delay_flush = false) &&
+    -> execution::sender_of<> auto {
       using namespace execution;
 
       if (data.size() != write_len) throw std::range_error("data size does not match reserved size");
-      auto strand_scheduler = self->strand_.scheduler(scheduler);
-      return lazy_on(
-          strand_scheduler,
-          std::move(*this).write_(data, delay_flush))
+      return std::move(*this).write_(data, delay_flush)
       | chain_breaker(); // Now we can release any references to this.
                          // Also means we won't hang on to the acceptor granted us by commit_space_,
                          // which is of critical importance, because releasing it will ensure
@@ -349,7 +347,7 @@ class wal_file_entry_file {
 
     private:
     // Implementation for write.
-    // Must be run with a scheduler wrapped by self->strand_.
+    // Must be run with a scheduler wrapped by a strand_.
     //
     // The operation does:
     //
@@ -382,7 +380,7 @@ class wal_file_entry_file {
     // The "notify commit-space acceptor" is done by completing the acceptor returned by commit-space.
     // This code handles updating the link-offset.
     // If the acceptor isn't completed, it'll kick off the recovery code in the background.
-    auto write_(std::span<const std::byte> data, bool delay_flush = false) && -> execution::sender_of<offset_type> auto {
+    auto write_(std::span<const std::byte> data, bool delay_flush = false) && -> execution::sender_of<> auto {
       using namespace execution;
 
       if (data.size() != write_len) {
@@ -450,7 +448,7 @@ class wal_file_entry_file {
                 })
             | let_value(
                 // Now that the link is written, we need to flush that to disk.
-                [&space, delay_flush]() {
+                [&space, delay_flush]([[maybe_unused]] std::size_t num_bytes_written) {
                   return space.self->wal_flusher_.lazy_flush(true, space.self->delay_flush(space.write_offset, delay_flush));
                 });
 
@@ -469,12 +467,12 @@ class wal_file_entry_file {
                   auto nothing_to_update = []() {
                     return just();
                   };
-                  using variant_type = std::variant<decltype(do_the_update), decltype(nothing_to_update)>;
+                  using variant_type = std::variant<decltype(do_the_update()), decltype(nothing_to_update())>;
 
                   if (space.update_callback == nullptr)
-                    return nothing_to_update();
+                    return variant_type(nothing_to_update());
                   else
-                    return do_the_update();
+                    return variant_type(do_the_update());
                 })
             | observe_value(
                 // Now that everything has been written, we notify the acceptor
@@ -509,7 +507,7 @@ class wal_file_entry_file {
                         std::throw_with_nested(std::system_error(wal_errc::unrecoverable, "must-succeed write failed -- WAL state and in-memory state are now unreconcilable"));
                       } catch (...) {
                         // Now we have a wrapped exception, that's suitable for propagation.
-                        space.acceptor.assign_error(std::current_exception()); // Never throws
+                        std::move(space.acceptor).assign_error(std::current_exception()); // Never throws
                       }
                     }
                   }
@@ -518,10 +516,6 @@ class wal_file_entry_file {
                 // The whole operation is only completed, once the link is completed.
                 [&space]() {
                   return std::move(space.new_link);
-                })
-            | then(
-                [&space]() -> offset_type {
-                  return space.write_offset;
                 });
           });
     }
@@ -536,6 +530,8 @@ class wal_file_entry_file {
     bool must_succeed = false;
   };
 
+  static_assert(std::is_move_constructible_v<prepared_space>);
+
   wal_file_entry_file(
       fd_type&& file, offset_type end_offset,
       link_sender initial_link,
@@ -545,7 +541,6 @@ class wal_file_entry_file {
     sync_offset(end_offset - 4u),
     link_offset(end_offset - 4u),
     wal_flusher_(this->file, alloc),
-    strand_(alloc),
     link(std::move(initial_link))
   {
     if (end_offset < 4) throw std::range_error("bug: wal file end-offset too low");
@@ -571,12 +566,13 @@ class wal_file_entry_file {
   private:
   template<typename T>
   auto recovery_record_bytes_(T record) -> auto {
-    return sync_wait(
+    auto [stream] = execution::sync_wait(
         xdr_v2::write(
-            byte_stream<Executor, Allocator>(),
+            byte_stream<Executor>(file.get_executor()),
             std::make_tuple(T::opcode, record),
-            xdr_v2::tuple(xdr_v2::uint32, xdr_v2::identity))
-    ).value().data();
+            xdr_v2::constant(xdr_v2::tuple(xdr_v2::uint32, xdr_v2::identity)))
+    ).value();
+    return std::move(stream).data();
   }
 
   // XXX max size of the returned buffer is 12 bytes,
@@ -600,20 +596,17 @@ class wal_file_entry_file {
   // When this sender completes, the space allocated will be used.
   // If the prepared-space isn't written to (or the write fails),
   // a skip record will be placed.
-  template<execution::scheduler Scheduler>
-  static auto prepare_space(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, Scheduler scheduler, std::size_t write_len) -> execution::sender_of<prepared_space> auto {
+  static auto prepare_space(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, std::size_t write_len) -> execution::sender_of<prepared_space> auto {
     using namespace execution;
 
     if (write_len < 4) throw std::range_error("cannot write data of less than 4 bytes");
     if (write_len % 4u != 0) throw std::range_error("expect data to be a multiple of 4 bytes");
 
-    return on(
-        self->strand_.scheduler(scheduler),
-        just(self, scheduler, write_len)
-        | lazy_then(
-            [](gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, auto scheduler, std::size_t write_len) {
-              return prepare_space_(self, std::move(scheduler), write_len);
-            }));
+    return just(self, write_len)
+    | lazy_then(
+        [](gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, std::size_t write_len) {
+          return prepare_space_(self, write_len);
+        });
   }
 
   private:
@@ -622,11 +615,9 @@ class wal_file_entry_file {
   // Note that, when this function returns, the space allocated will be used.
   // If the acceptor isn't completed successfully, a recovery-operation will write
   // a skip record to skip the space when reading it back.
-  template<execution::scheduler Scheduler>
-  static auto prepare_space_(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, Scheduler scheduler, std::size_t write_len) -> prepared_space {
+  static auto prepare_space_(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, std::size_t write_len) -> prepared_space {
     using namespace execution;
 
-    assert(self->strand_.running_in_this_thread());
     assert(write_len % 4u == 0u);
 
     offset_type write_offset = self->end_offset - 4u;
@@ -645,10 +636,10 @@ class wal_file_entry_file {
           })
       | explode_tuple()
       | let_value(
-          [](gsl::not_null<std::shared_ptr<wal_file_entry_file>> shared_self, offset_type write_offset, std::span<const std::byte> data, std::size_t write_len) {
+          [](const gsl::not_null<std::shared_ptr<wal_file_entry_file>>& shared_self, offset_type write_offset, std::span<const std::byte> data, std::size_t write_len) {
             // We store the non-shared-pointer version, because it seems wasteful to install many copies of shared_self,
-            // when the caller will guarantee its liveness anyway.
-            const gsl::not_null<wal_file_entry_file> self = shared_self.get().get();
+            // when the let_value-caller will guarantee its liveness anyway.
+            const gsl::not_null<wal_file_entry_file*> self = shared_self.get().get();
 
             // Just like in regular writes, we write the data in two phases.
             // First we write everything except the first four bytes.
@@ -676,13 +667,12 @@ class wal_file_entry_file {
 
     auto [acceptor, sender] = commit_space_late_binding_t{}();
 
-    auto link_completion = transfer_when_all(
-        self->strand_.scheduler(scheduler),
-        self->link, // Our link is not actually reachable, unless all preceding links have also been written.
+    auto self_link = self->link;
+    auto link_completion = when_all(
+        std::move(self_link), // Our link is not actually reachable, unless all preceding links have also been written.
         std::move(sender) | let_done(make_recovery_chain))
     | then(
         [self, new_link_offset, write_offset]() -> void {
-          assert(self->strand_.running_in_this_thread());
           assert(self->link_offset == write_offset);
           self->link_offset = new_link_offset;
         })
@@ -692,9 +682,9 @@ class wal_file_entry_file {
 
     self->file.truncate(new_end_offset); // Now we change the file size. This can fail.
                                          // Failure is fine: we've not commited to anything yet.
-    link_sender new_link = make_link_sender(link_completion); // This can fail.
-                                                              // Failure is fine: we've merely grown the file, and this class
-                                                              // is designed to operate correctly even if the file has been grown.
+    link_sender new_link = make_link_sender(std::move(link_completion)); // This can fail.
+                                                                         // Failure is fine: we've merely grown the file, and this class
+                                                                         // is designed to operate correctly even if the file has been grown.
     link_sender preceding_link = std::exchange(self->link, new_link); // Must not throw. XXX confirm that it doesn't throw
     self->end_offset = new_end_offset; // Never throws
     return prepared_space(self, write_offset, write_len, std::move(acceptor), preceding_link, new_link);
@@ -704,24 +694,19 @@ class wal_file_entry_file {
   static auto read_some_at(gsl::not_null<std::shared_ptr<const wal_file_entry_file>> self, offset_type offset, std::span<std::byte> buf) -> execution::sender_of<std::size_t> auto {
     using namespace execution;
 
-    return transfer_just(self->strand_, self, offset, buf)
-    | validation(
+    return just(self, offset, buf)
+    | lazy_validation(
         [](gsl::not_null<std::shared_ptr<const wal_file_entry_file>> self, offset_type offset, std::span<std::byte> buf) -> std::optional<std::error_code> {
           if (offset >= self->link_offset && !buf.empty())
             return make_error_code(execution::io::errc::eof);
           else
             return std::nullopt;
         })
-    | let_value(
+    | lazy_let_value(
         [](gsl::not_null<std::shared_ptr<const wal_file_entry_file>> self, offset_type offset, std::span<std::byte> buf) {
           if (buf.size() > self->end_offset - offset) buf = buf.subspan(0, self->end_offset - offset);
           return io::read_some_at_ec(self->file, offset, buf);
         });
-  }
-
-  template<execution::scheduler Scheduler>
-  auto scheduler(Scheduler&& sch) -> auto {
-    return strand_.scheduler(std::forward<Scheduler>(sch));
   }
 
   auto file_ref() const & -> const fd_type& {
@@ -734,8 +719,7 @@ class wal_file_entry_file {
 
   private:
   auto delay_flush(offset_type write_offset, bool delay_flush_requested) const noexcept -> bool {
-    assert(strand_.running_in_this_thread());
-    return delay_flush_requested && write_offset > sync_offset;
+    return delay_flush_requested && (write_offset > sync_offset);
   }
 
   fd_type file;
@@ -743,7 +727,6 @@ class wal_file_entry_file {
   offset_type sync_offset; // Highest write-offset for which a sync is requested.
   offset_type link_offset; // The end of fully-written data.
   wal_flusher<fd_type&, allocator_type> wal_flusher_;
-  execution::strand<allocator_type> strand_;
   link_sender link;
 };
 
@@ -820,7 +803,7 @@ class wal_file_entry_unwritten_data {
     assert(invariant());
   }
 
-  auto add(offset_type offset, byte_span bytes) -> byte_span {
+  auto add(offset_type offset, byte_vector bytes) -> byte_span {
     if (bytes.empty()) throw std::range_error("no data to record");
 
     typename record_vector::const_iterator insert_position;
@@ -845,10 +828,12 @@ class wal_file_entry_unwritten_data {
 
   void remove(offset_type offset, byte_span bytes) {
     typename record_vector::const_iterator erase_position;
-    if (!records.empty() && records.front().offset == offset)
+    if (!records.empty() && records.front().offset == offset) {
       erase_position = records.cbegin();
-    else
-      erase_position  = std::binary_search(records.cbegin(), records.cend(), offset, offset_compare{});
+    } else {
+      erase_position = std::lower_bound(records.cbegin(), records.cend(), offset, offset_compare{});
+      if (erase_position->offset != offset) erase_position = records.cend();
+    }
 
     // Check that this is indeed the record to be erased.
     if (erase_position == records.cend())
@@ -1018,17 +1003,6 @@ class wal_file_entry
   using unwritten_data_vector = std::vector<unwritten_data, rebind_alloc<unwritten_data>>;
 
   public:
-  wal_file_entry(const executor_type& ex, allocator_type alloc)
-  : file(ex),
-    alloc_(alloc),
-#if 0
-    asio_strand_(asio::strand<Executor>(ex)),
-    link_done_event_(),
-    wal_flusher_(this->file, alloc),
-#endif
-    unwritten_data(alloc)
-  {}
-
   wal_file_entry(fd_type fd, std::filesystem::path name, xdr_header_tuple hdr, execution::io::offset_type end_offset, link_sender link, bool sealed, gsl::not_null<std::shared_ptr<spdlog::logger>> logger, allocator_type alloc)
   : name(name),
     version(std::get<0>(hdr)),
@@ -1038,6 +1012,7 @@ class wal_file_entry
     file(std::move(fd), end_offset, link, alloc),
     unwritten_data(alloc),
     fake_link(link),
+    strand_(alloc),
     logger(logger)
   {}
 
@@ -1048,8 +1023,16 @@ class wal_file_entry
 
   auto get_executor() const -> executor_type { return file.get_executor(); }
   auto get_allocator() const -> allocator_type { return alloc_; }
-  auto state() const noexcept -> wal_file_entry_state { return state_; }
-  auto is_open() const noexcept -> bool { return file.is_open(); }
+
+  auto state() const noexcept -> wal_file_entry_state {
+    std::lock_guard lck{strand_};
+    return state_;
+  }
+
+  auto is_open() const noexcept -> bool {
+    std::lock_guard lck{strand_};
+    return file.is_open();
+  }
 
   private:
   // XDR-invocation for write_records_to_buffer_.
@@ -1461,32 +1444,6 @@ class wal_file_entry
         });
   }
 
-  template<typename CompletionToken>
-  [[deprecated]]
-  auto async_create(const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence, CompletionToken&& token) {
-    using namespace execution;
-
-    return asio::async_initiate<CompletionToken, void(std::error_code, link_done_event_type)>(
-        [](auto completion_handler, std::shared_ptr<wal_file_entry> wf, const dir& d, const std::filesystem::path& name, std::uint_fast64_t sequence) -> void {
-          start_detached(
-              wf->async_create(d, name, sequence)
-              | then(
-                  [](std::shared_ptr<wal_file_entry> wf, link_done_event_type link_done_event) {
-                    return std::make_tuple(std::error_code{}, std::move(link_done_event));
-                  })
-              | upon_error(
-                  [](auto err) {
-                    if constexpr(std::same_as<std::exception_ptr, decltype(err)>)
-                      std::rethrow_exception(err);
-                    else
-                      return std::make_tuple(err, link_done_event_type{});
-                  })
-              | explode_tuple()
-              | then(completion_handler_fun(std::move(completion_handler), wf->get_executor())));
-        },
-        token, this->shared_from_this(), d, name, sequence);
-  }
-
 #if 0
   template<typename Range, typename CompletionToken, typename TransactionValidator = no_transaction_validation>
 #if __cpp_concepts >= 201907L
@@ -1498,9 +1455,8 @@ class wal_file_entry
   auto async_append(write_records_vector records, CompletionToken&& token, TransactionValidator&& transaction_validator = no_transaction_validation(), move_only_function<void(records_vector)> on_successful_write_callback = move_only_function<void(records_vector)>(), bool delay_flush = false);
 #else
   private:
-  template<execution::scheduler Scheduler, typename Space>
+  template<typename Space>
   static auto durable_append_(
-      Scheduler scheduler,
       gsl::not_null<std::shared_ptr<wal_file_entry>> wf,
       write_records_buffer_t& records,
       typename wal_file_entry_file<Executor, Allocator>::callback transaction_validation,
@@ -1524,7 +1480,7 @@ class wal_file_entry
     }
 
     if (on_successful_write_callback != nullptr) {
-      gsl::not_null<std::shared_ptr<const fd_type>> fd = std::shared_ptr<const fd_type>(wf, &std::as_const(*wf->file).file_ref());
+      gsl::not_null<std::shared_ptr<const fd_type>> fd = std::shared_ptr<const fd_type>(wf.get(), &std::as_const(wf->file).file_ref());
       auto write_offset = space.offset();
       space.set_update_callback(
           [ on_successful_write_callback=std::move(on_successful_write_callback),
@@ -1536,20 +1492,19 @@ class wal_file_entry
             | let_value(
                 [ on_successful_write_callback=std::move(on_successful_write_callback),
                   write_offset, records, fd
-                ]() {
+                ]() mutable {
                   return on_successful_write_callback(records.converted_records(fd, write_offset));
                 });
           });
     }
 
-    auto write_op = make_link_sender(std::move(space).write(scheduler, std::as_const(records).bytes()));
-    wf->fake_links = write_op;
-    return ensure_started(write_op);
+    auto write_op = make_link_sender(std::move(space).write(std::as_const(records).bytes()));
+    wf->fake_link = write_op;
+    return write_op;
   }
 
-  template<execution::scheduler Scheduler, typename Space>
+  template<typename Space>
   static auto non_durable_append_(
-      Scheduler scheduler,
       gsl::not_null<std::shared_ptr<wal_file_entry>> wf,
       write_records_buffer_t records,
       typename wal_file_entry_file<Executor, Allocator>::callback transaction_validation,
@@ -1558,7 +1513,7 @@ class wal_file_entry
   -> execution::sender_of<> auto {
     using namespace execution;
 
-    return just(wf->fake_link, std::move(transaction_validation), scheduler, wf, std::move(on_successful_write_callback), std::move(space))
+    return just(wf->fake_link, std::move(transaction_validation), wf, records, std::move(on_successful_write_callback), std::move(space))
     | let_variant(
         // We perform transaction validation first.
         // This does delay the actual writes.
@@ -1583,9 +1538,8 @@ class wal_file_entry
           else
             return variant_type(no_validation_needed());
         })
-    | transfer(wf->file->scheduler(scheduler))
     | let_value(
-        [](auto& scheduler, gsl::not_null<std::shared_ptr<wal_file_entry>>& wf, write_records_buffer_t& records, auto& on_successful_write_callback, auto& space) {
+        [](gsl::not_null<std::shared_ptr<wal_file_entry>>& wf, write_records_buffer_t& records, auto& on_successful_write_callback, auto& space) {
           const auto write_offset = space.offset();
           auto bytes = wf->unwritten_data.add(write_offset, std::move(records).bytes());
           space.set_must_succeed(true); // Ensures even cancellation will cause a fail-state.
@@ -1598,7 +1552,7 @@ class wal_file_entry
             // This is fine, as it'll only happen if the write fails,
             // at which point the WAL is unrecoverable.
             auto [fake_link_acceptor, fake_link_out] = execution::late_binding<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>();
-            auto converted_records = records.converted_records(std::shared_ptr<const fd_type>(wf, &std::as_const(*wf->file).file_ref()), write_offset);
+            auto converted_records = records.converted_records(std::shared_ptr<const fd_type>(wf.get(), &std::as_const(wf->file).file_ref()), write_offset);
 
             auto fake_link_in = std::exchange(wf->fake_link, make_link_sender(std::move(fake_link_out)));
             start_detached(
@@ -1626,29 +1580,29 @@ class wal_file_entry
           //
           // This paragraph does the actual write, and then cleans up the unwritten-data.
           start_detached(
-              std::move(space).write(scheduler, bytes, true)
-              | transfer(wf->file->scheduler(scheduler)) // Need to run on strand in order to touch unwritten-data.
-                                                         // If we can't switch (exception will be sent)
-                                                         // we can leave the data there, at the cost of a bit of RAM.
-              | observe_value(
-                  // We can now rely on file reads to provide this data.
-                  // (We only do this for successful writes. If the write fails,
-                  // we'll maintain read access via the unwritten-data, in order
-                  // not to upset the read invariant.)
-                  [wf, write_offset, bytes]() -> void {
-                    wf->unwritten_data.remove(write_offset, bytes);
-                  })
-              | let_error(
-                  // If there are errors, we swallow them here:
-                  // - write errors will have updated the WAL state to be unrecoverable, so this is already handled.
-                  // - if the error was with post-write cleanup (unwritten-data cleanup) we rather pay the cost of a couple
-                  //   of bytes, so this is harmless.
-                  //
-                  // Also like, if we didn't swallow errors here, we would terminate the program (via std::unexpected),
-                  // and it's just bad manners to do that, when the error has already been handled/is harmless.
-                  [](auto error) {
-                    return just();
-                  }));
+              on(
+                  wf->strand_,
+                  std::move(space).write(bytes, true)
+                  | observe_value(
+                      // We can now rely on file reads to provide this data.
+                      // (We only do this for successful writes. If the write fails,
+                      // we'll maintain read access via the unwritten-data, in order
+                      // not to upset the read invariant.)
+                      [wf, write_offset, bytes]() -> void {
+                        assert(wf->strand_.running_in_this_thread());
+                        wf->unwritten_data.remove(write_offset, bytes);
+                      })
+                  | let_error(
+                      // If there are errors, we swallow them here:
+                      // - write errors will have updated the WAL state to be unrecoverable, so this is already handled.
+                      // - if the error was with post-write cleanup (unwritten-data cleanup) we rather pay the cost of a couple
+                      //   of bytes, so this is harmless.
+                      //
+                      // Also like, if we didn't swallow errors here, we would terminate the program (via std::unexpected),
+                      // and it's just bad manners to do that, when the error has already been handled/is harmless.
+                      [](auto error) {
+                        return just();
+                      })));
 
           // We advertise this write as successful.
           // (And we also advertise any other preceding delay-flush writes as having succeeded.)
@@ -1659,9 +1613,7 @@ class wal_file_entry
   }
 
   public:
-  template<execution::scheduler Scheduler>
   auto append(
-      Scheduler scheduler,
       write_records_buffer_t records,
       typename wal_file_entry_file<Executor, Allocator>::callback transaction_validation = nullptr,
       earnest::move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>, true>(records_vector)> on_successful_write_callback = nullptr,
@@ -1671,38 +1623,40 @@ class wal_file_entry
 
     gsl::not_null<std::shared_ptr<wal_file_entry>> wf = this->shared_from_this();
     auto records_bytes_size = std::as_const(records).bytes().size();
-    return transfer_when_all(
-        file->scheduler(scheduler),
-        just(scheduler, wf, std::move(records), delay_flush, std::move(transaction_validation), std::move(on_successful_write_callback)),
-        file->prepare_space(scheduler, records_bytes_size)) // XXX <-- inject state predicate
-    | let_variant(
-        [](auto& scheduler, gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records,
-            bool delay_flush, auto& transaction_validation, auto& on_successful_write_callback,
-            auto& space) {
-          // Durable writes are "immediate", meaning the sender-chain is linked to the write-to-disk operation completing.
-          //
-          // Note that durable-append takes the records by reference, since it yields only a single chain, and thus can be guaranteed
-          // the records remain valid for the duration of the chain.
-          auto immediate = [&]() {
-            assert(delay_flush == false);
-            return durable_append_(scheduler, records, std::move(transaction_validation), std::move(on_successful_write_callback), std::move(space));
-          };
+    return
+    on(
+        strand_,
+        when_all(
+            just(wf, std::move(records), delay_flush, std::move(transaction_validation), std::move(on_successful_write_callback)),
+            wf->file.prepare_space(std::shared_ptr<wal_file_entry_file<Executor, Allocator>>(wf.get(), &this->file), records_bytes_size)) // XXX <-- inject state predicate
+        | let_variant(
+            [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records,
+                bool delay_flush, auto& transaction_validation, auto& on_successful_write_callback,
+                auto& space) {
+              // Durable writes are "immediate", meaning the sender-chain is linked to the write-to-disk operation completing.
+              //
+              // Note that durable-append takes the records by reference, since it yields only a single chain, and thus can be guaranteed
+              // the records remain valid for the duration of the chain.
+              auto immediate = [&]() {
+                assert(delay_flush == false);
+                return durable_append_(wf, records, std::move(transaction_validation), std::move(on_successful_write_callback), std::move(space));
+              };
 
-          // Non-durable writes are "deferred", meaning the sender-chain only writes the operation to memory,
-          // deferring the write-to-disk operation.
-          // Deferred operations are a lot faster, because they don't require flush-to-disk.
-          // But they can be lost during failure.
-          auto deferred = [&]() {
-            assert(delay_flush == true);
-            return non_durable_append_(scheduler, std::move(records), std::move(transaction_validation), std::move(on_successful_write_callback), std::move(space));
-          };
+              // Non-durable writes are "deferred", meaning the sender-chain only writes the operation to memory,
+              // deferring the write-to-disk operation.
+              // Deferred operations are a lot faster, because they don't require flush-to-disk.
+              // But they can be lost during failure.
+              auto deferred = [&]() {
+                assert(delay_flush == true);
+                return non_durable_append_(wf, std::move(records), std::move(transaction_validation), std::move(on_successful_write_callback), std::move(space));
+              };
 
-          using variant_type = std::variant<decltype(immediate()), decltype(deferred())>;
-          if (delay_flush)
-            return variant_type(deferred());
-          else
-            return variant_type(immediate());
-        });
+              using variant_type = std::variant<decltype(immediate()), decltype(deferred())>;
+              if (delay_flush)
+                return variant_type(deferred());
+              else
+                return variant_type(immediate());
+            }));
   }
 
   template<std::ranges::input_range Records, typename CompletionToken, typename TransactionValidator = no_transaction_validation>
@@ -1772,8 +1726,15 @@ class wal_file_entry
   template<typename CompletionToken>
   auto async_discard_all(CompletionToken&& token);
 
-  auto end_offset() const noexcept { return file.get_end_offset(); }
-  auto link_offset() const noexcept { return file.get_link_offset(); }
+  auto end_offset() const noexcept {
+    std::lock_guard lck{strand_};
+    return file.get_end_offset();
+  }
+
+  auto link_offset() const noexcept {
+    std::lock_guard lck{strand_};
+    return file.get_link_offset();
+  }
 
   template<std::invocable<variant_type> Acceptor>
   requires requires(Acceptor& acceptor, const variant_type& v) {
@@ -1789,62 +1750,64 @@ class wal_file_entry
       bool should_stop = false;
     };
 
-    return just(
-        state{
-          .reader=async_records_reader<allocator_type>(this->shared_from_this(), this->get_allocator()),
-          .acceptor=std::forward<Acceptor>(acceptor)
-        })
-    | lazy_let_value(
-        // Read the header, since we want to skip it.
-        [](state& st) {
-          return xdr_v2::read_into<xdr_header_tuple>(std::ref(st.reader), xdr_header_invocation{})
-          | then(
-              [&st]([[maybe_unused]] const auto& reader, [[maybe_unused]] xdr_header_tuple hdr) -> state&& {
-                // Discard header, and return the state.
-                return std::move(st);
-              });
-        })
-    | lazy_repeat(
-        []([[maybe_unused]] std::size_t idx, state& st) {
-          auto do_next = [&st]() {
-            const auto read_pos = st.reader.position();
+    return on(
+        strand_,
+        just(
+            state{
+              .reader=async_records_reader<allocator_type>(this->shared_from_this(), this->get_allocator()),
+              .acceptor=std::forward<Acceptor>(acceptor)
+            })
+        | lazy_let_value(
+            // Read the header, since we want to skip it.
+            [](state& st) {
+              return xdr_v2::read_into<xdr_header_tuple>(std::ref(st.reader), xdr_header_invocation{})
+              | then(
+                  [&st]([[maybe_unused]] const auto& reader, [[maybe_unused]] xdr_header_tuple hdr) -> state&& {
+                    // Discard header, and return the state.
+                    return std::move(st);
+                  });
+            })
+        | lazy_repeat(
+            []([[maybe_unused]] std::size_t idx, state& st) {
+              auto do_next = [&st]() {
+                const auto read_pos = st.reader.position();
 
-            return xdr_v2::read_into<variant_type>(std::ref(st.reader))
-            | lazy_let<set_value_t, set_error_t>(
-                overload(
-                    [&st]([[maybe_unused]] set_value_t tag, [[maybe_unused]] const auto& stream_ref, variant_type& record) {
-                      return std::invoke(st.acceptor, std::move(record));
-                    },
-                    [&st, read_pos]([[maybe_unused]] set_error_t tag, std::error_code ec) {
-                      return just(std::ref(st), ec, read_pos)
-                      | validation(
-                          [](state& st, std::error_code ec, auto read_pos) -> std::optional<std::error_code> {
-                            if (ec == execution::io::errc::eof && st.reader.position() == read_pos) {
-                              st.should_stop = true;
-                              return std::nullopt;
-                            }
-                            return std::make_optional(ec);
-                          });
-                    },
-                    []([[maybe_unused]] set_error_t tag, std::exception_ptr ex) {
-                      return just(std::move(ex))
-                      | validation(
-                          [](std::exception_ptr ex) {
-                            return std::make_optional(ex);
-                          });
-                    }));
-          };
+                return xdr_v2::read_into<variant_type>(std::ref(st.reader))
+                | lazy_let<set_value_t, set_error_t>(
+                    overload(
+                        [&st]([[maybe_unused]] set_value_t tag, [[maybe_unused]] const auto& stream_ref, variant_type& record) {
+                          return std::invoke(st.acceptor, std::move(record));
+                        },
+                        [&st, read_pos]([[maybe_unused]] set_error_t tag, std::error_code ec) {
+                          return just(std::ref(st), ec, read_pos)
+                          | validation(
+                              [](state& st, std::error_code ec, auto read_pos) -> std::optional<std::error_code> {
+                                if (ec == execution::io::errc::eof && st.reader.position() == read_pos) {
+                                  st.should_stop = true;
+                                  return std::nullopt;
+                                }
+                                return std::make_optional(ec);
+                              });
+                        },
+                        []([[maybe_unused]] set_error_t tag, std::exception_ptr ex) {
+                          return just(std::move(ex))
+                          | validation(
+                              [](std::exception_ptr ex) {
+                                return std::make_optional(ex);
+                              });
+                        }));
+              };
 
-          using opt_type = std::optional<decltype(do_next())>;
-          if (st.should_stop)
-            return opt_type(std::nullopt);
-          else
-            return opt_type(do_next());
-        })
-    | then(
-        []([[maybe_unused]] const state& st) -> void {
-          return; // discard `st'
-        });
+              using opt_type = std::optional<decltype(do_next())>;
+              if (st.should_stop)
+                return opt_type(std::nullopt);
+              else
+                return opt_type(do_next());
+            })
+        | then(
+            []([[maybe_unused]] const state& st) -> void {
+              return; // discard `st'
+            }));
   }
 
   auto records() const -> execution::sender_of<records_vector> auto {
@@ -2269,9 +2232,9 @@ class wal_file_entry
 #endif
 
   public:
-  std::filesystem::path name;
-  std::uint_fast32_t version;
-  std::uint_fast64_t sequence;
+  const std::filesystem::path name;
+  const std::uint_fast32_t version;
+  const std::uint_fast64_t sequence;
 
   private:
 #if 0 // old stuff
@@ -2292,8 +2255,9 @@ class wal_file_entry
   wal_file_entry_file<Executor, Allocator> file;
   wal_file_entry_unwritten_data<Allocator> unwritten_data;
   link_sender fake_link;
+  mutable execution::strand<allocator_type> strand_;
 
-  const std::shared_ptr<spdlog::logger> logger = get_wal_logger();
+  const gsl::not_null<std::shared_ptr<spdlog::logger>> logger;
 };
 
 template<typename Executor, typename Allocator>
@@ -2328,32 +2292,6 @@ struct wal_file_entry<Executor, Allocator>::xdr_header_invocation {
         })
     | xdr_v2::uint32.write(std::get<0>(tpl))
     | xdr_v2::uint64.write(std::get<1>(tpl));
-  }
-
-  auto read(wal_file_entry& self) const {
-    return xdr_v2::constant.read(magic(), xdr_v2::fixed_byte_string)
-    | xdr_v2::uint32.read(self.version)
-    | xdr_v2::validation.read(
-        [&self]() -> std::optional<std::error_code> {
-          if (self.version <= max_version)
-            return std::nullopt;
-          else
-            return make_error_code(wal_errc::bad_version);
-        })
-    | xdr_v2::uint64.read(self.sequence);
-  }
-
-  auto write(const wal_file_entry& self) const {
-    return xdr_v2::constant.write(magic(), xdr_v2::fixed_byte_string)
-    | xdr_v2::validation.write(
-        [&self]() -> std::optional<std::error_code> {
-          if (self.version <= max_version)
-            return std::nullopt;
-          else
-            return make_error_code(wal_errc::bad_version);
-        })
-    | xdr_v2::uint32.write(self.version)
-    | xdr_v2::uint64.write(self.sequence);
   }
 };
 
