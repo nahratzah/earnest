@@ -582,11 +582,13 @@ class wal_file_entry_file {
     assert(write_len >= 4u);
     if (write_len == 4u) {
       return recovery_record_bytes_(wal_record_noop{});
-    } else if (write_len - 4u <= 0xffff'ffffu) {
-      return recovery_record_bytes_(wal_record_skip32{static_cast<std::uint32_t>(write_len - 4u)});
+    } else if (write_len - 8u <= 0xffff'ffffu) {
+      assert(write_len >= 8u);
+      return recovery_record_bytes_(wal_record_skip32{static_cast<std::uint32_t>(write_len - 8u)});
     } else {
-      assert(write_len - 8u <= 0xffff'ffff'ffff'ffffull);
-      return recovery_record_bytes_(wal_record_skip64{static_cast<std::uint64_t>(write_len - 8u)});
+      assert(write_len - 12u <= 0xffff'ffff'ffff'ffffull);
+      assert(write_len >= 12u);
+      return recovery_record_bytes_(wal_record_skip64{static_cast<std::uint64_t>(write_len - 12u)});
     }
   }
 
@@ -1618,7 +1620,7 @@ class wal_file_entry
       typename wal_file_entry_file<Executor, Allocator>::callback transaction_validation = nullptr,
       earnest::move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>, true>(records_vector)> on_successful_write_callback = nullptr,
       bool delay_flush = false)
-  -> execution::sender_of<> auto {
+  -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> {
     using namespace execution;
 
     gsl::not_null<std::shared_ptr<wal_file_entry>> wf = this->shared_from_this();
