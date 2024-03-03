@@ -598,29 +598,15 @@ class wal_file_entry_file {
   // When this sender completes, the space allocated will be used.
   // If the prepared-space isn't written to (or the write fails),
   // a skip record will be placed.
-  static auto prepare_space(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, std::size_t write_len) -> execution::sender_of<prepared_space> auto {
-    using namespace execution;
-
-    if (write_len < 4) throw std::range_error("cannot write data of less than 4 bytes");
-    if (write_len % 4u != 0) throw std::range_error("expect data to be a multiple of 4 bytes");
-
-    return just(self, write_len)
-    | lazy_then(
-        [](gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, std::size_t write_len) {
-          return prepare_space_(self, write_len);
-        });
-  }
-
-  private:
-  // Reserve space for a write operation.
   //
   // Note that, when this function returns, the space allocated will be used.
   // If the acceptor isn't completed successfully, a recovery-operation will write
   // a skip record to skip the space when reading it back.
-  static auto prepare_space_(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, std::size_t write_len) -> prepared_space {
+  static auto prepare_space(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, std::size_t write_len) -> prepared_space {
     using namespace execution;
 
-    assert(write_len % 4u == 0u);
+    if (write_len < 4) throw std::range_error("cannot write data of less than 4 bytes");
+    if (write_len % 4u != 0) throw std::range_error("expect data to be a multiple of 4 bytes");
 
     offset_type write_offset = self->end_offset - 4u;
     offset_type new_end_offset = self->end_offset + write_len;
@@ -692,7 +678,6 @@ class wal_file_entry_file {
     return prepared_space(self, write_offset, write_len, std::move(acceptor), preceding_link, new_link);
   }
 
-  public:
   static auto read_some_at(gsl::not_null<std::shared_ptr<const wal_file_entry_file>> self, offset_type offset, std::span<std::byte> buf) -> execution::sender_of<std::size_t> auto {
     using namespace execution;
 
@@ -1624,17 +1609,22 @@ class wal_file_entry
     using namespace execution;
 
     gsl::not_null<std::shared_ptr<wal_file_entry>> wf = this->shared_from_this();
-    auto records_bytes_size = std::as_const(records).bytes().size();
-    return
-    on(
+    return on(
         strand_,
-        when_all(
-            just(wf, std::move(records), delay_flush, std::move(transaction_validation), std::move(on_successful_write_callback)),
-            wf->file.prepare_space(std::shared_ptr<wal_file_entry_file<Executor, Allocator>>(wf.get(), &this->file), records_bytes_size)) // XXX <-- inject state predicate
+        just(wf, std::move(records), delay_flush, std::move(transaction_validation), std::move(on_successful_write_callback))
+        | lazy_validation(
+            [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, [[maybe_unused]] const auto&... ignored_args) -> std::optional<std::error_code> {
+              // We only permit writes when we're in the ready state.
+              if (wf->state_ != wal_file_entry_state::ready) return make_error_code(wal_errc::bad_state);
+              return std::nullopt;
+            })
         | let_variant(
             [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records,
-                bool delay_flush, auto& transaction_validation, auto& on_successful_write_callback,
-                auto& space) {
+                bool delay_flush, auto& transaction_validation, auto& on_successful_write_callback) {
+              auto space = wf->file.prepare_space(
+                  std::shared_ptr<wal_file_entry_file<Executor, Allocator>>(wf.get(), &wf->file),
+                  std::as_const(records).bytes().size());
+
               // Durable writes are "immediate", meaning the sender-chain is linked to the write-to-disk operation completing.
               //
               // Note that durable-append takes the records by reference, since it yields only a single chain, and thus can be guaranteed
@@ -1812,6 +1802,7 @@ class wal_file_entry
   auto records() const -> execution::type_erased_sender<std::variant<std::tuple<records_vector>>, std::variant<std::exception_ptr, std::error_code>> {
     using namespace execution;
 
+    // We don't use `on(strand_, ...)` here, because the `records(acceptor)` specialization will handle that for us.
     return just(gsl::not_null<std::shared_ptr<const wal_file_entry>>(this->shared_from_this()))
     | lazy_then(
         [](gsl::not_null<std::shared_ptr<const wal_file_entry>> wf) {
