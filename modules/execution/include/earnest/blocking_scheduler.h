@@ -195,6 +195,10 @@ class blocking_scheduler {
     return sender_impl(self);
   }
 
+  friend constexpr auto tag_invoke([[maybe_unused]] execute_may_block_caller_t, [[maybe_unused]] const blocking_scheduler& self) noexcept -> bool {
+    return false;
+  }
+
   private:
   state_ptr s;
 };

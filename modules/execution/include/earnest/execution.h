@@ -239,7 +239,6 @@
 #include <functional>
 #include <mutex>
 #include <optional>
-#include <queue>
 #include <thread>
 #include <tuple>
 #include <type_traits>
@@ -2343,39 +2342,7 @@ struct sync_wait_t {
   // If a task is placed in this execution-context, it'll be run by the blocked thread.
   struct execution_context {
     public:
-    // Operation state holds on to a nested operation state.
-    // Its start() operation will execute it in the execution-context.
-    template<operation_state OpState>
-    class operation_state
-    : public operation_state_base_
-    {
-      public:
-      template<sender Sender, receiver Receiver>
-      explicit operation_state(execution_context& ex_ctx, Sender&& s, Receiver&& r)
-      : ex_ctx(ex_ctx),
-        op_state(execution::connect(std::forward<Sender>(s), std::forward<Receiver>(r)))
-      {}
-
-      friend auto tag_invoke([[maybe_unused]] start_t, operation_state& o) noexcept -> void {
-        // XXX this can actually throw.
-        o.ex_ctx.push(
-            [&o]() noexcept {
-              start(o.op_state);
-            });
-      }
-
-      private:
-      execution_context& ex_ctx;
-      OpState op_state;
-    };
-
-    // Create an operation state, wrapping the given operation state.
-    // The returned operation state will execute on the execution-context.
-    template<sender Sender, receiver Receiver>
-    static auto make_operation_state(execution_context& ex_ctx, Sender&& s, Receiver&& r)
-    -> operation_state<std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>> {
-      return operation_state<std::remove_cvref_t<decltype(execution::connect(std::declval<Sender>(), std::declval<Receiver>()))>>(ex_ctx, std::forward<Sender>(s), std::forward<Receiver>(r));
-    }
+    class scheduler;
 
     // A sender for this execution context.
     class sender {
@@ -2389,74 +2356,51 @@ struct sync_wait_t {
       static inline constexpr bool sends_done = false;
 
       template<receiver Receiver>
-      friend auto tag_invoke([[maybe_unused]] connect_t, const sender& self, Receiver&& r)
+      friend auto tag_invoke(connect_t connect, sender&& self, Receiver&& r)
       -> auto {
-        return make_operation_state(self.ex_ctx, just(), std::forward<Receiver>(r));
+        return connect(just(), std::forward<Receiver>(r));
       }
 
-      template<receiver Receiver>
-      friend auto tag_invoke([[maybe_unused]] connect_t, sender&& self, Receiver&& r)
-      -> auto {
-        return make_operation_state(self.ex_ctx, just(), std::forward<Receiver>(r));
+      friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_value_t>, const sender& self) noexcept -> scheduler {
+        return {};
       }
 
-      friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_value_t>, const sender& self) noexcept -> auto {
-        return self.ex_ctx.as_scheduler();
+      friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_error_t>, const sender& self) noexcept -> scheduler {
+        return {};
       }
 
-      friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_error_t>, const sender& self) noexcept -> auto {
-        return self.ex_ctx.as_scheduler();
+      friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_done_t>, const sender& self) noexcept -> scheduler {
+        return {};
       }
-
-      friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_done_t>, const sender& self) noexcept -> auto {
-        return self.ex_ctx.as_scheduler();
-      }
-
-      sender(execution_context& ex_ctx) noexcept
-      : ex_ctx(ex_ctx)
-      {}
-
-      private:
-      execution_context& ex_ctx;
     };
 
     // Scheduler for this execution-context.
     //
-    // It handles the task of enqueueing tasks on the job-queue of the execution-context.
+    // It handles the task of executing tasks.
+    // Immediately.
+    // There's no queue.
     class scheduler {
       public:
       template<std::invocable<> Fn>
-      friend auto tag_invoke([[maybe_unused]] execute_t tag, scheduler&& self, Fn&& fn) -> void {
-        self.ctx->push(std::forward<Fn>());
-      }
-
-      template<std::invocable<> Fn>
-      friend auto tag_invoke([[maybe_unused]] execute_t, scheduler& self, Fn&& fn) -> void {
-        self.ctx->push(std::forward<Fn>(fn));
+      friend auto tag_invoke([[maybe_unused]] execute_t, [[maybe_unused]] const scheduler& self, Fn&& fn) -> void {
+        std::invoke(std::forward<Fn>(fn));
       }
 
       friend auto tag_invoke([[maybe_unused]] schedule_t, const scheduler& self) noexcept -> sender {
-        return sender(*self.ctx);
+        return sender{};
       }
 
       friend constexpr auto tag_invoke([[maybe_unused]] const get_forward_progress_guarantee_t&, [[maybe_unused]] const scheduler&) noexcept -> forward_progress_guarantee {
         return forward_progress_guarantee::weakly_parallel;
       }
 
-      explicit constexpr scheduler(execution_context* ctx) noexcept
-      : ctx(ctx)
-      {}
-
       constexpr auto operator==(const scheduler& other) const noexcept -> bool {
-        return ctx == other.ctx;
+        return true;
       }
 
       constexpr auto operator!=(const scheduler& other) const noexcept -> bool {
-        return !(*this == other);
+        return false;
       }
-
-      private:
-      execution_context* ctx;
     };
 
     execution_context() = default;
@@ -2466,14 +2410,6 @@ struct sync_wait_t {
     execution_context(execution_context&&) = delete;
     execution_context& operator=(const execution_context&) = delete;
     execution_context& operator=(execution_context&&) = delete;
-
-    ~execution_context() {
-      assert(tasks.empty());
-    }
-
-    auto as_scheduler() noexcept -> scheduler {
-      return scheduler(this);
-    }
 
     // Notification wakes up the thread executing this execution-context.
     //
@@ -2485,50 +2421,14 @@ struct sync_wait_t {
     // Block and run tasks.
     // Until the predicate becomes true.
     template<std::predicate<> Predicate>
-    auto drain_until(Predicate&& pred) noexcept -> void {
+    auto wait(Predicate&& pred) -> void {
       std::unique_lock lck{mtx};
-      while (!std::invoke(pred)) {
-        execute_(lck);
-        cnd.wait(lck,
-            [this, &pred]() {
-              return !this->tasks.empty() || std::invoke(pred);
-            });
-      }
+      cnd.wait(lck, std::forward<Predicate>(pred));
     }
 
     private:
-    template<std::invocable<> Fn>
-    auto push(Fn&& fn) -> void {
-      std::lock_guard lck{mtx};
-      tasks.emplace(std::forward<Fn>(fn)); // May throw.
-      cnd.notify_one();
-    }
-
-    template<typename Task>
-    auto execute(Task&& task) -> void {
-      std::lock_guard lck{mtx};
-      tasks.emplace(std::forward<Task>(task));
-      cnd.notify_one();
-    }
-
-    private:
-    // Execute tasks until the queue is empty.
-    auto execute_(std::unique_lock<std::mutex>& lck) noexcept -> void {
-      assert(lck.owns_lock() && lck.mutex() == &mtx);
-
-      while (!tasks.empty()) {
-        auto next_task = std::move(tasks.front());
-        tasks.pop();
-        lck.unlock();
-        std::invoke(std::move(next_task));
-        next_task = nullptr; // Run function destructor outside the mutex.
-        lck.lock();
-      }
-    }
-
     std::mutex mtx;
     std::condition_variable cnd;
-    std::queue<move_only_function<void() && noexcept>> tasks;
   };
 
   // Receiver for `sync_wait`.
@@ -2558,8 +2458,8 @@ struct sync_wait_t {
     {}
 
     // Request the scheduler.
-    friend auto tag_invoke([[maybe_unused]] const get_scheduler_t&, const receiver& r) noexcept -> decltype(auto) {
-      return r.ex_ctx.as_scheduler();
+    friend auto tag_invoke([[maybe_unused]] const get_scheduler_t&, [[maybe_unused]] const receiver& r) noexcept -> auto {
+      return scheduler{};
     }
 
     // Set value.
@@ -2644,7 +2544,7 @@ struct sync_wait_t {
     // It's possible the operation will (at some point) schedule things on the scheduler. So when start()
     // completes, we must drain the scheduler.
     ::earnest::execution::start(op_state);
-    ex_ctx.drain_until([&result]() { return result.index() != 0 && !result.valueless_by_exception(); });
+    ex_ctx.wait([&result]() { return result.index() != 0 && !result.valueless_by_exception(); });
 
     switch (result.index()) { // Can't use std::visit: consider if the value-type was std::exception_ptr.
       default:
