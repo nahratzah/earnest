@@ -2916,5 +2916,106 @@ requires ((std::same_as<Tags, set_value_t> || std::same_as<Tags, set_error_t> ||
 inline constexpr let_t<Tags...> let{};
 
 
+struct handle_error_code_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  template<sender Sender>
+  auto operator()(Sender&& s) const
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
+  }
+
+  auto operator()() const
+  -> decltype(auto) {
+    return _generic_adapter(*this);
+  }
+
+  private:
+  template<receiver Receiver>
+  struct wrapped_receiver
+  : public _generic_receiver_wrapper<Receiver, set_value_t>
+  {
+    explicit wrapped_receiver(Receiver&& r)
+    : _generic_receiver_wrapper<Receiver, set_value_t>(std::forward<Receiver>(r))
+    {}
+
+    template<typename... Args>
+    friend auto tag_invoke([[maybe_unused]] set_value_t, wrapped_receiver&& self, std::error_code ec, Args&&... args) -> void {
+      if (ec)
+        execution::set_error(std::move(self.r), ec);
+      else
+        execution::set_value(std::move(self.r), std::forward<Args>(args)...);
+    }
+  };
+
+  template<template<typename...> class Tuple>
+  struct without_error_code_ {
+    template<typename...> struct type_;
+
+    template<typename... T>
+    struct type_<std::error_code, T...> : _type_appender<T...> {};
+
+    template<typename... T>
+    using type = type_<T...>::template type<Tuple>;
+  };
+
+  template<sender Sender> class sender_impl;
+
+  template<sender Sender>
+  struct sender_types_for_impl
+  : public _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t, get_completion_scheduler_t<set_error_t>>
+  {
+    using _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t, get_completion_scheduler_t<set_error_t>>::_generic_sender_wrapper;
+  };
+
+  template<typed_sender Sender>
+  struct sender_types_for_impl<Sender>
+  : public _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t, get_completion_scheduler_t<set_error_t>>
+  {
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = typename sender_traits<Sender>::template value_types<without_error_code_<Tuple>::template type, Variant>;
+
+    template<template<typename...> class Variant>
+    using error_types = typename sender_traits<Sender>::template error_types<_type_appender>
+        ::template append<std::error_code>
+        ::template type<Variant>;
+
+    using _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t, get_completion_scheduler_t<set_error_t>>::_generic_sender_wrapper;
+  };
+
+  template<sender Sender>
+  class sender_impl
+  : public sender_types_for_impl<Sender>
+  {
+    template<typename, sender, typename...> friend class ::earnest::execution::_generic_sender_wrapper;
+
+    public:
+    explicit sender_impl(Sender&& s)
+    : sender_types_for_impl<Sender>(std::forward<Sender>(s))
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke(connect_t connect, sender_impl&& self, Receiver&& r)
+    -> decltype(auto) {
+      return connect(std::move(self.s), wrapped_receiver<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    -> sender_impl<std::remove_cvref_t<OtherSender>> {
+      return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
+    }
+  };
+
+  template<sender Sender>
+  auto default_impl(Sender&& s) const
+  -> sender auto {
+    return sender_impl<std::remove_cvref_t<Sender>>(std::forward<Sender>(s));
+  }
+};
+inline constexpr handle_error_code_t handle_error_code;
+
+
 } /* inline namespace extensions */
 } /* namespace earnest::execution */

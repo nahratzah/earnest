@@ -1143,26 +1143,7 @@ class wal_file_entry
           return std::make_tuple(ec, logger, std::move(fd), name, alloc);
         })
     | explode_tuple()
-    | validation(
-        [](
-            std::error_code ec,
-            [[maybe_unused]] gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
-            [[maybe_unused]] const fd_type& fd,
-            [[maybe_unused]] const std::filesystem::path& name,
-            [[maybe_unused]] const allocator_type& alloc) -> std::optional<std::error_code> {
-          if (ec) [[unlikely]] return ec;
-          return std::nullopt;
-        })
-    | then(
-        [](
-            [[maybe_unused]] std::error_code ec,
-            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
-            fd_type fd,
-            std::filesystem::path name,
-            allocator_type alloc) {
-          return std::make_tuple(logger, std::move(fd), name, alloc);
-        })
-    | explode_tuple()
+    | handle_error_code()
     | then(
         [](
             gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
@@ -1175,26 +1156,7 @@ class wal_file_entry
           return std::make_tuple(ec, logger, std::move(fd), std::move(name), std::move(alloc));
         })
     | explode_tuple()
-    | validation(
-        [](
-            std::error_code ec,
-            [[maybe_unused]] const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
-            [[maybe_unused]] const fd_type& fd,
-            [[maybe_unused]] const std::filesystem::path& name,
-            [[maybe_unused]] const allocator_type& alloc) -> std::optional<std::error_code> {
-          if (ec) return ec;
-          return std::nullopt;
-        })
-    | then(
-        [](
-            [[maybe_unused]] std::error_code ec,
-            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
-            fd_type fd,
-            std::filesystem::path name,
-            allocator_type alloc) {
-          return std::make_tuple(logger, std::move(fd), std::move(name), std::move(alloc));
-        })
-    | explode_tuple()
+    | handle_error_code()
     | let_value(
         [](
             gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
@@ -1248,13 +1210,7 @@ class wal_file_entry
 
                             return std::error_code{};
                           })
-                      | validation(
-                          [](std::error_code err) -> std::optional<std::error_code> {
-                            if (err)
-                              return err;
-                            else
-                              return std::nullopt;
-                          }));
+                      | handle_error_code());
                 };
                 using optional_type = decltype(factory());
 
@@ -1326,28 +1282,7 @@ class wal_file_entry
           return std::make_tuple(ec, logger, std::move(fd), name, sequence, alloc);
         })
     | explode_tuple()
-    | validation(
-        [](
-            std::error_code ec,
-            [[maybe_unused]] const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
-            [[maybe_unused]] const fd_type& fd,
-            [[maybe_unused]] const std::filesystem::path& name,
-            [[maybe_unused]] std::uint_fast64_t sequence,
-            [[maybe_unused]] const allocator_type alloc) -> std::optional<std::error_code> {
-          if (ec) return ec;
-          return std::nullopt;
-        })
-    | then(
-        [](
-            [[maybe_unused]] std::error_code ec,
-            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
-            fd_type fd,
-            std::filesystem::path name,
-            std::uint_fast64_t sequence,
-            allocator_type alloc) {
-          return std::make_tuple(logger, std::move(fd), name, sequence, alloc);
-        })
-    | explode_tuple()
+    | handle_error_code()
     | then(
         [](
             gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
@@ -1361,28 +1296,7 @@ class wal_file_entry
           return std::make_tuple(ec, logger, std::move(fd), std::move(name), sequence, std::move(alloc));
         })
     | explode_tuple()
-    | validation(
-        [](
-            std::error_code ec,
-            [[maybe_unused]] const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
-            [[maybe_unused]] const fd_type& fd,
-            [[maybe_unused]] const std::filesystem::path& name,
-            [[maybe_unused]] std::uint_fast64_t sequence,
-            [[maybe_unused]] const allocator_type& alloc) -> std::optional<std::error_code> {
-          if (ec) return ec;
-          return std::nullopt;
-        })
-    | then(
-        [](
-            [[maybe_unused]] std::error_code ec,
-            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
-            fd_type fd,
-            std::filesystem::path name,
-            std::uint_fast64_t sequence,
-            allocator_type alloc) {
-          return std::make_tuple(logger, std::move(fd), std::move(name), sequence, std::move(alloc));
-        })
-    | explode_tuple()
+    | handle_error_code()
     | let_value(
         [](
             gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
@@ -1837,11 +1751,7 @@ class wal_file_entry
                     wf->records(
                         [&acceptor](variant_type record) {
                           return just(std::invoke(acceptor, std::move(record)))
-                          | validation(
-                              [](std::error_code ec) -> std::optional<std::error_code> {
-                                if (!ec) return std::nullopt;
-                                return std::make_optional(ec);
-                              });
+                          | handle_error_code();
                         });
                   })
               | then(
