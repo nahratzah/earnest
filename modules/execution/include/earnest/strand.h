@@ -519,7 +519,7 @@ class strand_bound_scheduler_ {
   {}
 
   auto operator==(const strand_bound_scheduler_& y) const noexcept -> bool {
-    return &s == &y.s && underlying_sched == y.underlying_sched;
+    return s == y.s && underlying_sched == y.underlying_sched;
   }
 
   auto operator!=(const strand_bound_scheduler_& y) const noexcept -> bool {

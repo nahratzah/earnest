@@ -3,11 +3,15 @@
 #pragma once
 
 #include "execution.h"
+#include "blocking_scheduler.h"
+#include "move_only_function.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <exception>
 #include <functional>
 #include <memory>
+#include <numeric>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -532,10 +536,114 @@ struct lazy_repeat_t {
     {}
 
     template<receiver Receiver>
+    class variant_opstate
+    : operation_state_base_
+    {
+      private:
+      using scheduler_type = std::invoke_result_t<get_scheduler_t, const Receiver&>;
+
+      static auto make_scheduler_based_opstate(sender_impl&& self, Receiver&& r) {
+        return opstate<Sender, std::remove_cvref_t<Receiver>, Fn>(std::move(self.s), std::move(r), std::move(self.fn));
+      }
+
+      template<typename T>
+      static auto as_void_ptr(T* ptr) -> void* {
+        return ptr;
+      }
+
+      struct loop_type
+      : operation_state_base_
+      {
+        using type = decltype(execution::connect(std::declval<Sender>(), std::declval<loop_receiver<std::remove_cvref_t<Receiver>, Fn>>()));
+
+        loop_type(sender_impl&& self, Receiver&& r)
+        : impl(execution::connect(std::move(self.s), loop_receiver<std::remove_cvref_t<Receiver>, Fn>(std::move(r), std::move(self.fn))))
+        {}
+
+        friend auto tag_invoke(start_t start, loop_type& self) noexcept -> void {
+          start(self.impl);
+        }
+
+        private:
+        type impl;
+      };
+
+      struct scheduler_based_type
+      : operation_state_base_
+      {
+        using type = opstate<Sender, std::remove_cvref_t<Receiver>, Fn>;
+
+        scheduler_based_type(sender_impl&& self, Receiver&& r)
+        : impl(std::move(self.s), std::move(r), std::move(self.fn))
+        {}
+
+        friend auto tag_invoke(start_t start, scheduler_based_type& self) noexcept -> void {
+          start(self.impl);
+        }
+
+        private:
+        type impl;
+      };
+
+      // We can't use std::variant, because std::variant refuses types that aren't copy-constructible.
+      // So we'll have to use uninitialized storage.
+      // Sadly, the types for this are declared deprecated in C++23, so we sadly have to roll our own.
+      struct storage_type {
+        static inline constexpr std::size_t len = std::max(sizeof(loop_type), sizeof(scheduler_based_type));
+        static inline constexpr std::size_t align = std::lcm(alignof(loop_type), alignof(scheduler_based_type));
+
+        alignas(align) std::byte data[len];
+      };
+
+      public:
+      variant_opstate(sender_impl&& self, Receiver&& r)
+      : loop_based(execution::execute_may_block_caller(execution::get_scheduler(r)))
+      {
+        if (loop_based)
+          std::construct_at(&get_loop_state(), std::move(self), std::move(r));
+        else
+          std::construct_at(&get_scheduler_based_state(), std::move(self), std::move(r));
+      }
+
+      variant_opstate(const variant_opstate&) = delete;
+      variant_opstate(variant_opstate&&) = delete;
+      variant_opstate& operator=(const variant_opstate&) = delete;
+      variant_opstate& operator=(variant_opstate&&) = delete;
+
+      ~variant_opstate() {
+        if (loop_based)
+          std::destroy_at(&get_loop_state());
+        else
+          std::destroy_at(&get_scheduler_based_state());
+      }
+
+      friend auto tag_invoke([[maybe_unused]] start_t start, variant_opstate& self) noexcept -> void {
+        if (self.loop_based)
+          start(self.get_loop_state());
+        else
+          start(self.get_scheduler_based_state());
+      }
+
+      private:
+      auto get_loop_state() -> loop_type& {
+        void* vptr = &storage.data[0];
+        return *static_cast<loop_type*>(vptr);
+      }
+
+      auto get_scheduler_based_state() -> scheduler_based_type& {
+        void* vptr = &storage.data[0];
+        return *static_cast<scheduler_based_type*>(vptr);
+      }
+
+      storage_type storage;
+      const bool loop_based;
+    };
+
+    template<receiver Receiver>
     friend auto tag_invoke([[maybe_unused]] connect_t, sender_impl&& self, Receiver&& r)
     -> decltype(auto) {
-      if constexpr(has_scheduler<std::remove_cvref_t<Receiver>>)
-        return opstate<Sender, std::remove_cvref_t<Receiver>, Fn>(std::move(self.s), std::forward<Receiver>(r), std::move(self.fn));
+      if constexpr(std::invocable<get_scheduler_t, std::remove_reference_t<Receiver>&>)
+        return variant_opstate<std::remove_cvref_t<Receiver>>(std::move(self), std::forward<Receiver>(r));
       else
         return execution::connect(std::move(self.s), loop_receiver<std::remove_cvref_t<Receiver>, Fn>(std::forward<Receiver>(r), std::move(self.fn)));
     }
@@ -1201,9 +1309,9 @@ struct let_variant_t {
 
     public:
     opstate(Sender&& sender, Fn&& fn, Receiver&& r)
-    : parent(execution::connect(std::move(sender), accepting_receiver(*this))),
-      fn(fn),
-      r(std::move(r))
+    : fn(fn),
+      r(std::move(r)),
+      parent(execution::connect(std::move(sender), accepting_receiver(*this)))
     {}
 
     friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
@@ -1227,11 +1335,11 @@ struct let_variant_t {
           std::move(sender_variant));
     }
 
-    parent_opstate parent;
     values_variant values;
     opstate_variant opstates;
     Fn fn;
     Receiver r;
+    parent_opstate parent;
   };
 
   // Forward-declaration.
@@ -1318,6 +1426,238 @@ struct let_variant_t {
 inline constexpr let_variant_t let_variant{};
 
 
+class type_erased_scheduler {
+  private:
+  class schedule_receiver_intf {
+    protected:
+    ~schedule_receiver_intf() = default;
+
+    public:
+    virtual auto set_value() noexcept -> void = 0;
+    virtual auto set_error(std::exception_ptr ex) noexcept -> void = 0;
+  };
+
+  class schedule_receiver {
+    public:
+    explicit schedule_receiver(gsl::not_null<schedule_receiver_intf*> ptr)
+    : ptr(ptr)
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] set_value_t tag, schedule_receiver&& r) noexcept -> void {
+      assert(r.ptr != nullptr);
+      r.ptr->set_value();
+    }
+
+    friend auto tag_invoke([[maybe_unused]] set_error_t tag, schedule_receiver&& r, std::exception_ptr ex) noexcept -> void {
+      assert(r.ptr != nullptr);
+      r.ptr->set_error(ex);
+    }
+
+    private:
+    gsl::not_null<schedule_receiver_intf*> ptr;
+  };
+
+  template<receiver_of<> Receiver>
+  class schedule_receiver_impl
+  : public schedule_receiver_intf
+  {
+    public:
+    explicit schedule_receiver_impl(Receiver r)
+    : r(std::move(r))
+    {}
+
+    auto set_value() noexcept -> void override {
+      try {
+        execution::set_value(std::move(r));
+      } catch (...) {
+        execution::set_error(std::move(r), std::current_exception());
+      }
+    }
+
+    auto set_error(std::exception_ptr ex) noexcept -> void override {
+      execution::set_error(std::move(r), std::move(ex));
+    }
+
+    private:
+    Receiver r;
+  };
+
+  class intf {
+    protected:
+    intf(execution::forward_progress_guarantee forward_progress_guarantee, bool execute_may_block_caller)
+    : forward_progress_guarantee(forward_progress_guarantee),
+      execute_may_block_caller(execute_may_block_caller)
+    {}
+
+    ~intf() = default;
+
+    public:
+    virtual auto schedule(schedule_receiver r) -> move_only_function<void() noexcept> = 0;
+    virtual auto equals(const intf& other) const noexcept -> bool = 0;
+    // XXX stop_token
+
+    const execution::forward_progress_guarantee forward_progress_guarantee;
+    const bool execute_may_block_caller;
+  };
+
+  class schedule_sender;
+
+  template<scheduler Scheduler>
+  class impl
+  : public intf
+  {
+    private:
+    class opstate_type {
+      private:
+      class impl_type
+      : operation_state_base_
+      {
+        private:
+        using actual_impl_type = decltype(execution::connect(execution::schedule(std::declval<Scheduler&>()), std::declval<schedule_receiver>()));
+
+        public:
+        impl_type(Scheduler sch, schedule_receiver&& r)
+        : actual_impl(execution::connect(execution::schedule(sch), std::move(r)))
+        {}
+
+        friend auto tag_invoke(start_t start, impl_type& self) noexcept -> void {
+          return start(self.actual_impl);
+        }
+
+        private:
+        actual_impl_type actual_impl;
+      };
+
+      public:
+      opstate_type(Scheduler sch, schedule_receiver&& r)
+      : impl(std::make_unique<impl_type>(sch, std::move(r)))
+      {}
+
+      auto operator()() noexcept -> void {
+        execution::start(*impl);
+      }
+
+      private:
+      std::unique_ptr<impl_type> impl; // We use a pointer, so that our opstate_type is moveable (since it needs to be in a move-only-function).
+    };
+
+    public:
+    explicit impl(Scheduler sch)
+    : intf(execution::get_forward_progress_guarantee(sch), execution::execute_may_block_caller(sch)),
+      sch(sch)
+    {}
+
+    auto schedule(schedule_receiver r) -> move_only_function<void() noexcept> override {
+      return opstate_type(sch, std::move(r));
+    }
+
+    auto equals(const intf& other) const noexcept -> bool override {
+      const impl*const other_impl_ptr = dynamic_cast<const impl*>(&other);
+      return (other_impl_ptr != nullptr) && (sch == other_impl_ptr->sch);
+    }
+
+    private:
+    [[no_unique_address]] Scheduler sch;
+  };
+
+  class schedule_sender {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<>>;
+    template<template<typename...> class Variant>
+    using error_types = Variant<std::exception_ptr>;
+    static inline constexpr bool sends_done = false;
+
+    template<receiver_of<> Receiver>
+    class opstate
+    : operation_state_base_
+    {
+      public:
+      explicit opstate(intf& sch, Receiver&& r)
+      : r(std::move(r)),
+        impl(sch.schedule(schedule_receiver(&this->r)))
+      {}
+
+      friend auto tag_invoke([[maybe_unused]] start_t tag, opstate& self) noexcept -> void {
+        std::invoke(self.impl);
+      }
+
+      private:
+      [[no_unique_address]] schedule_receiver_impl<Receiver> r;
+      [[no_unique_address]] move_only_function<void() noexcept> impl;
+    };
+
+    explicit schedule_sender(gsl::not_null<std::shared_ptr<intf>> ptr)
+    : ptr(ptr)
+    {}
+
+    template<receiver_of<> Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t, schedule_sender&& self, Receiver&& r) -> opstate<std::remove_cvref_t<Receiver>> {
+      return opstate<std::remove_cvref_t<Receiver>>(*self.ptr, std::forward<Receiver>(r));
+    }
+
+    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_value_t> tag, const schedule_sender& self) {
+      return type_erased_scheduler(self.ptr);
+    }
+
+    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_error_t> tag, const schedule_sender& self) {
+      return type_erased_scheduler(self.ptr);
+    }
+
+    friend auto tag_invoke([[maybe_unused]] get_completion_scheduler_t<set_done_t> tag, const schedule_sender& self) {
+      return type_erased_scheduler(self.ptr);
+    }
+
+    private:
+    gsl::not_null<std::shared_ptr<intf>> ptr;
+  };
+
+  explicit type_erased_scheduler(gsl::not_null<std::shared_ptr<intf>> ptr) noexcept
+  : ptr(ptr)
+  {}
+
+  public:
+  template<typename Scheduler>
+  requires (!std::same_as<type_erased_scheduler, std::remove_cvref_t<Scheduler>>) &&
+      requires(Scheduler& sch) { // Annoyingly, if we check against the scheduler concept,
+                                 // the compiler will say scheduler-concept depends on itself here.
+                                 // So we have to go manual.
+        { ::earnest::execution::schedule(sch) };
+      }
+  explicit type_erased_scheduler(Scheduler&& sch)
+  : ptr(std::make_shared<impl<std::remove_cvref_t<Scheduler>>>(std::forward<Scheduler>(sch)))
+  {}
+
+  auto operator==(const type_erased_scheduler& y) const noexcept -> bool {
+    return ptr->equals(*y.ptr);
+  }
+
+  auto operator!=(const type_erased_scheduler& y) const noexcept -> bool {
+    return !(*this == y);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] schedule_t, const type_erased_scheduler& self) -> schedule_sender {
+    return schedule_sender(self.ptr);
+  }
+
+  friend auto tag_invoke([[maybe_unused]] get_forward_progress_guarantee_t, const type_erased_scheduler& self) noexcept {
+    return self.ptr->forward_progress_guarantee;
+  }
+
+  friend auto tag_invoke([[maybe_unused]] execute_may_block_caller_t, const type_erased_scheduler& self) noexcept {
+    return self.ptr->execute_may_block_caller;
+  }
+
+  friend auto swap(type_erased_scheduler& x, type_erased_scheduler& y) noexcept -> void {
+    using std::swap;
+    swap(x.ptr, y.ptr);
+  }
+
+  private:
+  gsl::not_null<std::shared_ptr<intf>> ptr;
+};
+
+
 template<typename ValueTypes, typename ErrorTypes = std::variant<std::exception_ptr>, bool SendsDone = true>
 struct type_erased_sender;
 
@@ -1390,8 +1730,8 @@ struct type_erased_sender_base_ {
   template<typename ReceiverIntf>
   class receiver_wrapper_t {
     public:
-    explicit receiver_wrapper_t(ReceiverIntf* r) noexcept
-    : r(r)
+    explicit receiver_wrapper_t(gsl::not_null<ReceiverIntf*> r) noexcept
+    : r(r.get())
     {}
 
     receiver_wrapper_t(const receiver_wrapper_t&) = delete;
@@ -1412,6 +1752,10 @@ struct type_erased_sender_base_ {
 
     friend auto tag_invoke(set_done_t tag, receiver_wrapper_t&& self) noexcept {
       tag(std::move(*self.r));
+    }
+
+    friend auto tag_invoke([[maybe_unused]] get_scheduler_t tag, const receiver_wrapper_t& self) noexcept {
+      return self.r->get_scheduler();
     }
 
     private:
@@ -1435,7 +1779,7 @@ struct type_erased_sender_base_ {
 
     virtual ~sender_intf() = default;
 
-    virtual auto connect(ReceiverIntf* r) && -> std::unique_ptr<operation_state_intf> = 0;
+    virtual auto connect(gsl::not_null<ReceiverIntf*> r) && -> std::unique_ptr<operation_state_intf> = 0;
   };
 
   template<typename ValueTypes, typename ErrorTypes, bool SendsDone>
@@ -1548,7 +1892,7 @@ class type_erased_sender_base_::sender_intf<ReceiverIntf>::impl
   : sender_impl(sender_impl)
   {}
 
-  auto connect(ReceiverIntf* r) && -> std::unique_ptr<operation_state_intf> override {
+  auto connect(gsl::not_null<ReceiverIntf*> r) && -> std::unique_ptr<operation_state_intf> override {
     return std::make_unique<operation_state_intf::impl<SenderImpl, receiver_wrapper_t<ReceiverIntf>>>(
         std::move(sender_impl),
         receiver_wrapper_t<ReceiverIntf>(r));
@@ -1588,6 +1932,7 @@ class type_erased_sender_base_::receiver_intf<std::variant<ValueTypes...>, std::
 {
   public:
   virtual ~receiver_intf() = default;
+  virtual auto get_scheduler() const -> type_erased_scheduler = 0;
 
   template<receiver Receiver>
   class impl
@@ -1618,6 +1963,13 @@ class type_erased_sender_base_::receiver_intf<std::variant<ValueTypes...>, std::
 
     auto set_done_impl() && noexcept {
       execution::set_done(std::move(r));
+    }
+
+    auto get_scheduler() const -> type_erased_scheduler override {
+      if constexpr(std::invocable<execution::get_scheduler_t, const Receiver&>)
+        return type_erased_scheduler(execution::get_scheduler(r));
+      else
+        return type_erased_scheduler(blocking_scheduler<>());
     }
 
     private:
@@ -2241,8 +2593,8 @@ struct chain_breaker_t {
     // It forward completion to the opstate.handle_ method.
     class local_receiver {
       public:
-      explicit local_receiver(opstate* state) noexcept
-      : state(state)
+      explicit local_receiver(gsl::not_null<opstate*> state) noexcept
+      : state(state.get())
       {}
 
       local_receiver(local_receiver&& other) noexcept
@@ -2300,7 +2652,7 @@ struct chain_breaker_t {
       opstate* state = nullptr;
     };
 
-    using nested_opstate_t = tag_invoke_result_t<connect_t, Sender, local_receiver>;
+    using nested_opstate_t = std::invoke_result_t<connect_t, Sender, local_receiver>;
 
     public:
     explicit opstate(Sender&& s, Receiver&& r)

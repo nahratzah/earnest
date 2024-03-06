@@ -688,9 +688,7 @@ concept scheduler =
 // Query the forward-progress-guarantee of a scheduler.
 struct get_forward_progress_guarantee_t {
   template<scheduler Scheduler>
-  auto operator()(const Scheduler& sch) const
-  noexcept
-  -> forward_progress_guarantee {
+  auto operator()(const Scheduler& sch) const noexcept -> forward_progress_guarantee {
     if constexpr(tag_invocable<get_forward_progress_guarantee_t, const Scheduler&>) {
       static_assert(nothrow_tag_invocable<get_forward_progress_guarantee_t, const Scheduler&>,
           "get_forward_progress_guarantee must be a noexcept function");
@@ -708,7 +706,7 @@ inline constexpr get_forward_progress_guarantee_t get_forward_progress_guarantee
 // Unless a specialization was implemented, this will return true.
 struct execute_may_block_caller_t {
   template<scheduler Scheduler>
-  constexpr auto operator()(const Scheduler& sch) noexcept -> bool {
+  constexpr auto operator()(const Scheduler& sch) const noexcept -> bool {
     if constexpr(tag_invocable<execute_may_block_caller_t, const Scheduler&>) {
       static_assert(std::same_as<bool, tag_invoke_result_t<execute_may_block_caller_t, const Scheduler&>>,
           "execute_may_block_caller must return a bool");
