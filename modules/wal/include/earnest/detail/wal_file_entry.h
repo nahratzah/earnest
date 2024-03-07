@@ -552,6 +552,10 @@ class wal_file_entry_file {
   : wal_file_entry_file(std::move(file), end_offset, execution::just(), alloc)
   {}
 
+  auto get_executor() const -> executor_type {
+    return file.get_executor();
+  }
+
   auto close() -> void {
     file.close();
   }
@@ -1529,8 +1533,17 @@ class wal_file_entry
         | lazy_validation(
             [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, [[maybe_unused]] const auto&... ignored_args) -> std::optional<std::error_code> {
               // We only permit writes when we're in the ready state.
-              if (wf->state_ != wal_file_entry_state::ready) return make_error_code(wal_errc::bad_state);
-              return std::nullopt;
+              switch (wf->state_) {
+                default:
+                  return make_error_code(wal_errc::bad_state);
+                case wal_file_entry_state::failed:
+                  return make_error_code(wal_errc::unrecoverable);
+                case wal_file_entry_state::ready:
+                  return std::nullopt;
+              }
+#if __cpp_lib_unreachable >= 202202L
+              std::unreachable();
+#endif
             })
         | let_variant(
             [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records,
@@ -1562,6 +1575,64 @@ class wal_file_entry
                 return variant_type(deferred());
               else
                 return variant_type(immediate());
+            }));
+  }
+
+  auto seal()
+  -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> {
+    using namespace execution;
+
+    gsl::not_null<std::shared_ptr<wal_file_entry>> wf = this->shared_from_this();
+    return on(
+        strand_,
+        just(wf)
+        | lazy_validation(
+            [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf) -> std::optional<std::error_code> {
+              // We only permit seals when we're in the ready state.
+              switch (wf->state_) {
+                default:
+                  return make_error_code(wal_errc::bad_state);
+                case wal_file_entry_state::failed:
+                  return make_error_code(wal_errc::unrecoverable);
+                case wal_file_entry_state::ready:
+                  return std::nullopt;
+              }
+#if __cpp_lib_unreachable >= 202202L
+              std::unreachable();
+#endif
+            })
+        | then(
+            [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf) {
+              write_records_buffer_t records(wf->get_executor(), wf->get_allocator());
+              records.push_back(wal_record_seal{});
+              return std::make_tuple(wf, records);
+            })
+        | explode_tuple()
+        | let_value(
+            [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records) {
+              auto space = wf->file.prepare_space(
+                  std::shared_ptr<wal_file_entry_file<Executor, Allocator>>(wf.get(), &wf->file),
+                  std::as_const(records).bytes().size());
+
+              auto sender_chain = durable_append_(wf, records, nullptr, nullptr, std::move(space))
+              | observe<set_value_t, set_error_t, set_done_t>(
+                  [wf]<typename Tag>(Tag tag, [[maybe_unused]] const auto&... args) {
+                    if (wf->state_ == wal_file_entry_state::failed) return;
+
+                    assert(wf->state_ == wal_file_entry_state::sealing);
+                    if constexpr(std::same_as<set_value_t, Tag>)
+                      wf->state_ = wal_file_entry_state::sealed;
+                    else
+                      wf->state_ = wal_file_entry_state::ready;
+                  })
+              | validation(
+                  [wf]() -> std::optional<std::error_code> {
+                    if (wf->state_ == wal_file_entry_state::failed) return make_error_code(wal_errc::unrecoverable);
+                    return std::nullopt;
+                  });
+
+              wf->state_ = wal_file_entry_state::sealing;
+              return sender_chain;
             }));
   }
 

@@ -2754,15 +2754,19 @@ struct lazy_observe_t {
   {
     public:
     explicit receiver_impl(Receiver&& r, Fn&& fn)
-    : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r)),
+    : _generic_receiver_wrapper<Receiver, Tags...>(std::move(r)),
       fn(std::move(fn))
     {}
 
     template<typename Tag, typename... Args>
     requires (std::same_as<Tag, Tags> ||...)
-    friend auto tag_invoke(Tag tag, receiver_impl&& self, Args&&... args) -> void {
-      std::invoke(std::move(self.fn), std::as_const(tag), std::as_const(args)...);
-      tag(std::move(self.r), std::forward<Args>(args)...);
+    friend auto tag_invoke(Tag tag, receiver_impl&& self, Args&&... args) noexcept -> void {
+      try {
+        std::invoke(std::move(self.fn), std::as_const(tag), std::as_const(args)...);
+        tag(std::move(self.r), std::forward<Args>(args)...);
+      } catch (...) {
+        execution::set_error(std::move(self.r), std::current_exception());
+      }
     }
 
     private:

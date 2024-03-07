@@ -959,61 +959,71 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
   }
 }
 
-#if 0
 TEST(seal_wal_file_entry) {
   using namespace std::string_literals;
   using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
+  using ::earnest::detail::wal_record_seal;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("seal_log");
 
   asio::io_context ioctx;
-  auto f = std::make_shared<wal_file_entry_t>(ioctx.get_executor(), std::allocator<std::byte>());
-  f->async_create(write_dir, "seal_log", 17,
-      [](std::error_code ec, auto link_done_event) {
-        REQUIRE CHECK_EQUAL(std::error_code(), ec);
+  auto [f, acceptor] = earnest::execution::sync_wait(
+      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
+          ioctx.get_executor(),
+          write_dir, "seal_log", 17,
+          std::allocator<std::byte>())).value();
+  acceptor.assign_values();
 
-        std::invoke(link_done_event, std::error_code());
-      });
-  ioctx.run();
-  ioctx.restart();
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
+              },
+              ioctx.get_executor(),
+              f->get_allocator())));
 
-  // We do a write and a seal.
-  // The code should order this such that the sealing happens after the write has been allocated space.
-  bool append_callback_was_called = false, seal_callback_was_called = false;
-  f->async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
-        wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
-      },
-      [&](std::error_code ec) {
-        CHECK_EQUAL(std::error_code(), ec);
-        append_callback_was_called = true;
-      });
-  f->async_seal([&](std::error_code ec) {
-        CHECK_EQUAL(std::error_code(), ec);
-        seal_callback_was_called = true;
-      });
-  ioctx.run();
+  earnest::execution::sync_wait(f->seal());
 
-  CHECK(append_callback_was_called);
-  CHECK(seal_callback_was_called);
-
-  CHECK_EQUAL(64u, f->write_offset());
+  CHECK_EQUAL(64u, f->end_offset());
   CHECK_EQUAL(60u, f->link_offset());
   CHECK_EQUAL(::earnest::detail::wal_file_entry_state::sealed, f->state());
 
-  CHECK_EQUAL(
-      hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
-          + "\000\000\000\001"s // wal_record_noop
-          + "\000\000\000\002\000\000\000\010\000\000\000\000\000\000\000\000"s // wal_record_skip32(8)
-          + "\000\000\000\002\000\000\000\000"s // wal_record_skip32(0)
-          + "\000\000\000\004"s // wal_record_seal
-          + "\000\000\000\000"s // sentinel (std::monostate)
-          ),
-      hex_string(f->file.contents<std::string>()));
+  {
+    earnest::fd<asio::io_context::executor_type> raw_file{ioctx.get_executor()};
+    raw_file.open(write_dir, "seal_log", earnest::open_mode::READ_ONLY);
+    CHECK_EQUAL(
+        hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
+            + "\000\000\000\001"s // wal_record_noop
+            + "\000\000\000\002\000\000\000\010\000\000\000\000\000\000\000\000"s // wal_record_skip32(8)
+            + "\000\000\000\002\000\000\000\000"s // wal_record_skip32(0)
+            + "\000\000\000\004"s // wal_record_seal
+            + "\000\000\000\000"s // sentinel (wal_record_end_of_records)
+            ),
+        hex_string(raw_file.contents<std::string>()));
+  }
+
+  auto [records] = earnest::execution::sync_wait(f->records()).value();
+  CHECK_EQUAL(4u, records.size());
+  if (records.size() == 4) {
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_noop>(records.at(0)));
+    CHECK(wal_record_noop{} == std::get<wal_record_noop>(records.at(0)));
+
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(1)));
+    CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
+
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_skip32>(records.at(2)));
+    CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(2)));
+
+    REQUIRE CHECK(std::holds_alternative<::earnest::detail::wal_record_seal>(records.at(3)));
+    CHECK(wal_record_seal{} == std::get<wal_record_seal>(records.at(3)));
+  }
 }
 
+#if 0
 TEST(discard_all) {
   using namespace std::string_literals;
   using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
