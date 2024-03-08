@@ -1011,11 +1011,11 @@ struct get_stop_token_t {
     if constexpr(!tag_invocable<get_stop_token_t, const R&>) {
       return never_stop_token{};
     } else {
-      static_assert(stoppable_token<decltype(_generic_operand_base<>(*this, r))>,
+      static_assert(stoppable_token<tag_invoke_result_t<get_stop_token_t, const R&>>,
           "get_stop_token must return a stoppable token");
-      static_assert(noexcept(_generic_operand_base<>(*this, r)),
+      static_assert(nothrow_tag_invocable<get_stop_token_t, const R&>,
           "get_stop_token must be a noexcept function");
-      return _generic_operand_base<>(*this, r);
+      return execution::tag_invoke(*this, r);
     }
   }
 };

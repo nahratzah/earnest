@@ -142,6 +142,7 @@ class in_place_stop_source {
   class callback_interface {
     friend callback_registry;
     friend in_place_stop_source;
+    friend in_place_stop_token;
 
     protected:
     callback_interface() noexcept = default;
@@ -250,15 +251,6 @@ class in_place_stop_source {
     bool stop_requested_ = false;
   };
 
-  auto register_callback(callback_interface* cb) const noexcept -> void {
-    std::lock_guard lck{*cb_registry};
-
-    if (cb_registry->stop_requested())
-      cb->invoke();
-    else
-      cb_registry->link(cb);
-  }
-
   public:
   in_place_stop_source()
   : cb_registry(std::make_shared<callback_registry>())
@@ -296,41 +288,12 @@ inline auto in_place_stop_source::callback_interface::deregister() noexcept -> v
 }
 
 
-// Callback for in_place_stop_source.
-//
-// The callback ensures that:
-// - it is registered
-// - it is de-registered when destroyed
-// - the contained callback is invoked when the stop-source becomes stopped
-template<std::invocable<> CB>
-class in_place_stop_callback
-: private in_place_stop_source::callback_interface
-{
-  public:
-  template<typename Initializer>
-  in_place_stop_callback(const in_place_stop_source& src, Initializer&& initializer)
-  noexcept(std::is_nothrow_constructible_v<CB, Initializer>)
-  : cb(std::forward<Initializer>(initializer)) // may throw
-  {
-    src.register_callback(*this); // never throws
-  }
-
-  ~in_place_stop_callback() {
-    deregister();
-  }
-
-  private:
-  auto invoke() noexcept -> void override {
-    std::invoke(cb);
-  }
-
-  CB cb;
-};
-
+template<std::invocable<> CB> class in_place_stop_callback;
 
 // Stop token associated with an in_place_stop_source.
 class in_place_stop_token {
   friend class in_place_stop_source;
+  template<std::invocable<> CB> friend class in_place_stop_callback;
 
   public:
   template<std::invocable CB>
@@ -343,6 +306,7 @@ class in_place_stop_token {
   : cb_registry(cb_registry)
   {}
 
+  public:
   auto operator==(const in_place_stop_token& other) const noexcept -> bool {
     return cb_registry == other.cb_registry;
   }
@@ -351,20 +315,66 @@ class in_place_stop_token {
     return !(*this == other);
   }
 
-  auto stop_requested() noexcept -> bool {
+  auto stop_requested() const noexcept -> bool {
     if (cb_registry == nullptr) return false;
 
     std::lock_guard lck{*cb_registry};
     return cb_registry->stop_requested();
   }
 
-  auto stop_possible() noexcept -> bool {
+  auto stop_possible() const noexcept -> bool {
     return cb_registry != nullptr;
   }
 
   private:
+  auto register_callback(in_place_stop_source::callback_interface* cb) const noexcept -> void {
+    if (cb_registry != nullptr) {
+      std::unique_lock lck{*cb_registry};
+
+      if (cb_registry->stop_requested()) {
+        lck.unlock(); // Run the callback without lock held.
+        cb->invoke();
+      } else {
+        cb_registry->link(cb);
+      }
+    }
+  }
+
   std::shared_ptr<in_place_stop_source::callback_registry> cb_registry;
 };
+
+
+// Callback for in_place_stop_source.
+//
+// The callback ensures that:
+// - it is registered
+// - it is de-registered when destroyed
+// - the contained callback is invoked when the stop-source becomes stopped
+template<std::invocable<> CB>
+class in_place_stop_callback
+: private in_place_stop_source::callback_interface
+{
+  public:
+  template<typename Initializer>
+  in_place_stop_callback(const in_place_stop_token& src, Initializer&& initializer)
+  noexcept(std::is_nothrow_constructible_v<CB, Initializer>)
+  : cb(std::forward<Initializer>(initializer)) // may throw
+  {
+    src.register_callback(this); // never throws
+  }
+
+  ~in_place_stop_callback() {
+    this->deregister();
+  }
+
+  private:
+  auto invoke() noexcept -> void override {
+    std::invoke(cb);
+  }
+
+  CB cb;
+};
+
 
 inline auto in_place_stop_source::get_token() const noexcept -> in_place_stop_token {
   return in_place_stop_token(cb_registry);
