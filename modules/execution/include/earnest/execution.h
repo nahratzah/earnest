@@ -5153,9 +5153,7 @@ struct lazy_split_t {
     using callback_fn = void(opstate_link&) noexcept;
 
     protected:
-    constexpr opstate_link(callback_fn* callback) noexcept
-    : callback(callback)
-    {}
+    constexpr opstate_link() noexcept = default;
 
 #ifdef NDEBUG
     ~opstate_link() {
@@ -5166,10 +5164,16 @@ struct lazy_split_t {
     ~opstate_link() = default;
 #endif
 
+    private:
+    virtual auto callback_impl() noexcept -> void = 0;
+
     public:
+    auto callback() noexcept -> void {
+      callback_impl();
+    }
+
     opstate_link* succ = nullptr;
     opstate_link* pred = nullptr;
-    callback_fn* const callback;
   };
 
   // The outcomes from the sender chain.
@@ -5297,7 +5301,7 @@ struct lazy_split_t {
     auto attach(opstate_link& link) noexcept -> void {
       {
         std::lock_guard lck{mtx};
-        if (std::holds_alternative<unstarted>(this->outcome) || std::holds_alternative<unstarted>(this->outcome)) {
+        if (std::holds_alternative<unstarted>(this->outcome) || std::holds_alternative<started>(this->outcome)) {
           // We only link, if the nested-opstate hasn't completed yet.
           link.succ = std::exchange(pending_completions, &link);
           return;
@@ -5308,7 +5312,7 @@ struct lazy_split_t {
       // Invokes the link-callback, which initiates the next operation-state.
       //
       // Must be called outside the lock, because it may destroy *this.
-      std::invoke(link.callback, link);
+      link.callback();
     }
 
     private:
@@ -5320,7 +5324,7 @@ struct lazy_split_t {
       while (!last) {
         opstate_link* lnk;
         std::tie(lnk, last) = pop_link();
-        if (lnk != nullptr) std::invoke(lnk->callback, *lnk);
+        if (lnk != nullptr) lnk->callback();
       }
     }
 
@@ -5391,14 +5395,12 @@ struct lazy_split_t {
   {
     public:
     explicit opstate(std::shared_ptr<shared_opstate<Sender>>&& shared_state, Receiver&& r)
-    : opstate_link(&callback_impl),
-      r(std::move(r)),
+    : r(std::move(r)),
       shared_state(std::move(shared_state))
     {}
 
     explicit opstate(const std::shared_ptr<shared_opstate<Sender>>& shared_state, Receiver&& r)
-    : opstate_link(&callback_impl),
-      r(std::move(r)),
+    : r(std::move(r)),
       shared_state(shared_state)
     {}
 
@@ -5411,9 +5413,8 @@ struct lazy_split_t {
     }
 
     private:
-    static auto callback_impl(opstate_link& self_link) noexcept -> void {
-      opstate& self = static_cast<opstate&>(self_link);
-      self.shared_state->apply(std::move(self.r));
+    auto callback_impl() noexcept -> void override {
+      shared_state->apply(std::move(r));
     }
 
     Receiver r;
