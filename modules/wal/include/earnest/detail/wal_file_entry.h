@@ -274,11 +274,13 @@ class wal_file_entry_file {
     public:
     prepared_space(
         gsl::not_null<std::shared_ptr<wal_file_entry_file>> self,
+        execution::strand<allocator_type> strand,
         offset_type write_offset,
         std::size_t write_len,
         commit_space_late_binding_t::acceptor acceptor,
         link_sender preceding_link, link_sender new_link)
     : self(self.get()),
+      strand(strand),
       write_offset(write_offset),
       write_len(write_len),
       acceptor(std::move(acceptor)),
@@ -305,6 +307,10 @@ class wal_file_entry_file {
 
     auto size() const noexcept -> std::size_t {
       return write_len;
+    }
+
+    auto get_new_link() const -> link_sender {
+      return new_link;
     }
 
     // must_succeed: if set, this indicates that the write mustn't fail.
@@ -366,7 +372,7 @@ class wal_file_entry_file {
     //         |                                                   [ stage-2 flush-to-disk ]
     //         |                                                               |
     //         |                                                               V
-    //         |`---------------------------------------------------> [ update callback ]
+    //         |`---------------------------------------------------> [ update callback ]  (omitted if nullptr)
     //         |                                                               |
     //         |    ,----------------------------------------------------------'
     //         |    |
@@ -383,6 +389,7 @@ class wal_file_entry_file {
     auto write_(std::span<const std::byte> data, bool delay_flush = false) && -> execution::sender_of<> auto {
       using namespace execution;
 
+      assert(strand.running_in_this_thread());
       if (data.size() != write_len) {
         try {
           throw std::range_error("data size does not match reserved size");
@@ -395,6 +402,7 @@ class wal_file_entry_file {
       return just(std::move(*this), data, delay_flush)
       | let_value(
           [](prepared_space& space, std::span<const std::byte> data, bool delay_flush) {
+            assert(space.strand.running_in_this_thread());
             if (!delay_flush && space.self->sync_offset < space.write_offset) space.self->sync_offset = space.write_offset; // Never throws
 
             // We wrap the commit-check here.
@@ -407,9 +415,12 @@ class wal_file_entry_file {
             auto transaction_commit = just()
             | let_variant(
                 [&space]() {
+                  assert(space.strand.running_in_this_thread());
+
                   auto do_the_check = [&]() {
-                    return space.preceding_link
-                    | let_value(std::ref(space.commit_check));
+                    return not_on_strand(
+                        space.strand,
+                        space.preceding_link | let_value(std::ref(space.commit_check)));
                   };
                   auto skip_the_check = []() {
                     return just();
@@ -434,6 +445,7 @@ class wal_file_entry_file {
             | let_value(
                 // After the first write, we flush-to-disk the written data.
                 [&space, delay_flush]([[maybe_unused]] std::size_t wlen) {
+                  assert(space.strand.running_in_this_thread());
                   return space.self->wal_flusher_.lazy_flush(true, space.self->delay_flush(space.write_offset, delay_flush));
                 });
 
@@ -444,11 +456,13 @@ class wal_file_entry_file {
                 [ link_data=std::span<const std::byte, 4>(std::span<const std::byte>(data).subspan(0, 4)),
                   &space
                 ]() {
+                  assert(space.strand.running_in_this_thread());
                   return io::write_at_ec(space.self->file, space.write_offset, link_data);
                 })
             | let_value(
                 // Now that the link is written, we need to flush that to disk.
                 [&space, delay_flush]([[maybe_unused]] std::size_t num_bytes_written) {
+                  assert(space.strand.running_in_this_thread());
                   return space.self->wal_flusher_.lazy_flush(true, space.self->delay_flush(space.write_offset, delay_flush));
                 });
 
@@ -461,11 +475,15 @@ class wal_file_entry_file {
                 // Note that if the update fails, the write will be reverted.
                 [&space]() mutable {
                   auto do_the_update = [&]() {
-                    return std::move(space.preceding_link)
-                    | let_value(std::ref(space.update_callback));
+                    return not_on_strand(
+                        space.strand,
+                        std::move(space.preceding_link) | let_value(std::ref(space.update_callback)));
                   };
-                  auto nothing_to_update = []() {
-                    return just();
+                  auto nothing_to_update = [&]() {
+                    // We must wait on the preceding-link, because the space.acceptor may not complete until the preceding link completes.
+                    return not_on_strand(
+                        space.strand,
+                        std::move(space.preceding_link));
                   };
                   using variant_type = std::variant<decltype(do_the_update()), decltype(nothing_to_update())>;
 
@@ -515,12 +533,13 @@ class wal_file_entry_file {
             | let_value(
                 // The whole operation is only completed, once the link is completed.
                 [&space]() {
-                  return std::move(space.new_link);
+                  return not_on_strand(space.strand, std::move(space.new_link));
                 });
           });
     }
 
     std::shared_ptr<wal_file_entry_file> self;
+    execution::strand<allocator_type> strand;
     offset_type write_offset;
     std::size_t write_len;
     commit_space_late_binding_t::acceptor acceptor;
@@ -606,7 +625,7 @@ class wal_file_entry_file {
   // Note that, when this function returns, the space allocated will be used.
   // If the acceptor isn't completed successfully, a recovery-operation will write
   // a skip record to skip the space when reading it back.
-  static auto prepare_space(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, std::size_t write_len) -> prepared_space {
+  static auto prepare_space(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, execution::strand<allocator_type> strand, std::size_t write_len) -> prepared_space {
     using namespace execution;
 
     if (write_len < 4) throw std::range_error("cannot write data of less than 4 bytes");
@@ -618,17 +637,19 @@ class wal_file_entry_file {
 
     // This recovery-chain writes the appropriate skip-record.
     // It's only invoked when the actual write failed.
-    auto make_recovery_chain = [self, write_offset, write_len]([[maybe_unused]] const auto&...) {
-      return just(self, write_offset, write_len)
+    auto make_recovery_chain = [self, strand, write_offset, write_len]([[maybe_unused]] const auto&...) {
+      return just(self, strand, write_offset, write_len)
       | then(
-          [](gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, offset_type write_offset, std::size_t write_len) {
+          [](gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, auto strand, offset_type write_offset, std::size_t write_len) {
             auto data = self->recovery_record_(write_len);
             assert(data.size() <= write_len); // It must fit.
-            return std::make_tuple(self, write_offset, data, write_len);
+            return std::make_tuple(self, strand, write_offset, data, write_len);
           })
       | explode_tuple()
       | let_value(
-          [](const gsl::not_null<std::shared_ptr<wal_file_entry_file>>& shared_self, offset_type write_offset, std::span<const std::byte> data, std::size_t write_len) {
+          [](const gsl::not_null<std::shared_ptr<wal_file_entry_file>>& shared_self, [[maybe_unused]] auto strand, offset_type write_offset, std::span<const std::byte> data, std::size_t write_len) {
+            assert(strand.running_in_this_thread());
+
             // We store the non-shared-pointer version, because it seems wasteful to install many copies of shared_self,
             // when the let_value-caller will guarantee its liveness anyway.
             const gsl::not_null<wal_file_entry_file*> self = shared_self.get().get();
@@ -636,22 +657,25 @@ class wal_file_entry_file {
             // Just like in regular writes, we write the data in two phases.
             // First we write everything except the first four bytes.
             // After flushing those to disk, we write the first four bytes (which will link the data together).
-            return io::write_at_ec(self->file, write_offset + 4u, data.subspan(4))
+            return when_all(io::write_at_ec(self->file, write_offset + 4u, data.subspan(4)), just(strand))
             | let_value(
                 // After the first write, we flush-to-disk the written data.
-                [self]([[maybe_unused]] std::size_t wlen) {
-                  return self->wal_flusher_.lazy_flush(true);
+                [self]([[maybe_unused]] std::size_t wlen, auto strand) {
+                  assert(strand.running_in_this_thread());
+                  return when_all(self->wal_flusher_.lazy_flush(true), just(strand)); // XXX pass strand to flusher?
                 })
             | let_value(
                 // Now that the skip record's data is guaranteed on disk, we can write the link.
                 [ link_span=std::span<const std::byte, 4>(data.subspan(0, 4)),
                   self, write_offset
-                ]() {
-                  return io::write_at_ec(self->file, write_offset, link_span);
+                ](auto strand) {
+                  assert(strand.running_in_this_thread());
+                  return when_all(io::write_at_ec(self->file, write_offset, link_span), just(strand));
                 })
             | let_value(
                 // After the second write, we flush-to-disk the written data.
-                [self]([[maybe_unused]] std::size_t wlen) {
+                [self]([[maybe_unused]] std::size_t wlen, [[maybe_unused]] auto strand) {
+                  assert(strand.running_in_this_thread());
                   return self->wal_flusher_.lazy_flush(true);
                 });
           });
@@ -661,8 +685,8 @@ class wal_file_entry_file {
 
     auto self_link = self->link;
     auto link_completion = when_all(
-        std::move(self_link), // Our link is not actually reachable, unless all preceding links have also been written.
-        std::move(sender) | let_done(make_recovery_chain))
+        not_on_strand(strand, std::move(self_link)), // Our link is not actually reachable, unless all preceding links have also been written.
+        not_on_strand(strand, std::move(sender)) | let_done(make_recovery_chain))
     | then(
         [self, new_link_offset, write_offset]() -> void {
           assert(self->link_offset == write_offset);
@@ -674,12 +698,12 @@ class wal_file_entry_file {
 
     self->file.truncate(new_end_offset); // Now we change the file size. This can fail.
                                          // Failure is fine: we've not commited to anything yet.
-    link_sender new_link = make_link_sender(std::move(link_completion)); // This can fail.
-                                                                         // Failure is fine: we've merely grown the file, and this class
-                                                                         // is designed to operate correctly even if the file has been grown.
+    link_sender new_link = make_link_sender(on(strand, std::move(link_completion))); // This can fail.
+                                                                                     // Failure is fine: we've merely grown the file, and this class
+                                                                                     // is designed to operate correctly even if the file has been grown.
     link_sender preceding_link = std::exchange(self->link, new_link); // Must not throw. XXX confirm that it doesn't throw
     self->end_offset = new_end_offset; // Never throws
-    return prepared_space(self, write_offset, write_len, std::move(acceptor), preceding_link, new_link);
+    return prepared_space(self, strand, write_offset, write_len, std::move(acceptor), preceding_link, new_link);
   }
 
   static auto read_some_at(gsl::not_null<std::shared_ptr<const wal_file_entry_file>> self, offset_type offset, std::span<std::byte> buf) -> execution::sender_of<std::size_t> auto {
@@ -1403,8 +1427,9 @@ class wal_file_entry
           });
     }
 
-    auto write_op = make_link_sender(std::move(space).write(std::as_const(records).bytes()));
-    wf->fake_link = write_op;
+    auto new_link = space.get_new_link();
+    auto write_op = std::move(space).write(std::as_const(records).bytes());
+    wf->fake_link = std::move(new_link);
     return write_op;
   }
 
@@ -1423,18 +1448,19 @@ class wal_file_entry
         // We perform transaction validation first.
         // This does delay the actual writes.
         // But we need it, because our delayed-write permits no failures (and transaction-validation failing is considered a failure).
-        [](auto& fake_link_in, auto& transaction_validation, auto&... args) {
+        [](auto& fake_link_in, auto& transaction_validation, gsl::not_null<std::shared_ptr<wal_file_entry>>& wf, auto&... args) {
           auto do_validation = [&]() {
-            return std::move(fake_link_in)
-            | let_value(std::move(transaction_validation))
-            | then(
-                [&args...]() {
-                  return std::make_tuple(std::move(args)...);
-                })
-            | explode_tuple();
+            return not_on_strand(wf->strand_,
+                std::move(fake_link_in)
+                | let_value(std::move(transaction_validation))
+                | then(
+                    [&wf, &args...]() {
+                      return std::make_tuple(wf, std::move(args)...);
+                    })
+                | explode_tuple());
           };
-          auto no_validation_needed = [&args...]() {
-            return just(std::move(args)...);
+          auto no_validation_needed = [&wf, &args...]() {
+            return just(wf, std::move(args)...);
           };
 
           using variant_type = std::variant<decltype(do_validation()), decltype(no_validation_needed())>;
@@ -1461,6 +1487,7 @@ class wal_file_entry
 
             auto fake_link_in = std::exchange(wf->fake_link, make_link_sender(std::move(fake_link_out)));
             start_detached(
+                // XXX figure out something regarding scheduler
                 std::move(fake_link_in)
                 | let_value(
                     [ on_successful_write_callback=std::move(on_successful_write_callback),
@@ -1550,6 +1577,7 @@ class wal_file_entry
                 bool delay_flush, auto& transaction_validation, auto& on_successful_write_callback) {
               auto space = wf->file.prepare_space(
                   std::shared_ptr<wal_file_entry_file<Executor, Allocator>>(wf.get(), &wf->file),
+                  wf->strand_,
                   std::as_const(records).bytes().size());
 
               // Durable writes are "immediate", meaning the sender-chain is linked to the write-to-disk operation completing.
@@ -1612,6 +1640,7 @@ class wal_file_entry
             [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records) {
               auto space = wf->file.prepare_space(
                   std::shared_ptr<wal_file_entry_file<Executor, Allocator>>(wf.get(), &wf->file),
+                  wf->strand_,
                   std::as_const(records).bytes().size());
 
               auto sender_chain = durable_append_(wf, records, nullptr, nullptr, std::move(space))

@@ -45,6 +45,7 @@ class strand_bound_scheduler_;
 // `running_in_this_thread' method won't work properly if you use co-routines that are thread-hopping.)
 template<typename Alloc = std::allocator<std::byte>>
 class strand {
+  friend struct not_on_strand_t;
   template<typename, execution::scheduler> friend class strand_bound_scheduler_;
 
   public:
@@ -502,6 +503,8 @@ struct is_strand_<strand<Alloc>> : std::true_type {};
 
 template<typename Alloc, execution::scheduler UnderlyingScheduler>
 class strand_bound_scheduler_ {
+  friend struct not_on_strand_t;
+
   static_assert(!is_strand_bound_scheduler_<UnderlyingScheduler>::value);
   static_assert(!is_strand_<UnderlyingScheduler>::value);
 
@@ -535,6 +538,71 @@ class strand_bound_scheduler_ {
   typename strand<Alloc>::state_ptr s;
   UnderlyingScheduler underlying_sched;
 };
+
+
+// Run a task, but ensure it won't be running on a strand.
+//
+// Takes the receiver scheduler (which must be a strand), and extracts the underlying scheduler.
+// The task is then run on the unwrapped scheduler.
+//
+// Afterwards, the task is then transferred to the strand scheduler that was on the receiver.
+struct not_on_strand_t {
+  private:
+  template<receiver Receiver>
+  class receiver_without_scheduler
+  : public _generic_receiver_wrapper<Receiver, get_scheduler_t>
+  {
+    public:
+    explicit receiver_without_scheduler(Receiver&& r)
+    : _generic_receiver_wrapper<Receiver, get_scheduler_t>(std::move(r))
+    {}
+  };
+
+  template<typed_sender Sender, typename Alloc>
+  class sender_impl
+  : public _generic_sender_wrapper<sender_impl<Sender, Alloc>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>
+  {
+    public:
+    explicit sender_impl(Sender s, strand<Alloc> expected_strand)
+    : _generic_sender_wrapper<sender_impl<Sender, Alloc>, Sender, connect_t, get_completion_scheduler_t<set_value_t>, get_completion_scheduler_t<set_error_t>, get_completion_scheduler_t<set_done_t>>(std::move(s)),
+      expected_strand(expected_strand)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke(connect_t connect, sender_impl&& self, Receiver&& r) {
+      static_assert(std::invocable<get_scheduler_t, std::remove_reference_t<Receiver>&>,
+          "receiver must have a scheduler");
+      auto sch = get_scheduler(r);
+      using scheduler_type = decltype(sch);
+      static_assert(is_strand_<scheduler_type>::value || is_strand_bound_scheduler_<scheduler_type>::value,
+          "receiver scheduler must be a strand-based scheduler");
+
+      if constexpr(is_strand_<scheduler_type>::value) {
+        assert(sch == self.expected_strand);
+        if (sch != self.expected_strand) throw std::logic_error("strand expectation not met");
+        return connect(
+            std::move(self.s) | execution::transfer(sch),
+            receiver_without_scheduler<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r)));
+      } else {
+        assert(sch.s == self.expected_strand.s);
+        if (sch.s != self.expected_strand.s) throw std::logic_error("strand expectation not met");
+        return connect(
+            execution::on(sch.underlying_sched, std::move(self.s) | execution::transfer(sch)),
+            std::forward<Receiver>(r));
+      }
+    }
+
+    private:
+    strand<Alloc> expected_strand;
+  };
+
+  public:
+  template<typename Alloc, typed_sender Sender>
+  auto operator()(strand<Alloc> expected_strand, Sender&& s) const -> typed_sender auto {
+    return sender_impl<std::remove_cvref_t<Sender>, Alloc>(std::forward<Sender>(s), std::move(expected_strand));
+  }
+};
+inline constexpr not_on_strand_t not_on_strand;
 
 
 } /* inline namespace extensions */
