@@ -462,7 +462,7 @@ class strand {
   auto scheduler(UnderlyingSched&& underlying_sched)
   noexcept(std::is_nothrow_constructible_v<std::remove_cvref_t<UnderlyingSched>, UnderlyingSched>)
   -> bound_scheduler_t<std::remove_cvref_t<UnderlyingSched>> {
-    return bound_scheduler_t<std::remove_cvref_t<UnderlyingSched>>(s, std::forward<UnderlyingSched>(underlying_sched));
+    return bound_scheduler_t<std::remove_cvref_t<UnderlyingSched>>(*this, std::forward<UnderlyingSched>(underlying_sched));
   }
 
   friend auto tag_invoke(schedule_t tag, strand self) -> sender_of<> auto {
@@ -509,7 +509,7 @@ class strand_bound_scheduler_ {
   static_assert(!is_strand_<UnderlyingScheduler>::value);
 
   public:
-  explicit strand_bound_scheduler_(typename strand<Alloc>::state_ptr s, const UnderlyingScheduler& underlying_sched)
+  explicit strand_bound_scheduler_(strand<Alloc> s, const UnderlyingScheduler& underlying_sched)
   noexcept(std::is_nothrow_copy_constructible_v<UnderlyingScheduler>)
   : s(s),
     underlying_sched(underlying_sched)
@@ -531,11 +531,15 @@ class strand_bound_scheduler_ {
 
   friend auto tag_invoke([[maybe_unused]] execution::schedule_t tag, strand_bound_scheduler_&& self)
   -> typename strand<Alloc>::template sender_impl<UnderlyingScheduler> {
-    return typename strand<Alloc>::template sender_impl<UnderlyingScheduler>(self.s, self.underlying_sched);
+    return typename strand<Alloc>::template sender_impl<UnderlyingScheduler>(self.s.s, self.underlying_sched);
+  }
+
+  friend auto tag_invoke(get_idle_scheduler_t get_idle_scheduler, const strand_bound_scheduler_& self) {
+    return self.s.scheduler(get_idle_scheduler(self.underlying_sched));
   }
 
   private:
-  typename strand<Alloc>::state_ptr s;
+  strand<Alloc> s;
   UnderlyingScheduler underlying_sched;
 };
 
@@ -584,8 +588,8 @@ struct not_on_strand_t {
             std::move(self.s) | execution::transfer(sch),
             receiver_without_scheduler<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r)));
       } else {
-        assert(sch.s == self.expected_strand.s);
-        if (sch.s != self.expected_strand.s) throw std::logic_error("strand expectation not met");
+        assert(sch.s == self.expected_strand);
+        if (sch.s != self.expected_strand) throw std::logic_error("strand expectation not met");
         return connect(
             execution::on(sch.underlying_sched, std::move(self.s) | execution::transfer(sch)),
             std::forward<Receiver>(r));

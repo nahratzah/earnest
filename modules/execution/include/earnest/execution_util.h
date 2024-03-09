@@ -23,6 +23,25 @@ namespace earnest::execution {
 inline namespace extensions {
 
 
+// For a given scheduler, figure out the idle-scheduler.
+// Tasks on an idle-scheduler run when the main scheduler doesn't have any work to do.
+//
+// If the scheduler doesn't have an idle-scheduler, the scheduler itself is returned.
+struct get_idle_scheduler_t {
+  template<scheduler Scheduler>
+  constexpr auto operator()(const Scheduler& sch) const
+  noexcept
+  -> scheduler auto {
+    if constexpr(tag_invocable<get_idle_scheduler_t, const Scheduler&>) {
+      return tag_invoke(*this, sch);
+    } else {
+      return sch;
+    }
+  }
+};
+inline constexpr get_idle_scheduler_t get_idle_scheduler;
+
+
 // Repeat a certain set of operations.
 //
 // Usage:
@@ -1494,6 +1513,7 @@ class type_erased_scheduler {
     public:
     virtual auto schedule(schedule_receiver r) -> move_only_function<void() noexcept> = 0;
     virtual auto equals(const intf& other) const noexcept -> bool = 0;
+    virtual auto idle_scheduler() const -> type_erased_scheduler = 0;
     // XXX stop_token
 
     const execution::forward_progress_guarantee forward_progress_guarantee;
@@ -1554,6 +1574,10 @@ class type_erased_scheduler {
     auto equals(const intf& other) const noexcept -> bool override {
       const impl*const other_impl_ptr = dynamic_cast<const impl*>(&other);
       return (other_impl_ptr != nullptr) && (sch == other_impl_ptr->sch);
+    }
+
+    auto idle_scheduler() const -> type_erased_scheduler override {
+      return type_erased_scheduler(execution::get_idle_scheduler(sch));
     }
 
     private:
@@ -1629,7 +1653,7 @@ class type_erased_scheduler {
   {}
 
   auto operator==(const type_erased_scheduler& y) const noexcept -> bool {
-    return ptr->equals(*y.ptr);
+    return ptr == y.ptr || ptr->equals(*y.ptr);
   }
 
   auto operator!=(const type_erased_scheduler& y) const noexcept -> bool {
@@ -1646,6 +1670,10 @@ class type_erased_scheduler {
 
   friend auto tag_invoke([[maybe_unused]] execute_may_block_caller_t, const type_erased_scheduler& self) noexcept {
     return self.ptr->execute_may_block_caller;
+  }
+
+  friend auto tag_invoke([[maybe_unused]] get_idle_scheduler_t, const type_erased_scheduler& self) -> type_erased_scheduler {
+    return self.ptr->idle_scheduler();
   }
 
   friend auto swap(type_erased_scheduler& x, type_erased_scheduler& y) noexcept -> void {
@@ -3371,6 +3399,104 @@ struct handle_error_code_t {
   }
 };
 inline constexpr handle_error_code_t handle_error_code;
+
+
+template<receiver Receiver, typename ErrorType>
+class _just_error_opstate
+: operation_state_base_
+{
+  public:
+  _just_error_opstate(Receiver&& r, ErrorType error)
+  : r(std::move(r)),
+    error(std::move(error))
+  {}
+
+  _just_error_opstate(_just_error_opstate&&) = delete;
+  _just_error_opstate(const _just_error_opstate&) = delete;
+
+  friend auto tag_invoke([[maybe_unused]] start_t, _just_error_opstate&& self) noexcept -> void {
+    execution::set_error(std::move(self.r), std::move(self.error));
+  }
+
+  private:
+  Receiver r;
+  ErrorType error;
+};
+
+template<typename ErrorType, typename... T>
+class _just_error_sender {
+  public:
+  template<template<typename...> class Tuple, template<typename...> class Variant>
+  using value_types = Variant<Tuple<T...>>;
+
+  template<template<typename...> class Variant>
+  using error_types = std::conditional_t<
+      std::is_same_v<ErrorType, std::exception_ptr>,
+      Variant<std::exception_ptr>,
+      Variant<ErrorType, std::exception_ptr>>;
+
+  static inline constexpr bool sends_done = false;
+
+  explicit _just_error_sender(ErrorType error)
+  : error(std::move(error))
+  {}
+
+  template<receiver Receiver>
+  friend auto tag_invoke([[maybe_unused]] connect_t connect, _just_error_sender&& self, Receiver&& r) -> operation_state auto {
+    return _just_error_opstate<std::remove_cvref_t<Receiver>, ErrorType>(std::forward<Receiver>(r), std::move(self.error));
+  }
+
+  private:
+  ErrorType error;
+};
+
+template<typename... T, typename ErrorType>
+auto just_error(ErrorType&& error) -> typed_sender auto {
+  return _just_error_sender<std::remove_cvref_t<ErrorType>, T...>(std::forward<ErrorType>(error));
+}
+
+
+template<receiver Receiver>
+class _just_done_opstate
+: operation_state_base_
+{
+  public:
+  _just_done_opstate(Receiver&& r)
+  : r(std::move(r))
+  {}
+
+  _just_done_opstate(_just_done_opstate&&) = delete;
+  _just_done_opstate(const _just_done_opstate&) = delete;
+
+  friend auto tag_invoke([[maybe_unused]] start_t, _just_done_opstate&& self) noexcept -> void {
+    execution::set_done(std::move(self.r));
+  }
+
+  private:
+  Receiver r;
+};
+
+template<typename... T>
+class _just_done_sender {
+  public:
+  template<template<typename...> class Tuple, template<typename...> class Variant>
+  using value_types = Variant<Tuple<T...>>;
+
+  template<template<typename...> class Variant>
+  using error_types = Variant<std::exception_ptr>;
+
+  static inline constexpr bool sends_done = true;
+
+  template<receiver Receiver>
+  friend auto tag_invoke([[maybe_unused]] connect_t connect, _just_done_sender&& self, Receiver&& r) -> operation_state auto {
+    return _just_done_opstate<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r));
+  }
+};
+
+template<typename... T>
+auto just_done() -> typed_sender auto {
+  return _just_done_sender<T...>();
+}
 
 
 } /* inline namespace extensions */

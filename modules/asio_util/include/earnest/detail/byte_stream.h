@@ -324,6 +324,10 @@ class byte_stream {
     return out;
   }
 
+  auto clear() -> void {
+    data_.clear();
+  }
+
   auto empty() const noexcept -> bool {
     return data_.empty();
   }
