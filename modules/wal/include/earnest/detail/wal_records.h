@@ -466,7 +466,6 @@ struct wal_record_modify_file_write32 {
   }
 };
 
-template<typename Executor, typename Reactor = aio::reactor>
 struct wal_record_modify_file32 {
   static constexpr std::uint32_t opcode = wal_record_modify_file_write32::opcode;
   static inline constexpr std::size_t data_offset = wal_record_modify_file_write32::data_offset;
@@ -475,7 +474,7 @@ struct wal_record_modify_file32 {
   std::uint64_t file_offset;
   std::uint64_t wal_offset;
   std::uint32_t wal_len;
-  std::shared_ptr<const fd<Executor, Reactor>> wal_file;
+  std::shared_ptr<const fd> wal_file;
 
   auto operator<=>(const wal_record_modify_file32& y) const noexcept = default;
 
@@ -527,10 +526,10 @@ struct wal_record_modify_file32 {
   }
 };
 
-template<typename Executor, typename Reactor> struct record_write_type_<wal_record_modify_file32<Executor, Reactor>> { using type = wal_record_modify_file_write32; };
+template<> struct record_write_type_<wal_record_modify_file32> { using type = wal_record_modify_file_write32; };
 
-template<typename... X, typename Executor, typename Reactor>
-inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_modify_file32<Executor, Reactor>& r) {
+template<typename... X>
+inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_modify_file32& r) {
   return std::move(x)
       & xdr_uint32(r.wal_len)
       & xdr_manual(
@@ -553,7 +552,6 @@ inline auto operator&(::earnest::xdr_writer<X...>&& x, typename ::earnest::xdr_w
 }
 
 
-template<typename Executor, typename Reactor>
 using wal_record_variant_ = std::variant<
     wal_record_end_of_records, // 0
     wal_record_noop, // 1
@@ -566,25 +564,60 @@ using wal_record_variant_ = std::variant<
     wal_record_create_file, // 32
     wal_record_erase_file, // 33
     wal_record_truncate_file, // 34
-    wal_record_modify_file32<Executor, Reactor> // 35
+    wal_record_modify_file32 // 35
     >;
+
+struct wal_record_variant;
+struct wal_record_write_variant;
+
+
+} /* namespace earnest::detail */
+
+namespace std {
+
+
+template<>
+struct variant_size<::earnest::detail::wal_record_variant>
+: variant_size<::earnest::detail::wal_record_variant_>
+{};
+
+template<>
+struct variant_size<::earnest::detail::wal_record_write_variant>
+: variant_size<::earnest::detail::record_write_type_t<::earnest::detail::wal_record_variant_>>
+{};
+
+
+template<std::size_t I>
+struct variant_alternative<I, ::earnest::detail::wal_record_variant>
+: variant_alternative<I, ::earnest::detail::wal_record_variant_>
+{};
+
+template<std::size_t I>
+struct variant_alternative<I, ::earnest::detail::wal_record_write_variant>
+: variant_alternative<I, ::earnest::detail::record_write_type_t<::earnest::detail::wal_record_variant_>>
+{};
+
+
+}
+
+namespace earnest::detail {
+
 
 // This type simply wraps the underlying std::variant.
 // But having it as a struct makes reading types easier.
-template<typename Executor, typename Reactor = aio::reactor>
 struct wal_record_variant
-: public wal_record_variant_<Executor, Reactor>
+: public wal_record_variant_
 {
-  using wal_record_variant_<Executor, Reactor>::wal_record_variant_;
+  using wal_record_variant_::wal_record_variant_;
 
-  wal_record_variant(const wal_record_variant_<Executor, Reactor>& r)
-      noexcept(std::is_nothrow_copy_constructible_v<wal_record_variant_<Executor, Reactor>>)
-  : wal_record_variant_<Executor, Reactor>(r)
+  wal_record_variant(const wal_record_variant_& r)
+      noexcept(std::is_nothrow_copy_constructible_v<wal_record_variant_>)
+  : wal_record_variant_(r)
   {}
 
-  wal_record_variant(wal_record_variant_<Executor, Reactor>&& r)
-      noexcept(std::is_nothrow_move_constructible_v<wal_record_variant_<Executor, Reactor>>)
-  : wal_record_variant_<Executor, Reactor>(std::move(r))
+  wal_record_variant(wal_record_variant_&& r)
+      noexcept(std::is_nothrow_move_constructible_v<wal_record_variant_>)
+  : wal_record_variant_(std::move(r))
   {}
 
   private:
@@ -614,8 +647,18 @@ struct wal_record_variant
         }).template with_lead<std::uint32_t>(xdr_uint32);
   }
 
+  template<std::size_t... Idx>
+  static auto xdr_variant_defn([[maybe_unused]] std::index_sequence<Idx...> indices) {
+    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_>::opcode>(xdr_v2::identity)...);
+  }
+
+  static auto xdr_variant_defn() {
+    return xdr_variant_defn(std::make_index_sequence<std::variant_size_v<wal_record_variant_>>{});
+  }
+
   public:
   template<typename... X>
+  [[deprecated]]
   friend inline auto operator&(::earnest::xdr_reader<X...>&& x, wal_record_variant& v) {
     return std::move(x) & v.decoder_();
   }
@@ -623,34 +666,23 @@ struct wal_record_variant
   friend auto tag_invoke([[maybe_unused]] xdr_v2::reader_t tag, wal_record_variant& v) {
     return xdr_variant_defn().read(v);
   }
-
-  private:
-  static auto xdr_variant_defn() {
-    return xdr_variant_defn(std::make_index_sequence<std::variant_size_v<wal_record_variant_<Executor, Reactor>>>{});
-  }
-
-  template<std::size_t... Idx>
-  static auto xdr_variant_defn([[maybe_unused]] std::index_sequence<Idx...> indices) {
-    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_<Executor, Reactor>>::opcode>(xdr_v2::identity)...);
-  }
 };
 
 // This type simply wraps the underlying std::variant.
 // But having it as a struct makes reading types easier.
-template<typename Executor, typename Reactor>
 struct wal_record_write_variant
-: public record_write_type_t<wal_record_variant_<Executor, Reactor>>
+: public record_write_type_t<wal_record_variant_>
 {
-  using record_write_type_t<wal_record_variant_<Executor, Reactor>>::record_write_type_t;
+  using record_write_type_t<wal_record_variant_>::record_write_type_t;
 
-  wal_record_write_variant(const record_write_type_t<wal_record_variant_<Executor, Reactor>>& r)
-      noexcept(std::is_nothrow_copy_constructible_v<record_write_type_t<wal_record_variant_<Executor, Reactor>>>)
-  : record_write_type_t<wal_record_variant_<Executor, Reactor>>(r)
+  wal_record_write_variant(const record_write_type_t<wal_record_variant_>& r)
+      noexcept(std::is_nothrow_copy_constructible_v<record_write_type_t<wal_record_variant_>>)
+  : record_write_type_t<wal_record_variant_>(r)
   {}
 
-  wal_record_write_variant(record_write_type_t<wal_record_variant_<Executor, Reactor>>&& r)
-      noexcept(std::is_nothrow_move_constructible_v<record_write_type_t<wal_record_variant_<Executor, Reactor>>>)
-  : record_write_type_t<wal_record_variant_<Executor, Reactor>>(std::move(r))
+  wal_record_write_variant(record_write_type_t<wal_record_variant_>&& r)
+      noexcept(std::is_nothrow_move_constructible_v<record_write_type_t<wal_record_variant_>>)
+  : record_write_type_t<wal_record_variant_>(std::move(r))
   {}
 
   private:
@@ -668,6 +700,15 @@ struct wal_record_write_variant
         });
   }
 
+  template<std::size_t... Idx>
+  static auto xdr_variant_defn([[maybe_unused]] std::index_sequence<Idx...> indices) {
+    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_>::opcode>(xdr_v2::identity)...);
+  }
+
+  static auto xdr_variant_defn() {
+    return xdr_variant_defn(std::make_index_sequence<std::variant_size_v<wal_record_variant_>>{});
+  }
+
   public:
   template<typename... X>
   friend inline auto operator&(::earnest::xdr_writer<X...>&& x, const wal_record_write_variant& v) {
@@ -677,21 +718,11 @@ struct wal_record_write_variant
   friend auto tag_invoke([[maybe_unused]] xdr_v2::writer_t tag, const wal_record_write_variant& v) {
     return xdr_variant_defn().write(v);
   }
-
-  private:
-  static auto xdr_variant_defn() {
-    return xdr_variant_defn(std::make_index_sequence<std::variant_size_v<wal_record_variant_<Executor, Reactor>>>{});
-  }
-
-  template<std::size_t... Idx>
-  static auto xdr_variant_defn([[maybe_unused]] std::index_sequence<Idx...> indices) {
-    return xdr_v2::variant(xdr_v2::variant.discriminant<std::variant_alternative_t<Idx, wal_record_variant_<Executor, Reactor>>::opcode>(xdr_v2::identity)...);
-  }
 };
 
-template<typename Executor, typename Reactor>
-struct record_write_type_<wal_record_variant<Executor, Reactor>> {
-  using type = wal_record_write_variant<Executor, Reactor>;
+template<>
+struct record_write_type_<wal_record_variant> {
+  using type = wal_record_write_variant;
 };
 
 // Indices 0..31 (inclusive) are reserved for bookkeeping of the WAL.
@@ -699,8 +730,7 @@ inline constexpr auto wal_record_is_bookkeeping(std::size_t idx) noexcept -> boo
   return idx < 32;
 }
 
-template<typename Executor, typename Reactor>
-inline auto wal_record_is_bookkeeping(const wal_record_variant<Executor, Reactor>& r) noexcept -> bool {
+inline auto wal_record_is_bookkeeping(const wal_record_variant& r) noexcept -> bool {
   return wal_record_is_bookkeeping(std::visit([](const auto& r) { return r.opcode; }, r));
 }
 
@@ -806,13 +836,13 @@ auto make_wal_record_no_bookkeeping(WalRecordVariant&& v) -> wal_record_no_bookk
 
 template<typename FdType, typename VariantType> struct wal_record_write_to_read_converter;
 
-template<typename Executor, typename Reactor, typename... T>
-struct wal_record_write_to_read_converter<fd<Executor, Reactor>, std::variant<T...>> {
+template<typename... T>
+struct wal_record_write_to_read_converter<fd, std::variant<T...>> {
   using variant_type = std::variant<T...>;
   using write_variant_type = record_write_type_t<variant_type>;
   static inline constexpr std::size_t variant_discriminant_bytes = 4;
 
-  wal_record_write_to_read_converter(std::shared_ptr<const fd<Executor, Reactor>> wal_file, std::uint64_t offset) noexcept
+  wal_record_write_to_read_converter(std::shared_ptr<const fd> wal_file, std::uint64_t offset) noexcept
   : wal_file(std::move(wal_file)),
     offset(std::move(offset))
   {}
@@ -831,12 +861,12 @@ struct wal_record_write_to_read_converter<fd<Executor, Reactor>, std::variant<T.
             [](const wal_record_create_file& r) -> variant_type { return r; },
             [](const wal_record_erase_file& r) -> variant_type { return r; },
             [](const wal_record_truncate_file& r) -> variant_type { return r; },
-            [this](const record_write_type_t<wal_record_modify_file32<Executor, Reactor>>& r) -> variant_type {
+            [this](const record_write_type_t<wal_record_modify_file32>& r) -> variant_type {
               if (r.data.size() > 0xffff'ffffU) throw std::logic_error("too much data");
-              return wal_record_modify_file32<Executor, Reactor>{
+              return wal_record_modify_file32{
                 .file=r.file,
                 .file_offset=r.file_offset,
-                .wal_offset=this->offset + record_write_type_t<wal_record_modify_file32<Executor, Reactor>>::data_offset + variant_discriminant_bytes,
+                .wal_offset=this->offset + record_write_type_t<wal_record_modify_file32>::data_offset + variant_discriminant_bytes,
                 .wal_len=static_cast<std::uint32_t>(r.data.size()),
                 .wal_file=this->wal_file,
               };
@@ -845,16 +875,16 @@ struct wal_record_write_to_read_converter<fd<Executor, Reactor>, std::variant<T.
   }
 
   private:
-  std::shared_ptr<const fd<Executor, Reactor>> wal_file;
+  std::shared_ptr<const fd> wal_file;
   std::uint64_t offset;
 };
 
-template<typename Executor, typename Reactor>
-struct wal_record_write_to_read_converter<fd<Executor, Reactor>, wal_record_variant<Executor, Reactor>> {
-  using variant_type = wal_record_variant<Executor, Reactor>;
-  using write_variant_type = wal_record_write_variant<Executor, Reactor>;
+template<>
+struct wal_record_write_to_read_converter<fd, wal_record_variant> {
+  using variant_type = wal_record_variant;
+  using write_variant_type = wal_record_write_variant;
 
-  wal_record_write_to_read_converter(std::shared_ptr<const fd<Executor, Reactor>> wal_file, std::uint64_t offset) noexcept
+  wal_record_write_to_read_converter(std::shared_ptr<const fd> wal_file, std::uint64_t offset) noexcept
   : converter_(std::move(wal_file), std::move(offset))
   {}
 
@@ -863,38 +893,11 @@ struct wal_record_write_to_read_converter<fd<Executor, Reactor>, wal_record_vari
   }
 
   private:
-  wal_record_write_to_read_converter<fd<Executor, Reactor>, wal_record_variant_<Executor, Reactor>> converter_;
+  wal_record_write_to_read_converter<fd, wal_record_variant_> converter_;
 };
 
 
 } /* namespace earnest::detail */
-
-namespace std {
-
-
-template<typename Executor, typename Reactor>
-struct variant_size<::earnest::detail::wal_record_variant<Executor, Reactor>>
-: variant_size<::earnest::detail::wal_record_variant_<Executor, Reactor>>
-{};
-
-template<typename Executor, typename Reactor>
-struct variant_size<::earnest::detail::wal_record_write_variant<Executor, Reactor>>
-: variant_size<::earnest::detail::record_write_type_t<::earnest::detail::wal_record_variant_<Executor, Reactor>>>
-{};
-
-
-template<std::size_t I, typename Executor, typename Reactor>
-struct variant_alternative<I, ::earnest::detail::wal_record_variant<Executor, Reactor>>
-: variant_alternative<I, ::earnest::detail::wal_record_variant_<Executor, Reactor>>
-{};
-
-template<std::size_t I, typename Executor, typename Reactor>
-struct variant_alternative<I, ::earnest::detail::wal_record_write_variant<Executor, Reactor>>
-: variant_alternative<I, ::earnest::detail::record_write_type_t<::earnest::detail::wal_record_variant_<Executor, Reactor>>>
-{};
-
-
-}
 
 namespace fmt {
 
@@ -1007,40 +1010,44 @@ struct formatter<earnest::detail::wal_record_modify_file_write32>
   }
 };
 
-template<typename Executor, typename Reactor>
-struct formatter<earnest::detail::wal_record_modify_file32<Executor, Reactor>>
+template<>
+struct formatter<earnest::detail::wal_record_modify_file32>
 : formatter<std::string>
 {
-  auto format(const earnest::detail::wal_record_modify_file32<Executor, Reactor>& r, format_context& ctx) -> decltype(ctx.out()) {
+  auto format(const earnest::detail::wal_record_modify_file32& r, format_context& ctx) -> decltype(ctx.out()) {
     return fmt::format_to(ctx.out(), "modify-file({}, offset={}, {} bytes)", r.file, r.file_offset, r.wal_len);
   }
 };
 
-template<typename Executor, typename Reactor>
-struct formatter<earnest::detail::wal_record_variant<Executor, Reactor>>
+template<>
+struct formatter<earnest::detail::wal_record_variant>
 : formatter<std::string>
 {
-  auto format(const earnest::detail::wal_record_variant<Executor, Reactor>& r, format_context& ctx) -> decltype(ctx.out()) {
+  auto format(const earnest::detail::wal_record_variant& r, format_context& ctx) -> decltype(ctx.out()) {
+    const earnest::detail::wal_record_variant_& actual_r = r;
     return std::visit(
         [&ctx](const auto& r) {
           return fmt::format_to(ctx.out(), "{}", r);
         },
-        r);
+        actual_r);
   }
 };
 
-template<typename Executor, typename Reactor>
-struct formatter<earnest::detail::wal_record_write_variant<Executor, Reactor>>
+#if 0 // XXX crashes compiler, no idea why.
+template<>
+struct formatter<earnest::detail::wal_record_write_variant>
 : formatter<std::string>
 {
-  auto format(const earnest::detail::wal_record_write_variant<Executor, Reactor>& r, format_context& ctx) -> decltype(ctx.out()) {
+  auto format(const earnest::detail::wal_record_write_variant& r, format_context& ctx) -> decltype(ctx.out()) {
+    const earnest::detail::record_write_type_t<earnest::detail::wal_record_variant_>& actual_r = r;
     return std::visit(
         [&ctx](const auto& r) -> decltype(ctx.out()) {
           return fmt::format_to(ctx.out(), "{}", r);
         },
-        r);
+        actual_r);
   }
 };
+#endif
 
 
 } /* namespace fmt */

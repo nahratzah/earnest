@@ -32,7 +32,6 @@ class wal_flusher {
   class sender_impl;
 
   public:
-  using executor_type [[deprecated]] = typename std::remove_cvref_t<AsyncFlushable>::executor_type;
   using allocator_type = Allocator;
 
   private:
@@ -45,42 +44,16 @@ class wal_flusher {
   {}
 
   public:
-  auto lazy_flush(bool data_only, bool delay_start = false) -> sender_impl {
-    return sender_impl(*this, data_only, delay_start);
-  }
-
   /* Start a new flush operation.
    *
    * - data_only: if true, an fdatasync will be executed, otherwise an fsync will be executed.
-   * - token: asio completion token, invoked after the flush completes.
    * - delay_start: don't start the flush.
    *
    * If delay_start is set, the flush operation won't start immediately, but instead wait until
    * another operation requests a flush.
    */
-  template<typename CompletionToken>
-  [[deprecated]]
-  auto async_flush(bool data_only, CompletionToken&& token, bool delay_start = false) {
-    return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [this](auto handler, bool data_only, bool delay_start) -> void {
-          using namespace execution;
-
-          start_detached(
-              lazy_flush(data_only, delay_start)
-              | then(
-                  []() noexcept -> std::error_code {
-                    return std::error_code{};
-                  })
-              | upon_error(
-                  [](auto err) -> std::error_code {
-                    if constexpr(std::same_as<std::exception_ptr, decltype(err)>)
-                      std::rethrow_exception(err);
-                    else
-                      return err;
-                  })
-              | then(completion_handler_fun(std::move(handler), this->flushable_.get_executor())));
-        },
-        token, data_only, delay_start);
+  auto lazy_flush(bool data_only, bool delay_start = false) -> sender_impl {
+    return sender_impl(*this, data_only, delay_start);
   }
 
   private:

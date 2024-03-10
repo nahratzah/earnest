@@ -5,8 +5,6 @@
 #include <type_traits>
 #include <utility>
 
-#include <asio/async_result.hpp>
-
 #include <earnest/execution.h>
 #include <earnest/execution_io.h>
 
@@ -39,7 +37,6 @@ class positional_stream_adapter {
   public:
   using offset_type = std::uint64_t;
   using next_layer_type = std::remove_reference_t<AsyncRandomAccessDevice>;
-  using executor_type = typename next_layer_type::executor_type;
 
   template<typename Arg>
   explicit positional_stream_adapter(Arg&& a)
@@ -75,10 +72,6 @@ class positional_stream_adapter {
 
   auto position() const noexcept -> offset_type {
     return pos_;
-  }
-
-  auto get_executor() const -> executor_type {
-    return next_layer().get_executor();
   }
 
   auto skip(offset_type bytes) {
@@ -131,68 +124,6 @@ class positional_stream_adapter {
   friend auto tag_invoke([[maybe_unused]] execution::io::lazy_write_t tag, positional_stream_adapter& self, Buffers&& buffers, std::optional<std::size_t> minbytes) {
     return execution::io::lazy_write_at(self.next_layer_, self.pos_, std::forward<Buffers>(buffers), std::move(minbytes))
     | execution::lazy_then(self.position_updater_cb());
-  }
-
-  template<typename ConstBufferSequence>
-  auto write_some(const ConstBufferSequence& buffers) -> std::size_t {
-    std::size_t sz = next_layer_.write_some_at(pos_, buffers);
-    pos_ += sz;
-    return sz;
-  }
-
-  template<typename ConstBufferSequence>
-  auto write_some(const ConstBufferSequence& buffers, std::error_code& ec) -> std::size_t {
-    std::size_t sz = next_layer_.write_some_at(pos_, buffers, ec);
-    pos_ += sz;
-    return sz;
-  }
-
-  template<typename ConstBufferSequence, typename CompletionToken>
-  auto async_write_some(const ConstBufferSequence& buffers, CompletionToken&& token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code, std::size_t)>(
-        [this](auto completion_handler, const ConstBufferSequence& buffers) {
-          next_layer_.async_write_some_at(
-              pos_,
-              buffers,
-              completion_wrapper<void(std::error_code, std::size_t)>(
-                  std::move(completion_handler),
-                  [this](auto& fwd, std::error_code ec, std::size_t sz) {
-                    pos_ += sz;
-                    std::invoke(fwd, ec, sz);
-                  }));
-        },
-        token, buffers);
-  }
-
-  template<typename MutableBufferSequence>
-  auto read_some(const MutableBufferSequence& buffers) -> std::size_t {
-    std::size_t sz = next_layer_.read_some_at(pos_, buffers);
-    pos_ += sz;
-    return sz;
-  }
-
-  template<typename MutableBufferSequence>
-  auto read_some(const MutableBufferSequence& buffers, std::error_code& ec) -> std::size_t {
-    std::size_t sz = next_layer_.read_some_at(pos_, buffers, ec);
-    pos_ += sz;
-    return sz;
-  }
-
-  template<typename MutableBufferSequence, typename CompletionToken>
-  auto async_read_some(const MutableBufferSequence& buffers, CompletionToken&& token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code, std::size_t)>(
-        [this](auto completion_handler, const MutableBufferSequence& buffers) {
-          next_layer_.async_read_some_at(
-              pos_,
-              buffers,
-              completion_wrapper<void(std::error_code, std::size_t)>(
-                  std::move(completion_handler),
-                  [this](auto& fwd, std::error_code ec, std::size_t sz) {
-                    pos_ += sz;
-                    std::invoke(fwd, ec, sz);
-                  }));
-        },
-        token, buffers);
   }
 
   private:

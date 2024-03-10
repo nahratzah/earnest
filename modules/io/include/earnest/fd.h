@@ -13,13 +13,6 @@
 #include <sys/file.h>
 #include <unistd.h>
 
-#include <asio/async_result.hpp>
-#include <asio/buffer.hpp>
-#include <asio/execution_context.hpp>
-#include <asio/executor.hpp>
-#include <asio/read_at.hpp>
-
-#include <earnest/detail/aio/reactor.h>
 #include <earnest/dir.h>
 #include <earnest/open_mode.h>
 #include <earnest/execution_io.h>
@@ -30,14 +23,8 @@ namespace earnest {
 class dir;
 
 
-template<typename Executor = asio::executor, typename Reactor = detail::aio::reactor>
 class fd {
-  private:
-  using reactor_type = Reactor;
-
   public:
-  using executor_type = Executor;
-  using lowest_layer_type = fd;
   using offset_type = ::earnest::execution::io::offset_type;
   using size_type = offset_type;
 
@@ -47,17 +34,9 @@ class fd {
   static inline constexpr open_mode READ_WRITE = open_mode::READ_WRITE;
 
   using native_handle_type = int;
-
   static inline constexpr native_handle_type invalid_native_handle = -1;
 
-  template<typename OtherExecutor>
-  struct rebind_executor {
-    using other = fd<OtherExecutor, Reactor>;
-  };
-
-  explicit fd(const executor_type& ex) noexcept(std::is_nothrow_copy_constructible_v<executor_type>)
-  : ex_(ex)
-  {}
+  fd() noexcept = default;
 
   /**
    * \brief Create a file descriptor, which uses the given descriptor.
@@ -68,40 +47,33 @@ class fd {
    *
    * On windows, the \p handle must be opened for overlapped IO.
    */
-  fd(const executor_type& ex, const native_handle_type& handle) noexcept(std::is_nothrow_copy_constructible_v<executor_type>)
-  : ex_(ex),
-    handle_(handle)
+  explicit fd(const native_handle_type& handle) noexcept
+  : handle_(handle)
   {}
 
   fd(const fd&) = delete;
 
-  fd(fd&& o) noexcept(std::is_nothrow_move_constructible_v<executor_type>)
-  : ex_(std::move(o.ex_)),
-    handle_(std::exchange(o.handle_, invalid_native_handle))
+  fd(fd&& o) noexcept
+  : handle_(std::exchange(o.handle_, invalid_native_handle))
   {}
 
   ~fd() noexcept {
     close();
   }
 
-  auto lowest_layer() -> lowest_layer_type& { return *this; }
-
-  void swap(fd& other) noexcept(std::is_nothrow_swappable_v<executor_type>) {
+  void swap(fd& other) noexcept {
     using std::swap;
-
-    swap(ex_, other.ex_); // may throw
     swap(handle_, other.handle_); // never throws
   }
 
   auto operator=(const fd&) -> fd& = delete;
 
-  auto operator=(fd&& other) noexcept(std::is_nothrow_move_assignable_v<executor_type>) -> fd& {
+  auto operator=(fd&& other) noexcept -> fd& {
     swap(other);
     other.close();
     return *this;
   }
 
-  auto get_executor() const -> executor_type { return ex_; }
   auto is_open() const noexcept -> bool { return handle_ != invalid_native_handle; }
   explicit operator bool() const noexcept { return is_open(); }
   auto operator!() const noexcept -> bool { return !is_open(); }
@@ -186,29 +158,6 @@ class fd {
     return success;
   }
 
-  void flush(bool data_only = false) {
-    std::error_code ec;
-    flush(data_only, ec);
-    if (ec) throw std::system_error(ec, "earnest::fd::flush");
-  }
-
-  void flush(bool data_only, std::error_code& ec) {
-    ec = aio_.flush(handle_, data_only);
-  }
-
-  void flush(std::error_code& ec) {
-    flush(false, ec);
-  }
-
-  template<typename CompletionToken>
-  auto async_flush(bool data_only, CompletionToken&& token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [this](auto completion_handler, bool data_only) {
-          aio_.async_flush(handle_, data_only, std::move(completion_handler), ex_);
-        },
-        token, data_only);
-  }
-
   friend auto tag_invoke(execution::io::lazy_datasync_ec_t tag, fd& self) {
     return tag(self.handle_);
   }
@@ -246,20 +195,6 @@ class fd {
     return tag(self.handle_, len);
   }
 
-  void cancel() {
-    std::error_code ec;
-    cancel(ec);
-    if (ec) throw std::system_error(ec, "earnest::fd::cancel");
-  }
-
-  void cancel(std::error_code& ec) {
-    if (handle_ != invalid_native_handle) {
-      ec = aio_.cancel(handle_);
-    } else {
-      ec.clear();
-    }
-  }
-
   void close() {
     std::error_code ec;
     close(ec);
@@ -267,11 +202,8 @@ class fd {
   }
 
   void close(std::error_code& ec) {
-    if (handle_ == invalid_native_handle) {
-      ec.clear();
-    } else {
-      cancel(ec);
-      if (ec) return;
+    ec.clear();
+    if (handle_ != invalid_native_handle) {
       if (::close(handle_))
         ec.assign(errno, std::generic_category());
       else
@@ -304,8 +236,7 @@ class fd {
         break;
     }
 
-    auto new_fd = fd(get_executor());
-    new_fd.handle_ = ::open(filename.c_str(), fl);
+    fd new_fd = fd(::open(filename.c_str(), fl));
     if (new_fd.handle_ == invalid_native_handle) {
       ec.assign(errno, std::generic_category());
       return;
@@ -336,6 +267,9 @@ class fd {
 #ifdef O_CLOEXEC
     fl |= O_CLOEXEC;
 #endif
+#ifdef O_RESOLVE_BENEATH
+    fl |= O_RESOLVE_BENEATH;
+#endif
     switch (mode) {
       case open_mode::READ_ONLY:
         fl |= O_RDONLY;
@@ -348,8 +282,7 @@ class fd {
         break;
     }
 
-    auto new_fd = fd(get_executor());
-    new_fd.handle_ = ::openat(parent.native_handle(), filename.c_str(), fl);
+    fd new_fd = fd(::openat(parent.native_handle(), filename.c_str(), fl));
     if (new_fd.handle_ == invalid_native_handle) {
       ec.assign(errno, std::generic_category());
       return;
@@ -376,8 +309,7 @@ class fd {
     fl |= O_CLOEXEC;
 #endif
 
-    auto new_fd = fd(get_executor());
-    new_fd.handle_ = ::open(filename.c_str(), fl, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+    auto new_fd = fd(::open(filename.c_str(), fl, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH));
     if (new_fd.handle_ == invalid_native_handle) {
       ec.assign(errno, std::generic_category());
       return;
@@ -408,9 +340,11 @@ class fd {
 #ifdef O_CLOEXEC
     fl |= O_CLOEXEC;
 #endif
+#ifdef O_RESOLVE_BENEATH
+    fl |= O_RESOLVE_BENEATH;
+#endif
 
-    auto new_fd = fd(get_executor());
-    new_fd.handle_ = ::openat(parent.native_handle(), filename.c_str(), fl, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH);
+    auto new_fd = fd(::openat(parent.native_handle(), filename.c_str(), fl, S_IRUSR|S_IWUSR|S_IRGRP|S_IWGRP|S_IROTH|S_IWOTH));
     if (new_fd.handle_ == invalid_native_handle) {
       ec.assign(errno, std::generic_category());
       return;
@@ -442,9 +376,8 @@ class fd {
 restart:
     std::string template_name = prefix_path.native();
 
-    auto new_fd = fd(get_executor());
 #ifdef HAS_MKSTEMP
-    new_fd.handle_ = ::mkstemp(template_name.data());
+    fd new_fd = fd(::mkstemp(template_name.data()));
     if (new_fd.handle_ == invalid_native_handle) {
       ec.assign(errno, std::generic_category());
       return;
@@ -454,7 +387,7 @@ restart:
 #ifdef O_CLOEXEC
     fl |= O_CLOEXEC;
 #endif
-    new_fd.handle_ = ::open(::mktemp(template_name.data()), fl, 0666);
+    fd new_fd = fd(::open(::mktemp(template_name.data()), fl, 0666));
     if (new_fd.handle_ == invalid_native_handle) {
       if (errno == EEXIST) goto restart;
       ec.assign(errno, std::generic_category());
@@ -469,34 +402,6 @@ restart:
     swap(new_fd);
   }
 
-  template<typename Buffers, typename CompletionToken>
-  auto async_read_some_at(offset_type offset, Buffers&& mb, CompletionToken&& token) const {
-    return asio::async_initiate<CompletionToken, void(std::error_code, std::size_t)>(
-        [this](auto completion_handler, offset_type offset, Buffers&& mb) {
-          aio_.async_read_some_at(handle_, offset, std::forward<Buffers>(mb), std::move(completion_handler), get_executor());
-        },
-        token, offset, std::forward<Buffers>(mb));
-  }
-
-  template<typename Buffers, typename CompletionToken>
-  auto async_write_some_at(offset_type offset, Buffers&& mb, CompletionToken&& token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code, std::size_t)>(
-        [this](auto completion_handler, offset_type offset, Buffers&& mb) {
-          aio_.async_write_some_at(handle_, offset, std::forward<Buffers>(mb), std::move(completion_handler), get_executor());
-        },
-        token, offset, std::forward<Buffers>(mb));
-  }
-
-  template<typename Buffers>
-  auto read_some_at(offset_type offset, Buffers&& mb, std::error_code& ec) const -> std::size_t {
-    return aio_.read_some_at(handle_, offset, std::forward<Buffers>(mb), ec);
-  }
-
-  template<typename Buffers>
-  auto write_some_at(offset_type offset, Buffers&& mb, std::error_code& ec) {
-    return aio_.write_some_at(handle_, offset, std::forward<Buffers>(mb), ec);
-  }
-
   template<execution::io::mutable_buffers Buffers>
   friend auto tag_invoke(execution::io::lazy_read_some_at_ec_t tag, const fd& self, offset_type offset, Buffers&& buffers) {
     return tag(self.handle_, offset, std::forward<Buffers>(buffers));
@@ -508,27 +413,22 @@ restart:
   }
 
   template<typename Collection>
-#if __cpp_concepts >= 201907L
   requires (sizeof(typename Collection::value_type) == 1) && requires(Collection c, std::size_t size) {
     { c.resize(size) };
-    { asio::buffer(c) } -> std::convertible_to<asio::mutable_buffer>;
   }
-#endif
   auto contents(Collection c = Collection()) const -> Collection {
+    using namespace execution;
     c.resize(size());
-    asio::read_at(*this, 0, asio::buffer(c));
+    sync_wait(io::read_at(*this, 0, std::as_writable_bytes(std::span<typename Collection::value_type>(c))));
     return c;
   }
 
   private:
-  executor_type ex_;
-  reactor_type& aio_ = asio::use_service<reactor_type>(ex_.context());
   native_handle_type handle_ = invalid_native_handle;
 };
 
 
-template<typename Executor, typename Reactor>
-inline void swap(fd<Executor, Reactor>& x, fd<Executor, Reactor>& y) noexcept(std::is_nothrow_swappable_v<Executor>) {
+inline void swap(fd& x, fd& y) noexcept {
   x.swap(y);
 }
 

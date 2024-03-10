@@ -11,8 +11,6 @@
 #include <string_view>
 #include <system_error>
 
-#include <asio/io_context.hpp>
-
 earnest::dir source_files, write_dir;
 
 auto hex_string(std::string_view sv) -> std::string {
@@ -40,12 +38,10 @@ void ensure_file_is_gone(std::string filename) {
 }
 
 TEST(read_empty_wal_file_entry) {
-  asio::io_context ioctx;
   auto test_function = [&]() -> std::error_code {
     try {
       earnest::execution::sync_wait(
-          earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::open(
-              ioctx.get_executor(),
+          earnest::detail::wal_file_entry<std::allocator<std::byte>>::open(
               source_files, "empty",
               std::allocator<std::byte>())).value();
     } catch (const std::error_code& ec) {
@@ -58,12 +54,10 @@ TEST(read_empty_wal_file_entry) {
 }
 
 TEST(read_non_existant_wal_file_entry) {
-  asio::io_context ioctx;
   auto test_function = [&]() -> std::error_code {
     try {
       earnest::execution::sync_wait(
-          earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::open(
-              ioctx.get_executor(),
+          earnest::detail::wal_file_entry<std::allocator<std::byte>>::open(
               source_files, "non_existant_file",
               std::allocator<std::byte>())).value();
     } catch (const std::error_code& ec) {
@@ -76,10 +70,8 @@ TEST(read_non_existant_wal_file_entry) {
 }
 
 TEST(read_wal_file_entry) {
-  asio::io_context ioctx;
   auto [f] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::open(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::open(
           source_files, "version_0",
           std::allocator<std::byte>())).value();
 
@@ -95,10 +87,8 @@ TEST(read_wal_file_entry) {
 }
 
 TEST(read_sealed_wal_file_entry) {
-  asio::io_context ioctx;
   auto [f] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::open(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::open(
           source_files, "sealed_0",
           std::allocator<std::byte>())).value();
 
@@ -121,23 +111,21 @@ TEST(write_wal_file_entry) {
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("wal_19");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "wal_19", 19,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
 
   CHECK_EQUAL(
-      (earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::max_version),
+      (earnest::detail::wal_file_entry<std::allocator<std::byte>>::max_version),
       f->version);
   CHECK_EQUAL(19u, f->sequence);
   CHECK_EQUAL(32u, f->end_offset());
   CHECK_EQUAL(28u, f->link_offset());
 
   {
-    earnest::fd<asio::io_context::executor_type> raw_file{ioctx.get_executor()};
+    earnest::fd raw_file;
     raw_file.open(write_dir, "wal_19", earnest::open_mode::READ_ONLY);
     CHECK_EQUAL(
         hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\023\000\000\000\000"s),
@@ -152,17 +140,15 @@ TEST(write_wal_file_entry) {
 
 TEST(durable_append_wal_file_entry) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -173,14 +159,13 @@ TEST(durable_append_wal_file_entry) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   CHECK_EQUAL(60u, f->end_offset());
   CHECK_EQUAL(56u, f->link_offset());
 
   {
-    earnest::fd<asio::io_context::executor_type> raw_file{ioctx.get_executor()};
+    earnest::fd raw_file;
     raw_file.open(write_dir, "durable_append_log", earnest::open_mode::READ_ONLY);
     CHECK_EQUAL(
         hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
@@ -208,17 +193,15 @@ TEST(durable_append_wal_file_entry) {
 
 TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_txvalidating_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -230,7 +213,6 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
               },
-              ioctx.get_executor(),
               f->get_allocator()),
           [&tx_validator_called]() {
             CHECK(!tx_validator_called);
@@ -244,7 +226,6 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   CHECK(tx_validator_called);
@@ -252,7 +233,7 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
   CHECK_EQUAL(56u, f->link_offset());
 
   {
-    earnest::fd<asio::io_context::executor_type> raw_file{ioctx.get_executor()};
+    earnest::fd raw_file;
     raw_file.open(write_dir, "durable_txvalidating_append_log", earnest::open_mode::READ_ONLY);
     CHECK_EQUAL(
         hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
@@ -281,17 +262,15 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
 TEST(durable_append_wal_file_entry_with_failing_txvalidation) {
   struct error {};
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_failing_txvalidating_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_failing_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -304,7 +283,6 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation) {
                   std::initializer_list<wal_file_entry_t::write_variant_type>{
                     wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
                   },
-                  ioctx.get_executor(),
                   f->get_allocator()),
               [&tx_validator_called]() -> decltype(earnest::execution::just()) {
                 CHECK(!tx_validator_called);
@@ -319,7 +297,6 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   CHECK(tx_validator_called);
@@ -341,17 +318,15 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation) {
 
 TEST(durable_append_wal_file_entry_callback) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -363,7 +338,6 @@ TEST(durable_append_wal_file_entry_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator()),
           nullptr,
           [&callback_called](const auto& records) {
@@ -380,7 +354,7 @@ TEST(durable_append_wal_file_entry_callback) {
   CHECK_EQUAL(56u, f->link_offset());
 
   {
-    earnest::fd<asio::io_context::executor_type> raw_file{ioctx.get_executor()};
+    earnest::fd raw_file;
     raw_file.open(write_dir, "durable_append_log", earnest::open_mode::READ_ONLY);
     CHECK_EQUAL(
         hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
@@ -408,17 +382,15 @@ TEST(durable_append_wal_file_entry_callback) {
 
 TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_txvalidating_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -431,7 +403,6 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
               },
-              ioctx.get_executor(),
               f->get_allocator()),
           [&tx_validator_called]() {
             CHECK(!tx_validator_called);
@@ -452,7 +423,6 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   CHECK(tx_validator_called);
@@ -461,7 +431,7 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
   CHECK_EQUAL(56u, f->link_offset());
 
   {
-    earnest::fd<asio::io_context::executor_type> raw_file{ioctx.get_executor()};
+    earnest::fd raw_file;
     raw_file.open(write_dir, "durable_txvalidating_append_log", earnest::open_mode::READ_ONLY);
     CHECK_EQUAL(
         hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
@@ -490,17 +460,15 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
 TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
   struct error {};
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_failing_txvalidating_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_failing_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -514,7 +482,6 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
                   std::initializer_list<wal_file_entry_t::write_variant_type>{
                     wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
                   },
-                  ioctx.get_executor(),
                   f->get_allocator()),
               [&tx_validator_called]() -> decltype(earnest::execution::just()) {
                 CHECK(!tx_validator_called);
@@ -533,7 +500,6 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   CHECK(tx_validator_called);
@@ -556,17 +522,15 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
 
 TEST(non_durable_append_wal_file_entry) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -577,7 +541,6 @@ TEST(non_durable_append_wal_file_entry) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator()),
           nullptr,
           nullptr,
@@ -601,17 +564,15 @@ TEST(non_durable_append_wal_file_entry) {
 
 TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_txvalidating_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -623,7 +584,6 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
               },
-              ioctx.get_executor(),
               f->get_allocator()),
           [&tx_validator_called]() {
             CHECK(!tx_validator_called);
@@ -651,7 +611,6 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   CHECK(tx_validator_called);
@@ -673,17 +632,15 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
 TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
   struct error {};
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_failing_txvalidating_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_failing_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -696,7 +653,6 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
                   std::initializer_list<wal_file_entry_t::write_variant_type>{
                     wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
                   },
-                  ioctx.get_executor(),
                   f->get_allocator()),
               [&tx_validator_called]() -> decltype(earnest::execution::just()) {
                 CHECK(!tx_validator_called);
@@ -713,7 +669,6 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   CHECK(tx_validator_called);
@@ -733,17 +688,15 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
 
 TEST(non_durable_append_wal_file_entry_callback) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -755,7 +708,6 @@ TEST(non_durable_append_wal_file_entry_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator()),
           nullptr,
           [&callback_called](const auto& records) {
@@ -801,17 +753,15 @@ TEST(non_durable_append_wal_file_entry_callback) {
 
 TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_txvalidating_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -824,7 +774,6 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
               },
-              ioctx.get_executor(),
               f->get_allocator()),
           [&tx_validator_called]() {
             CHECK(!tx_validator_called);
@@ -858,7 +807,6 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   CHECK(tx_validator_called);
@@ -867,7 +815,7 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
   CHECK_EQUAL(56u, f->link_offset());
 
   {
-    earnest::fd<asio::io_context::executor_type> raw_file{ioctx.get_executor()};
+    earnest::fd raw_file;
     raw_file.open(write_dir, "durable_txvalidating_append_log", earnest::open_mode::READ_ONLY);
     CHECK_EQUAL(
         hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
@@ -896,17 +844,15 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
 TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
   struct error {};
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("durable_failing_txvalidating_append_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "durable_failing_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -920,7 +866,6 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
                   std::initializer_list<wal_file_entry_t::write_variant_type>{
                     wal_record_noop{}, wal_record_skip32{ .bytes = 8 }
                   },
-                  ioctx.get_executor(),
                   f->get_allocator()),
               [&tx_validator_called]() -> decltype(earnest::execution::just()) {
                 CHECK(!tx_validator_called);
@@ -940,7 +885,6 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   CHECK(tx_validator_called);
@@ -961,7 +905,7 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
 
 TEST(seal_wal_file_entry) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
   using ::earnest::detail::wal_record_seal;
@@ -969,10 +913,8 @@ TEST(seal_wal_file_entry) {
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("seal_log");
 
-  asio::io_context ioctx;
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>::create(
-          ioctx.get_executor(),
+      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
           write_dir, "seal_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -983,7 +925,6 @@ TEST(seal_wal_file_entry) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
               },
-              ioctx.get_executor(),
               f->get_allocator())));
 
   earnest::execution::sync_wait(f->seal());
@@ -993,7 +934,7 @@ TEST(seal_wal_file_entry) {
   CHECK_EQUAL(::earnest::detail::wal_file_entry_state::sealed, f->state());
 
   {
-    earnest::fd<asio::io_context::executor_type> raw_file{ioctx.get_executor()};
+    earnest::fd raw_file;
     raw_file.open(write_dir, "seal_log", earnest::open_mode::READ_ONLY);
     CHECK_EQUAL(
         hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
@@ -1026,7 +967,7 @@ TEST(seal_wal_file_entry) {
 #if 0
 TEST(discard_all) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<asio::io_context::executor_type, std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -1034,7 +975,7 @@ TEST(discard_all) {
   ensure_file_is_gone("discard_all");
 
   asio::io_context ioctx;
-  auto f = std::make_shared<wal_file_entry_t>(ioctx.get_executor(), std::allocator<std::byte>());
+  auto f = std::make_shared<wal_file_entry_t>(std::allocator<std::byte>());
   // Preparation: create a file with data.
   f->async_create(write_dir, "discard_all", 17,
       [&f](std::error_code ec, auto link_done_event) {

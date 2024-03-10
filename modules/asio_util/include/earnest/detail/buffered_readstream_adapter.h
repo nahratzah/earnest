@@ -27,7 +27,6 @@ class buffered_readstream_adapter {
   static constexpr std::size_t default_buffer_size = 64 * 1024;
   using offset_type = std::uint64_t;
   using next_layer_type = std::remove_reference_t<AsyncReadDevice>;
-  using executor_type = typename next_layer_type::executor_type;
   using allocator_type = Allocator;
 
   template<typename Arg>
@@ -66,10 +65,6 @@ class buffered_readstream_adapter {
   template<typename ReturnType = decltype(std::declval<const next_layer_type&>().position())>
   auto position() const noexcept(noexcept(std::declval<const next_layer_type&>().position())) -> ReturnType {
     return next_layer().position() - this->buffer_.size();
-  }
-
-  auto get_executor() const -> executor_type {
-    return next_layer().get_executor();
   }
 
   auto get_allocator() const -> allocator_type {
@@ -263,74 +258,6 @@ class buffered_readstream_adapter {
           else
             return variant_type(std::in_place_index<1>, when_no_data_avail(self, buf));
         });
-  }
-
-  template<typename MutableBufferSequence>
-  auto read_some(const MutableBufferSequence& buffers) -> std::size_t {
-    const auto buffers_size = asio::buffer_size(buffers);
-    if (this->buffer_.size() > 0 || buffers_size == 0) {
-      std::size_t sz = asio::buffer_copy(buffers, asio::buffer(this->buffer_.data(), this->buffer_.size()));
-      buffer_ = buffer_.subspan(sz);
-      return sz;
-    }
-
-    auto tmp_buffer_sequence = std::vector<asio::mutable_buffer>(asio::buffer_sequence_begin(buffers), asio::buffer_sequence_end(buffers));
-    tmp_buffer_sequence.push_back(asio::buffer(buffer_space_));
-    std::size_t sz = next_layer().read_some(tmp_buffer_sequence);
-    if (sz > buffers_size) {
-      this->buffer_ = std::span<std::byte>(buffer_space_, sz - buffers_size);
-      sz = buffers_size;
-    }
-    return sz;
-  }
-
-  template<typename MutableBufferSequence>
-  auto read_some(const MutableBufferSequence& buffers, std::error_code& ec) -> std::size_t {
-    const auto buffers_size = asio::buffer_size(buffers);
-    if (this->buffer_.size() > 0 || buffers_size == 0) {
-      ec = {};
-      std::size_t sz = asio::buffer_copy(buffers, this->buffer_);
-      buffer_ = buffer_.subspan(sz);
-      return sz;
-    }
-
-    auto tmp_buffer_sequence = std::vector<asio::mutable_buffer>(asio::buffer_sequence_begin(buffers), asio::buffer_sequence_end(buffers));
-    tmp_buffer_sequence.push_back(asio::buffer(buffer_space_));
-    std::size_t sz = next_layer().read_some(tmp_buffer_sequence, ec);
-    if (!ec && sz > buffers_size) {
-      this->buffer_ = asio::buffer(buffer_space_, sz - buffers_size);
-      sz = buffers_size;
-    }
-    return sz;
-  }
-
-  template<typename MutableBufferSequence, typename CompletionToken>
-  auto async_read_some(const MutableBufferSequence& buffers, CompletionToken&& token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code, std::size_t)>(
-        [this](auto completion_handler, auto buffers) {
-          const auto buffers_size = asio::buffer_size(buffers);
-          if (this->buffer_.size() > 0 || buffers_size == 0) {
-            std::size_t sz = asio::buffer_copy(buffers, asio::buffer(this->buffer_.data(), this->buffer_.size()));
-            buffer_ = buffer_.subspan(sz);
-            std::invoke(completion_handler_fun(std::move(completion_handler), this->get_executor()), std::error_code{}, sz);
-            return;
-          }
-
-          auto tmp_buffer_sequence = std::vector<asio::mutable_buffer>(asio::buffer_sequence_begin(buffers), asio::buffer_sequence_end(buffers));
-          tmp_buffer_sequence.push_back(asio::buffer(buffer_space_));
-          next_layer().async_read_some(
-              tmp_buffer_sequence,
-              completion_wrapper<void(std::error_code, std::size_t)>(
-                  std::move(completion_handler),
-                  [this, buffers_size](auto&& handler, std::error_code ec, std::size_t sz) -> void {
-                    if (!ec && sz > buffers_size) {
-                      this->buffer_ = std::span<const std::byte>(buffer_space_.data(), sz - buffers_size);
-                      sz = buffers_size;
-                    }
-                    std::invoke(handler, ec, sz);
-                  }));
-        },
-        token, buffers);
   }
 
   private:
