@@ -1299,7 +1299,7 @@ struct let_variant_t {
       friend constexpr auto tag_invoke(Tag tag, const accepting_receiver& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, const Receiver&, Args...>)
       -> tag_invoke_result_t<Tag, const Receiver&, Args...> {
-        return tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
+        return tag_invoke(std::move(tag), self.receiver_ref_(), std::forward<Args>(args)...);
       }
 
       template<typename Tag, typename... Args,
@@ -1308,19 +1308,23 @@ struct let_variant_t {
       friend constexpr auto tag_invoke(Tag tag, accepting_receiver& self, Args&&... args)
       noexcept(nothrow_tag_invocable<Tag, Receiver&, Args...>)
       -> tag_invoke_result_t<Tag, Receiver&, Args...> {
-        return tag_invoke(std::move(tag), self.state.r, std::forward<Args>(args)...);
+        return tag_invoke(std::move(tag), self.receiver_ref_(), std::forward<Args>(args)...);
       }
 
       template<typename Tag, typename... Args,
           typename = std::enable_if_t<_is_forwardable_receiver_tag<Tag>>,
           typename = std::enable_if_t<!std::is_same_v<set_value_t, Tag>>>
       friend constexpr auto tag_invoke(Tag tag, accepting_receiver&& self, Args&&... args)
-      noexcept(nothrow_tag_invocable<Tag, Receiver, Args...>)
+      noexcept(nothrow_tag_invocable<Tag, Receiver&&, Args...>)
       -> tag_invoke_result_t<Tag, Receiver&&, Args...> {
-        return tag_invoke(std::move(tag), std::move(self.state.r), std::forward<Args>(args)...);
+        return tag_invoke(std::move(tag), std::move(self.receiver_ref_()), std::forward<Args>(args)...);
       }
 
       private:
+      // This allows our tag-invoke functions to be used, without requiring opstate to be a complete class.
+      auto receiver_ref_() noexcept -> Receiver&;
+      auto receiver_ref_() const noexcept -> const Receiver&;
+
       opstate& state;
     };
 
@@ -1328,7 +1332,7 @@ struct let_variant_t {
 
     public:
     opstate(Sender&& sender, Fn&& fn, Receiver&& r)
-    : fn(fn),
+    : fn(std::move(fn)),
       r(std::move(r)),
       parent(execution::connect(std::move(sender), accepting_receiver(*this)))
     {}
@@ -1443,6 +1447,16 @@ struct let_variant_t {
   }
 };
 inline constexpr let_variant_t let_variant{};
+
+template<typed_sender Sender, typename Fn, receiver Receiver>
+inline auto let_variant_t::opstate<Sender, Fn, Receiver>::accepting_receiver::receiver_ref_() noexcept -> Receiver& {
+  return state.r;
+}
+
+template<typed_sender Sender, typename Fn, receiver Receiver>
+inline auto let_variant_t::opstate<Sender, Fn, Receiver>::accepting_receiver::receiver_ref_() const noexcept -> const Receiver& {
+  return state.r;
+}
 
 
 class type_erased_scheduler {
@@ -1769,16 +1783,16 @@ struct type_erased_sender_base_ {
     {}
 
     template<typename... T>
-    friend auto tag_invoke(set_value_t tag, receiver_wrapper_t&& self, T&&... v) {
+    friend auto tag_invoke(set_value_t tag, receiver_wrapper_t&& self, T&&... v) -> void {
       tag(std::move(*self.r), std::forward<T>(v)...);
     }
 
     template<typename Error>
-    friend auto tag_invoke(set_error_t tag, receiver_wrapper_t&& self, Error&& error) noexcept {
+    friend auto tag_invoke(set_error_t tag, receiver_wrapper_t&& self, Error&& error) noexcept -> void {
       tag(std::move(*self.r), std::forward<Error>(error));
     }
 
-    friend auto tag_invoke(set_done_t tag, receiver_wrapper_t&& self) noexcept {
+    friend auto tag_invoke(set_done_t tag, receiver_wrapper_t&& self) noexcept -> void {
       tag(std::move(*self.r));
     }
 
@@ -3414,7 +3428,7 @@ class _just_error_opstate
   _just_error_opstate(_just_error_opstate&&) = delete;
   _just_error_opstate(const _just_error_opstate&) = delete;
 
-  friend auto tag_invoke([[maybe_unused]] start_t, _just_error_opstate&& self) noexcept -> void {
+  friend auto tag_invoke([[maybe_unused]] start_t, _just_error_opstate& self) noexcept -> void {
     execution::set_error(std::move(self.r), std::move(self.error));
   }
 
@@ -3468,7 +3482,7 @@ class _just_done_opstate
   _just_done_opstate(_just_done_opstate&&) = delete;
   _just_done_opstate(const _just_done_opstate&) = delete;
 
-  friend auto tag_invoke([[maybe_unused]] start_t, _just_done_opstate&& self) noexcept -> void {
+  friend auto tag_invoke([[maybe_unused]] start_t, _just_done_opstate& self) noexcept -> void {
     execution::set_done(std::move(self.r));
   }
 

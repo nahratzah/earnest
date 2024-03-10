@@ -249,6 +249,30 @@ class strand {
         self.do_(tag);
       }
 
+      template<typename Tag, typename... Args>
+      requires (!std::same_as<set_value_t, Tag> && !std::same_as<set_error_t, Tag> && !std::same_as<set_done_t, Tag>)
+      friend auto tag_invoke(Tag tag, const scheduler_receiver& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, const Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, const Receiver&, Args...> {
+        return execution::tag_invoke(tag, std::as_const(self.state.r), std::forward<Args>(args)...);
+      }
+
+      template<typename Tag, typename... Args>
+      requires (!std::same_as<set_value_t, Tag> && !std::same_as<set_error_t, Tag> && !std::same_as<set_done_t, Tag>)
+      friend auto tag_invoke(Tag tag, scheduler_receiver& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver&, Args...> {
+        return execution::tag_invoke(tag, self.state.r, std::forward<Args>(args)...);
+      }
+
+      template<typename Tag, typename... Args>
+      requires (!std::same_as<set_value_t, Tag> && !std::same_as<set_error_t, Tag> && !std::same_as<set_done_t, Tag>)
+      friend auto tag_invoke(Tag tag, scheduler_receiver&& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver&&, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver&&, Args...> {
+        return execution::tag_invoke(tag, std::move(self.state.r), std::forward<Args>(args)...);
+      }
+
       private:
       template<typename Fn, typename... Args>
       auto do_(Fn&& fn, Args&&... args) noexcept -> void {
@@ -424,9 +448,13 @@ class strand {
     [[no_unique_address]] strand self;
   };
 
+  explicit strand(state_ptr s) noexcept
+  : s(s)
+  {}
+
   public:
   explicit strand(allocator_type alloc = allocator_type())
-  : s(new_state(alloc))
+  : strand(new_state(alloc))
   {}
 
   auto operator==(const strand<allocator_type>& y) const noexcept -> bool {
@@ -459,7 +487,7 @@ class strand {
 
   // Adapt an existing scheduler, so that its scheduled tasks run on this strand.
   template<execution::scheduler UnderlyingSched>
-  auto scheduler(UnderlyingSched&& underlying_sched)
+  auto scheduler(UnderlyingSched&& underlying_sched) const
   noexcept(std::is_nothrow_constructible_v<std::remove_cvref_t<UnderlyingSched>, UnderlyingSched>)
   -> bound_scheduler_t<std::remove_cvref_t<UnderlyingSched>> {
     return bound_scheduler_t<std::remove_cvref_t<UnderlyingSched>>(*this, std::forward<UnderlyingSched>(underlying_sched));
@@ -470,8 +498,8 @@ class strand {
   }
 
   template<typed_sender Sender>
-  friend auto tag_invoke(lazy_on_t tag, strand self, Sender&& s) -> typed_sender auto {
-    return on_sender_<std::remove_cvref_t<Sender>>(self, std::forward<Sender>(s));
+  friend auto tag_invoke(lazy_on_t tag, strand self, Sender s) -> typed_sender auto {
+    return on_sender_<std::remove_cvref_t<Sender>>(self, std::move(s));
   }
 
   private:

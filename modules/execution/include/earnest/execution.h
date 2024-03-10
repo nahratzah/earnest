@@ -4809,9 +4809,7 @@ struct when_all_t {
     opstate(Receiver&& r, Sender&&... s)
     : basic_opstate_for_senders<Sender...>(sizeof...(Sender)),
       r(std::move(r)),
-      local_states(
-          std::forward_as_tuple(std::move(s), local_receiver_type(*this))...
-          ),
+      local_states(std::forward_as_tuple(std::move(s), local_receiver_type(*this))...),
       cancelation_cascader(::earnest::execution::get_stop_token(this->r), this->local_cancelation)
     {}
 
@@ -5303,6 +5301,7 @@ struct lazy_split_t {
         std::lock_guard lck{mtx};
         if (std::holds_alternative<unstarted>(this->outcome) || std::holds_alternative<started>(this->outcome)) {
           // We only link, if the nested-opstate hasn't completed yet.
+          if (pending_completions != nullptr) pending_completions->pred = &link;
           link.succ = std::exchange(pending_completions, &link);
           return;
         }

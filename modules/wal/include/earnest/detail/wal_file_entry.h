@@ -1466,126 +1466,132 @@ class wal_file_entry
     auto [operation_acceptor, operation_sender] = execution::late_binding<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>();
 
     auto operation = lazy_split(
-        not_on_strand(wf->strand_,
-            when_all(
-                std::move(operation_sender)
-                | let_variant(
-                    [fake_link_in, transaction_validation=std::move(transaction_validation)]() mutable {
-                      auto do_validation = [&]() {
-                        return std::move(fake_link_in)
-                        | let_value([&transaction_validation]() { return std::invoke(transaction_validation); });
-                      };
-                      auto skip_validation = []() { return just(); };
-                      using variant_type = std::variant<decltype(do_validation()), decltype(skip_validation())>;
-                      if (transaction_validation == nullptr)
-                        return variant_type(skip_validation());
-                      else
-                        return variant_type(do_validation());
+        on(wf->strand_,
+            not_on_strand(wf->strand_,
+                when_all(
+                    std::move(operation_sender)
+                    | let_variant(
+                        [fake_link_in, transaction_validation=std::move(transaction_validation)]() mutable {
+                          auto do_validation = [&]() {
+                            return std::move(fake_link_in)
+                            | let_value([&transaction_validation]() { return std::invoke(transaction_validation); });
+                          };
+                          auto skip_validation = []() { return just(); };
+                          using variant_type = std::variant<decltype(do_validation()), decltype(skip_validation())>;
+                          if (transaction_validation == nullptr)
+                            return variant_type(skip_validation());
+                          else
+                            return variant_type(do_validation());
+                        })
+                    | let<set_value_t, set_error_t, set_done_t>(
+                        [](auto tag, auto&... args) {
+                          return just(
+                              captured_validation_result_t(
+                                  std::in_place_type<std::tuple<std::remove_cvref_t<decltype(tag)>, std::remove_cvref_t<decltype(args)>...>>,
+                                  tag, std::move(args)...));
+                        }),
+                    just(fake_link_in, wf, std::move(records), std::move(on_successful_write_callback), std::move(space)))
+                | then(
+                    // Handle cancelation/error.
+                    // In this case, we want to not do a write.
+                    // But we must do a write.
+                    // So instead, we write a skip-record.
+                    [](captured_validation_result_t captured_validation_result, auto fake_link_in, gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t records, auto on_successful_write_callback, auto space) {
+                      if (!std::holds_alternative<std::tuple<set_value_t>>(captured_validation_result)) {
+                        // When the write is canceled, we want to pretend a skip-record is to be written instead.
+                        // So we replace the records with that record.
+                        const auto records_bufsize = records.bytes().size();
+                        records.clear();
+                        if (records_bufsize == 4) {
+                          records.push_back(wal_record_noop{});
+                        } else if (records_bufsize - 8u <= 0xffff'ffffu) {
+                          assert(records_bufsize >= 8);
+                          records.push_back(wal_record_skip32{std::uint32_t(records_bufsize) - 8u});
+                        } else {
+                          assert(records_bufsize >= 12);
+                          records.push_back(wal_record_skip64{records_bufsize - 12u});
+                        }
+                        assert(records_bufsize == records.bytes().size()); // We want the undo record to take up the space of the original record.
+
+                        // We're not going to do a write-callback, seeing as the write is canceled.
+                        // So might as well drop the callback now.
+                        on_successful_write_callback = nullptr;
+                      }
+
+                      return std::make_tuple(
+                          captured_validation_result,
+                          fake_link_in,
+                          wf,
+                          std::move(records),
+                          std::move(on_successful_write_callback),
+                          std::move(space));
                     })
-                | let<set_value_t, set_error_t, set_done_t>(
-                    [](auto tag, auto&... args) {
-                      return just(
-                          captured_validation_result_t(
-                              std::in_place_type<std::tuple<std::remove_cvref_t<decltype(tag)>, std::remove_cvref_t<decltype(args)>...>>,
-                              tag, std::move(args)...));
-                    }),
-                just(fake_link_in, wf, std::move(records), std::move(on_successful_write_callback), std::move(space)))
-            | then(
-                // Handle cancelation/error.
-                // In this case, we want to not do a write.
-                // But we must do a write.
-                // So instead, we write a skip-record.
-                [](captured_validation_result_t captured_validation_result, auto fake_link_in, gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t records, auto on_successful_write_callback, auto space) {
-                  if (!std::holds_alternative<std::tuple<set_value_t>>(captured_validation_result)) {
-                    // When the write is canceled, we want to pretend a skip-record is to be written instead.
-                    // So we replace the records with that record.
-                    const auto records_bufsize = records.bytes().size();
-                    records.clear();
-                    if (records_bufsize == 4) {
-                      records.push_back(wal_record_noop{});
-                    } else if (records_bufsize - 8u <= 0xffff'ffffu) {
-                      assert(records_bufsize >= 8);
-                      records.push_back(wal_record_skip32{std::uint32_t(records_bufsize) - 8u});
-                    } else {
-                      assert(records_bufsize >= 12);
-                      records.push_back(wal_record_skip64{records_bufsize - 12u});
-                    }
-                    assert(records_bufsize == records.bytes().size()); // We want the undo record to take up the space of the original record.
+                | explode_tuple())
+            | let_variant(
+                [](captured_validation_result_t captured_validation_result, auto& fake_link_in, gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records, auto& on_successful_write_callback, auto& space) {
+                  assert(wf->strand_.running_in_this_thread());
 
-                    // We're not going to do a write-callback, seeing as the write is canceled.
-                    // So might as well drop the callback now.
-                    on_successful_write_callback = nullptr;
-                  }
+                  const auto write_offset = space.offset();
+                  std::span<const std::byte> bytes = wf->unwritten_data.add(write_offset, std::move(records).bytes());
 
-                  return std::make_tuple(
-                      captured_validation_result,
-                      fake_link_in,
-                      wf,
-                      std::move(records),
-                      std::move(on_successful_write_callback),
-                      std::move(space));
-                })
-            | explode_tuple())
-        | let_variant(
-            [](captured_validation_result_t captured_validation_result, auto& fake_link_in, gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records, auto& on_successful_write_callback, auto& space) {
-              assert(wf->strand_.running_in_this_thread());
+                  // Ensures even cancellation will cause a fail-state (needed, because we've published the write in unwritten-data).
+                  // We only do this if we write is to happen.
+                  // If the write is canceled, and our cancelation record fails,
+                  // the space-operation will write its own undo record which is indistinguishable from the one we're writing
+                  // (but it has less good performance).
+                  if (std::holds_alternative<std::tuple<set_value_t>>(captured_validation_result))
+                    space.set_must_succeed(true);
 
-              const auto write_offset = space.offset();
-              std::span<const std::byte> bytes = wf->unwritten_data.add(write_offset, std::move(records).bytes());
-
-              // Ensures even cancellation will cause a fail-state (needed, because we've published the write in unwritten-data).
-              // We only do this if we write is to happen.
-              // If the write is canceled, and our cancelation record fails,
-              // the space-operation will write its own undo record which is indistinguishable from the one we're writing
-              // (but it has less good performance).
-              if (std::holds_alternative<std::tuple<set_value_t>>(captured_validation_result))
-                space.set_must_succeed(true);
-
-              auto do_write_callback = [&]() {
-                auto converted_records = records.converted_records(std::shared_ptr<const fd_type>(wf.get(), &std::as_const(wf->file).file_ref()), write_offset);
-                return not_on_strand(wf->strand_,
-                    when_all(
-                        just(captured_validation_result),
-                        // Have to wait for preceding writes to complete, before we can do the write.
-                        fake_link_in
+                  auto do_write_callback = [&]() {
+                    auto converted_records = records.converted_records(std::shared_ptr<const fd_type>(wf.get(), &std::as_const(wf->file).file_ref()), write_offset);
+                    return not_on_strand(wf->strand_,
+                        fake_link_in // Have to wait for preceding writes to complete, before we can do the write.
                         | let_value(
                             [ on_successful_write_callback=std::move(on_successful_write_callback),
                               converted_records=std::move(converted_records)
                             ]() mutable {
                               return std::invoke(on_successful_write_callback, std::move(converted_records));
-                            })));
-              };
-              auto skip_write_callback = [&]() {
-                // We must wait for preceding writes to complete.
-                // (If we don't, we claim the fake-write is done, but it won't be reachable.)
-                return not_on_strand(wf->strand_,
-                    fake_link_in
-                    | then(
-                        [&captured_validation_result]() mutable -> captured_validation_result_t&& {
-                          return std::move(captured_validation_result);
-                        }));
-              };
-              using variant_type = std::variant<decltype(do_write_callback()), decltype(skip_write_callback())>;
+                            })
+                        | then(
+                            [captured_validation_result]() mutable -> captured_validation_result_t {
+                              return std::move(captured_validation_result);
+                            }));
+                  };
+                  auto skip_write_callback = [&]() {
+                    // We must wait for preceding writes to complete.
+                    // (If we don't, we claim the fake-write is done, but it won't be reachable.)
+                    return not_on_strand(wf->strand_,
+                        fake_link_in
+                        | then(
+                            [captured_validation_result]() mutable -> captured_validation_result_t {
+                              return std::move(captured_validation_result);
+                            }));
+                  };
+                  using variant_type = std::variant<decltype(do_write_callback()), decltype(skip_write_callback())>;
 
-              // In a deferred-write, we pretend that the write succeeded.
-              // It's fine, because our caller says the durability guarantee is optional.
-              // And this way, the (potentially slow) write can happen in the background,
-              // while the code continues onward.
-              //
-              // This paragraph does the actual write, and then cleans up the unwritten-data.
-              start_detached(
-                  on(
-                      wf->strand_,
-                      std::move(space).write(bytes, true)
-                      | observe_value(
-                          // We can now rely on file reads to provide this data.
-                          // (We only do this for successful writes. If the write fails,
-                          // we'll maintain read access via the unwritten-data, in order
-                          // not to upset the read invariant.)
-                          [wf, write_offset, bytes]() -> void {
-                            assert(wf->strand_.running_in_this_thread());
-                            wf->unwritten_data.remove(write_offset, bytes);
-                          })
+                  // In a deferred-write, we pretend that the write succeeded.
+                  // It's fine, because our caller says the durability guarantee is optional.
+                  // And this way, the (potentially slow) write can happen in the background,
+                  // while the code continues onward.
+                  //
+                  // This paragraph does the actual write, and then cleans up the unwritten-data.
+                  start_detached(
+                      on(
+                          wf->strand_,
+                          std::move(space).write(bytes, true)
+                          | observe_error(
+                              [wf]([[maybe_unused]] const auto& error) {
+                                if (wf->state_ == wal_file_entry_state::ready) wf->state_ = wal_file_entry_state::failed;
+                              })
+                          | observe_value(
+                              // We can now rely on file reads to provide this data.
+                              // (We only do this for successful writes. If the write fails,
+                              // we'll maintain read access via the unwritten-data, in order
+                              // not to upset the read invariant.)
+                              [wf, write_offset, bytes]() -> void {
+                                assert(wf->strand_.running_in_this_thread());
+                                wf->unwritten_data.remove(write_offset, bytes);
+                              }))
                       | let_error(
                           // If there are errors, we swallow them here:
                           // - write errors will have updated the WAL state to be unrecoverable, so this is already handled.
@@ -1596,13 +1602,13 @@ class wal_file_entry
                           // and it's just bad manners to do that, when the error has already been handled/is harmless.
                           [](auto error) {
                             return just();
-                          })));
+                          }));
 
-              if (on_successful_write_callback == nullptr)
-                return variant_type(skip_write_callback());
-              else
-                return variant_type(do_write_callback());
-            }));
+                  if (on_successful_write_callback == nullptr)
+                    return variant_type(skip_write_callback());
+                  else
+                    return variant_type(do_write_callback());
+                })));
 
     // Install the new link.
     // We don't actually care about the captured-validation-result
@@ -1610,47 +1616,52 @@ class wal_file_entry
     //
     // Note: we have the new link depend on the preceding link, by having the operation not-complete until the preceding link completes.
     // So we've maintained the invariant that any link depends on its preceding link.
-    wf->fake_link = make_link_sender(on(wf->strand_, operation));
+    wf->fake_link = make_link_sender(
+        on(wf->strand_,
+            operation
+            | then([]([[maybe_unused]] captured_validation_result_t) -> void {})));
 
     // The returned sender needs to re-instate the captured-validation-result.
-    return just(std::move(operation_acceptor), operation)
-    | then(
-        [](auto operation_acceptor, auto operation) {
-          operation_acceptor.assign_values(); // Start the operation.
-          return operation;
-        })
-    | let_value(
-        [](auto operation) {
-          return operation;
-        })
-    | let_variant(
-        [](captured_validation_result_t captured_validation_result) {
-          auto value_fn = []([[maybe_unused]] set_value_t tag) {
-            return just();
-          };
-          auto done_fn = []([[maybe_unused]] set_done_t tag) {
-            return just_done<>();
-          };
-          auto exception_fn = []([[maybe_unused]] set_error_t tag, std::exception_ptr ex) {
-            return just_error<>(std::move(ex));
-          };
-          auto errorcode_fn = []([[maybe_unused]] set_error_t tag, std::error_code ec) {
-            return just_error<>(std::move(ec));
-          };
-          using variant_type = std::variant<
-              decltype(value_fn(std::declval<set_value_t>())),
-              decltype(done_fn(std::declval<set_done_t>())),
-              decltype(exception_fn(std::declval<set_error_t>(), std::declval<std::exception_ptr>())),
-              decltype(errorcode_fn(std::declval<set_error_t>(), std::declval<std::error_code>()))>;
+    return not_on_strand(wf->strand_,
+        just(std::move(operation_acceptor), operation)
+        | then(
+            [](auto operation_acceptor, auto operation) {
+              operation_acceptor.assign_values(); // Start the operation.
+              return operation;
+            })
+        | let_value(
+            [](auto& operation) -> decltype(auto) {
+              return std::move(operation);
+            })
+        | let_variant(
+            // Unwrap the captured-validation-result.
+            [](captured_validation_result_t captured_validation_result) {
+              auto value_fn = []([[maybe_unused]] set_value_t tag) {
+                return just();
+              };
+              auto done_fn = []([[maybe_unused]] set_done_t tag) {
+                return just_done<>();
+              };
+              auto exception_fn = []([[maybe_unused]] set_error_t tag, std::exception_ptr ex) {
+                return just_error<>(std::move(ex));
+              };
+              auto errorcode_fn = []([[maybe_unused]] set_error_t tag, std::error_code ec) {
+                return just_error<>(std::move(ec));
+              };
+              using variant_type = std::variant<
+                  decltype(value_fn(std::declval<set_value_t>())),
+                  decltype(done_fn(std::declval<set_done_t>())),
+                  decltype(exception_fn(std::declval<set_error_t>(), std::declval<std::exception_ptr>())),
+                  decltype(errorcode_fn(std::declval<set_error_t>(), std::declval<std::error_code>()))>;
 
-          return std::visit(
-              [&](auto&& arg_tuple) -> variant_type {
-                return std::apply(
-                    overload(value_fn, done_fn, exception_fn, errorcode_fn),
-                    arg_tuple);
-              },
-              std::move(captured_validation_result));
-        });
+              return std::visit(
+                  [&](auto&& arg_tuple) -> variant_type {
+                    return std::apply(
+                        overload(value_fn, done_fn, exception_fn, errorcode_fn),
+                        arg_tuple);
+                  },
+                  std::move(captured_validation_result));
+            }));
   }
 
   public:
