@@ -75,15 +75,16 @@ inline auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::os
 
 struct no_transaction_validation {};
 
+using wal_allocator_type = std::allocator<std::byte>;
+
 
 // Buffers both records and their on-disk representation.
 //
 // The records vector has the offset attached.
-template<typename Allocator = std::allocator<std::byte>>
 class write_records_buffer {
   private:
   template<typename T>
-  using allocator_for = typename std::allocator_traits<Allocator>::template rebind_alloc<T>;
+  using allocator_for = std::allocator<T>;
 
   struct xdr_invocation_;
 
@@ -122,18 +123,9 @@ class write_records_buffer {
   }
 
   template<typename Record>
-  auto push_back(const Record& v) -> void {
-    execution::sync_wait(
-        xdr_v2::write(std::ref(bytes_), v, xdr_invocation_(records_))
-        | execution::io::ec_to_exception());
-  }
-
+  auto push_back(const Record& v) -> void;
   template<std::ranges::input_range Range>
-  auto push_back_range(Range&& range) -> void {
-    execution::sync_wait(
-        xdr_v2::write(std::ref(bytes_), std::forward<Range>(range), xdr_v2::fixed_collection(xdr_invocation_(records_)))
-        | execution::io::ec_to_exception());
-  }
+  auto push_back_range(Range&& range) -> void;
 
   auto bytes() const & noexcept -> const byte_vector& {
     return bytes_.data();
@@ -190,8 +182,7 @@ class write_records_buffer {
 // Write record operation for the write-records-buffer.
 //
 // For each record that is written, it records the offset and the converted record.
-template<typename Allocator>
-struct write_records_buffer<Allocator>::xdr_invocation_ {
+struct write_records_buffer::xdr_invocation_ {
   explicit xdr_invocation_(write_record_with_offset_vector& records)
   : wrwo_vec(records)
   {}
@@ -230,6 +221,20 @@ struct write_records_buffer<Allocator>::xdr_invocation_ {
   write_record_with_offset_vector& wrwo_vec;
 };
 
+template<typename Record>
+inline auto write_records_buffer::push_back(const Record& v) -> void {
+  execution::sync_wait(
+      xdr_v2::write(std::ref(bytes_), v, xdr_invocation_(records_))
+      | execution::io::ec_to_exception());
+}
+
+template<std::ranges::input_range Range>
+inline auto write_records_buffer::push_back_range(Range&& range) -> void {
+  execution::sync_wait(
+      xdr_v2::write(std::ref(bytes_), std::forward<Range>(range), xdr_v2::fixed_collection(xdr_invocation_(records_)))
+      | execution::io::ec_to_exception());
+}
+
 
 static auto make_link_sender(execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> input) -> execution::sender_of<> auto {
   using namespace execution;
@@ -252,10 +257,9 @@ using link_sender = decltype(make_link_sender(std::declval<execution::type_erase
 //
 // The invariant is that at the end of the file, holds a wal_record_end_of_records.
 // Note that the end-of-file is tracked with end_offset, not with the file-size.
-template<typename Allocator>
 class wal_file_entry_file {
   public:
-  using allocator_type = Allocator;
+  using allocator_type = wal_allocator_type;
   using offset_type = execution::io::offset_type;
 
   using callback = earnest::move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>, true>()>;
@@ -330,26 +334,13 @@ class wal_file_entry_file {
       this->update_callback = std::move(update_callback);
     }
 
+    // Implementation for write.
     // This performs an atomic write of some bytes of data.
     // The data to-be-written must be at least 4 bytes.
+    // Must be run with a scheduler wrapped by a strand_.
     //
     // - data: the data that is to be written.
     // - delay_flush: allows for flush-to-disk to be delayed, in order to combine more writes into a single flush operation.
-    auto write(std::span<const std::byte> data, bool delay_flush = false) &&
-    -> execution::sender_of<> auto {
-      using namespace execution;
-
-      if (data.size() != write_len) throw std::range_error("data size does not match reserved size");
-      return std::move(*this).write_(data, delay_flush)
-      | chain_breaker(); // Now we can release any references to this.
-                         // Also means we won't hang on to the acceptor granted us by commit_space_,
-                         // which is of critical importance, because releasing it will ensure
-                         // the recovery-path can start (if that is needed).
-    }
-
-    private:
-    // Implementation for write.
-    // Must be run with a scheduler wrapped by a strand_.
     //
     // The operation does:
     //
@@ -382,8 +373,10 @@ class wal_file_entry_file {
     // The "notify commit-space acceptor" is done by completing the acceptor returned by commit-space.
     // This code handles updating the link-offset.
     // If the acceptor isn't completed, it'll kick off the recovery code in the background.
-    auto write_(std::span<const std::byte> data, bool delay_flush = false) && -> execution::sender_of<> auto {
+    auto write(std::span<const std::byte> data, bool delay_flush = false) && -> execution::sender_of<> auto {
       using namespace execution;
+
+      if (data.size() != write_len) throw std::range_error("data size does not match reserved size");
 
       assert(strand.running_in_this_thread());
       if (data.size() != write_len) {
@@ -531,9 +524,14 @@ class wal_file_entry_file {
                 [&space]() {
                   return not_on_strand(space.strand, std::move(space.new_link));
                 });
-          });
+          })
+      | chain_breaker(); // Now we can release any references to this.
+                         // Also means we won't hang on to the acceptor granted us by commit_space_,
+                         // which is of critical importance, because releasing it will ensure
+                         // the recovery-path can start (if that is needed).
     }
 
+    private:
     std::shared_ptr<wal_file_entry_file> self;
     execution::strand<allocator_type> strand;
     offset_type write_offset;
@@ -561,12 +559,6 @@ class wal_file_entry_file {
   {
     if (end_offset < 4) throw std::range_error("bug: wal file end-offset too low");
   }
-
-  wal_file_entry_file(
-      fd_type&& file, offset_type end_offset,
-      allocator_type alloc = allocator_type())
-  : wal_file_entry_file(std::move(file), end_offset, execution::just(), alloc)
-  {}
 
   auto close() -> void {
     file.close();
@@ -619,86 +611,7 @@ class wal_file_entry_file {
   // Note that, when this function returns, the space allocated will be used.
   // If the acceptor isn't completed successfully, a recovery-operation will write
   // a skip record to skip the space when reading it back.
-  static auto prepare_space(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, execution::strand<allocator_type> strand, std::size_t write_len) -> prepared_space {
-    using namespace execution;
-
-    if (write_len < 4) throw std::range_error("cannot write data of less than 4 bytes");
-    if (write_len % 4u != 0) throw std::range_error("expect data to be a multiple of 4 bytes");
-
-    offset_type write_offset = self->end_offset - 4u;
-    offset_type new_end_offset = self->end_offset + write_len;
-    offset_type new_link_offset = write_offset + write_len;
-
-    // This recovery-chain writes the appropriate skip-record.
-    // It's only invoked when the actual write failed.
-    auto make_recovery_chain = [self, strand, write_offset, write_len]([[maybe_unused]] const auto&...) {
-      return just(self, strand, write_offset, write_len)
-      | then(
-          [](gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, auto strand, offset_type write_offset, std::size_t write_len) {
-            auto data = self->recovery_record_(write_len);
-            assert(data.size() <= write_len); // It must fit.
-            return std::make_tuple(self, strand, write_offset, data, write_len);
-          })
-      | explode_tuple()
-      | let_value(
-          [](const gsl::not_null<std::shared_ptr<wal_file_entry_file>>& shared_self, [[maybe_unused]] auto strand, offset_type write_offset, std::span<const std::byte> data, std::size_t write_len) {
-            assert(strand.running_in_this_thread());
-
-            // We store the non-shared-pointer version, because it seems wasteful to install many copies of shared_self,
-            // when the let_value-caller will guarantee its liveness anyway.
-            const gsl::not_null<wal_file_entry_file*> self = shared_self.get().get();
-
-            // Just like in regular writes, we write the data in two phases.
-            // First we write everything except the first four bytes.
-            // After flushing those to disk, we write the first four bytes (which will link the data together).
-            return when_all(io::write_at_ec(self->file, write_offset + 4u, data.subspan(4)), just(strand))
-            | let_value(
-                // After the first write, we flush-to-disk the written data.
-                [self]([[maybe_unused]] std::size_t wlen, auto strand) {
-                  assert(strand.running_in_this_thread());
-                  return when_all(self->wal_flusher_.lazy_flush(true), just(strand)); // XXX pass strand to flusher?
-                })
-            | let_value(
-                // Now that the skip record's data is guaranteed on disk, we can write the link.
-                [ link_span=std::span<const std::byte, 4>(data.subspan(0, 4)),
-                  self, write_offset
-                ](auto strand) {
-                  assert(strand.running_in_this_thread());
-                  return when_all(io::write_at_ec(self->file, write_offset, link_span), just(strand));
-                })
-            | let_value(
-                // After the second write, we flush-to-disk the written data.
-                [self]([[maybe_unused]] std::size_t wlen, [[maybe_unused]] auto strand) {
-                  assert(strand.running_in_this_thread());
-                  return self->wal_flusher_.lazy_flush(true);
-                });
-          });
-    };
-
-    auto [acceptor, sender] = commit_space_late_binding_t{}();
-
-    auto self_link = self->link;
-    auto link_completion = when_all(
-        not_on_strand(strand, std::move(self_link)), // Our link is not actually reachable, unless all preceding links have also been written.
-        not_on_strand(strand, std::move(sender)) | let_done(make_recovery_chain))
-    | then(
-        [self, new_link_offset, write_offset]() -> void {
-          assert(self->link_offset == write_offset);
-          self->link_offset = new_link_offset;
-        })
-    | chain_breaker(); // needed to break all those shared-pointers in the chain
-                       // and also because we have a reference to the previous write (via this->link),
-                       // and don't want that to be lingering forever.
-
-    self->file.truncate(new_end_offset); // Now we change the file size. This can fail.
-                                         // Failure is fine: we've not commited to anything yet.
-    link_sender new_link = make_link_sender(on(strand, std::move(link_completion))); // This can fail.
-                                                                                     // Failure is fine: we've merely grown the file, and this class
-                                                                                     // is designed to operate correctly even if the file has been grown.
-    link_sender preceding_link = std::exchange(self->link, new_link); // Must not throw. XXX confirm that it doesn't throw
-    self->end_offset = new_end_offset; // Never throws
-    return prepared_space(self, strand, write_offset, write_len, std::move(acceptor), preceding_link, new_link);
-  }
+  static auto prepare_space(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, execution::strand<allocator_type> strand, std::size_t write_len) -> prepared_space;
 
   static auto read_some_at(gsl::not_null<std::shared_ptr<const wal_file_entry_file>> self, offset_type offset, std::span<std::byte> buf) -> execution::sender_of<std::size_t> auto {
     using namespace execution;
@@ -741,10 +654,9 @@ class wal_file_entry_file {
 };
 
 
-template<typename Allocator>
 class wal_file_entry_unwritten_data {
   public:
-  using allocator_type = Allocator;
+  using allocator_type = wal_allocator_type;
   using offset_type = execution::io::offset_type;
 
   private:
@@ -957,16 +869,15 @@ class wal_file_entry_unwritten_data {
 };
 
 
-template<typename Allocator>
 class wal_file_entry
-: public std::enable_shared_from_this<wal_file_entry<Allocator>>
+: public std::enable_shared_from_this<wal_file_entry>
 {
   public:
   static inline constexpr std::uint_fast32_t max_version = 0;
   static inline constexpr std::size_t read_buffer_size = 2u * 1024u * 1024u;
-  using allocator_type = Allocator;
+  using allocator_type = wal_allocator_type;
   using link_done_event_type = execution::late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>::acceptor;
-  using write_records_buffer_t = write_records_buffer<Allocator>;
+  using write_records_buffer_t = write_records_buffer;
 
   private:
   using link_done_event_sender = execution::late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>::sender;
@@ -1047,130 +958,7 @@ class wal_file_entry
   -> execution::type_erased_sender<
       std::variant<std::tuple<gsl::not_null<std::shared_ptr<wal_file_entry>>>>,
       std::variant<std::exception_ptr, std::error_code>,
-      false> {
-    using namespace execution;
-    using pos_stream = positional_stream_adapter<fd_type&>;
-
-    return just(get_wal_logger(), d, name, alloc)
-    | lazy_observe_value(
-        [](
-            const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
-            [[maybe_unused]] const dir& d,
-            const std::filesystem::path& name,
-            [[maybe_unused]] const allocator_type& alloc) {
-          logger->info("opening wal file {}", name.native());
-        })
-    | lazy_observe_value(
-        [](
-            [[maybe_unused]] const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
-            [[maybe_unused]] const dir& d,
-            const std::filesystem::path& name,
-            [[maybe_unused]] const allocator_type& alloc) {
-          if (name.has_parent_path()) throw std::runtime_error("wal file must be a filename");
-        })
-    | then(
-        [](
-            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
-            const dir& d,
-            std::filesystem::path name,
-            allocator_type alloc) {
-          fd_type fd;
-          std::error_code ec;
-          fd.open(d, name, fd_type::READ_WRITE, ec);
-          return std::make_tuple(ec, logger, std::move(fd), name, alloc);
-        })
-    | explode_tuple()
-    | handle_error_code()
-    | then(
-        [](
-            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
-            fd_type fd,
-            std::filesystem::path name,
-            allocator_type alloc) {
-          std::error_code ec;
-          bool was_locked = fd.ftrylock(ec);
-          if (!ec && !was_locked) ec = make_error_code(wal_errc::unable_to_lock);
-          return std::make_tuple(ec, logger, std::move(fd), std::move(name), std::move(alloc));
-        })
-    | explode_tuple()
-    | handle_error_code()
-    | let_value(
-        [](
-            gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
-            fd_type& fd,
-            std::filesystem::path& name,
-            allocator_type& alloc) -> sender_of<gsl::not_null<std::shared_ptr<wal_file_entry>>> auto {
-          return xdr_v2::read_into<xdr_header_tuple>(pos_stream(fd), xdr_header_invocation{})
-          | then(
-              [&name, &logger, &alloc](pos_stream&& stream, xdr_header_tuple hdr) {
-                struct repeat_state {
-                  bool done = false;
-                  bool sealed = false;
-                  xdr_header_tuple hdr;
-                  io::offset_type end_offset = 0;
-
-                  gsl::not_null<std::shared_ptr<spdlog::logger>> logger;
-                  std::filesystem::path name;
-                  allocator_type alloc;
-                };
-                return std::make_tuple(
-                    std::move(stream),
-                    repeat_state{
-                      .hdr=hdr,
-                      .logger=logger,
-                      .name=name,
-                      .alloc=alloc,
-                    });
-              })
-          | explode_tuple()
-          | repeat(
-              []([[maybe_unused]] std::size_t idx, pos_stream& stream, auto& repeat_state) {
-                auto factory = [&]() {
-                  return std::make_optional(
-                      xdr_v2::read_into<variant_type>(std::ref(stream))
-                      | observe_value(
-                          [&repeat_state]([[maybe_unused]] const auto& stream, const variant_type& v) {
-                            repeat_state.logger->debug("read {}", v);
-                          })
-                      | then(
-                          [&repeat_state](std::reference_wrapper<pos_stream> stream, const variant_type& v) -> std::error_code {
-                            repeat_state.end_offset = stream.get().position();
-
-                            if (std::holds_alternative<wal_record_end_of_records>(v)) {
-                              repeat_state.done = true;
-                            } else if (repeat_state.sealed) {
-                              repeat_state.logger->error("file {} is bad: record after seal", repeat_state.name.native());
-                              return make_error_code(wal_errc::unrecoverable);
-                            } else if (std::holds_alternative<wal_record_seal>(v)) {
-                              repeat_state.sealed = true;
-                            }
-
-                            return std::error_code{};
-                          })
-                      | handle_error_code());
-                };
-                using optional_type = decltype(factory());
-
-                if (repeat_state.done)
-                  return optional_type(std::nullopt);
-                else
-                  return factory();
-              })
-          | then(
-              [](pos_stream&& stream, auto&& repeat_state) -> gsl::not_null<std::shared_ptr<wal_file_entry>> {
-                return std::allocate_shared<wal_file_entry>(
-                    repeat_state.alloc,
-                    std::move(stream.next_layer()),
-                    std::move(repeat_state.name),
-                    repeat_state.hdr,
-                    repeat_state.end_offset,
-                    make_link_sender(just()),
-                    repeat_state.sealed,
-                    repeat_state.logger,
-                    repeat_state.alloc);
-              });
-        });
-  }
+      false>;
 
   [[nodiscard]]
   static auto create(dir d, const std::filesystem::path& name, std::uint_fast64_t sequence, allocator_type alloc)
@@ -1179,112 +967,14 @@ class wal_file_entry
           gsl::not_null<std::shared_ptr<wal_file_entry>>,
           execution::late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>::acceptor>>,
       std::variant<std::exception_ptr, std::error_code>,
-      false> {
-    using namespace execution;
-    using pos_stream = positional_stream_adapter<fd_type&>;
-
-    return just(get_wal_logger(), d, name, sequence, alloc)
-    | lazy_observe_value(
-        [](
-            const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
-            [[maybe_unused]] const dir& d,
-            const std::filesystem::path& name,
-            std::uint_fast64_t sequence,
-            [[maybe_unused]] const allocator_type& alloc) {
-          logger->info("creating wal file[{}] {}", sequence, name.native());
-        })
-    | validation(
-        [](
-            [[maybe_unused]] const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
-            [[maybe_unused]] const dir& d,
-            const std::filesystem::path& name,
-            [[maybe_unused]] std::uint_fast64_t sequence,
-            [[maybe_unused]] const allocator_type& alloc) -> std::optional<std::exception_ptr> {
-          if (name.has_parent_path()) return std::make_exception_ptr(std::runtime_error("wal file must be a filename"));
-          return std::nullopt;
-        })
-    | then(
-        [](
-            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
-            const dir& d,
-            std::filesystem::path name,
-            std::uint_fast64_t sequence,
-            allocator_type alloc) {
-          fd_type fd;
-          std::error_code ec;
-          fd.create(d, name, ec);
-          return std::make_tuple(ec, logger, std::move(fd), name, sequence, alloc);
-        })
-    | explode_tuple()
-    | handle_error_code()
-    | then(
-        [](
-            gsl::not_null<std::shared_ptr<spdlog::logger>> logger,
-            fd_type fd,
-            std::filesystem::path name,
-            std::uint_fast64_t sequence,
-            allocator_type alloc) {
-          std::error_code ec;
-          bool was_locked = fd.ftrylock(ec);
-          if (!ec && !was_locked) ec = make_error_code(wal_errc::unable_to_lock);
-          return std::make_tuple(ec, logger, std::move(fd), std::move(name), sequence, std::move(alloc));
-        })
-    | explode_tuple()
-    | handle_error_code()
-    | let_value(
-        [](
-            gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
-            fd_type& fd,
-            std::filesystem::path& name,
-            std::uint_fast64_t sequence,
-            allocator_type& alloc)
-        -> sender_of<
-            gsl::not_null<std::shared_ptr<wal_file_entry>>,
-            late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>::acceptor> auto {
-          return xdr_v2::write(pos_stream(fd),
-              std::make_tuple(
-                  xdr_header_tuple(max_version, sequence),
-                  wal_record_end_of_records::opcode,
-                  wal_record_end_of_records{}),
-              xdr_v2::constant(
-                  xdr_v2::tuple(
-                      xdr_header_invocation{},
-                      xdr_v2::uint32,
-                      xdr_v2::identity)))
-          | let_value(
-              [](pos_stream& stream) {
-                return io::lazy_sync(stream.next_layer())
-                | then(
-                    [&stream]() -> pos_stream&& {
-                      return std::move(stream);
-                    });
-              })
-          | then(
-              [&alloc, &name, sequence, &logger](pos_stream&& stream) {
-                auto end_offset = stream.position();
-                auto [link_acceptor, link_sender] = late_binding<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>();
-                gsl::not_null<std::shared_ptr<wal_file_entry>> wf = std::allocate_shared<wal_file_entry>(
-                    alloc,
-                    std::move(stream.next_layer()),
-                    std::move(name),
-                    xdr_header_tuple(max_version, sequence),
-                    end_offset,
-                    make_link_sender(std::move(link_sender)),
-                    false, // new file is not sealed
-                    logger,
-                    alloc);
-                return std::make_tuple(wf, std::move(link_acceptor));
-              })
-          | explode_tuple();
-        });
-  }
+      false>;
 
   private:
   template<typename Space>
   static auto durable_append_(
       gsl::not_null<std::shared_ptr<wal_file_entry>> wf,
       write_records_buffer_t& records,
-      typename wal_file_entry_file<Allocator>::callback transaction_validation,
+      typename wal_file_entry_file::callback transaction_validation,
       earnest::move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>, false>(records_vector)> on_successful_write_callback,
       Space space)
   -> execution::sender_of<> auto {
@@ -1333,7 +1023,7 @@ class wal_file_entry
   static auto non_durable_append_(
       gsl::not_null<std::shared_ptr<wal_file_entry>> wf,
       write_records_buffer_t records,
-      typename wal_file_entry_file<Allocator>::callback transaction_validation,
+      typename wal_file_entry_file::callback transaction_validation,
       earnest::move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>, false>(records_vector)> on_successful_write_callback,
       Space space)
   -> execution::sender_of<> auto {
@@ -1558,7 +1248,7 @@ class wal_file_entry
   public:
   auto append(
       write_records_buffer_t records,
-      typename wal_file_entry_file<Allocator>::callback transaction_validation = nullptr,
+      typename wal_file_entry_file::callback transaction_validation = nullptr,
       earnest::move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>, false>(records_vector)> on_successful_write_callback = nullptr,
       bool delay_flush = false)
   -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> {
@@ -1587,7 +1277,7 @@ class wal_file_entry
             [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records,
                 bool delay_flush, auto& transaction_validation, auto& on_successful_write_callback) {
               auto space = wf->file.prepare_space(
-                  std::shared_ptr<wal_file_entry_file<Allocator>>(wf.get(), &wf->file),
+                  std::shared_ptr<wal_file_entry_file>(wf.get(), &wf->file),
                   wf->strand_,
                   std::as_const(records).bytes().size());
 
@@ -1650,7 +1340,7 @@ class wal_file_entry
         | let_value(
             [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records) {
               auto space = wf->file.prepare_space(
-                  std::shared_ptr<wal_file_entry_file<Allocator>>(wf.get(), &wf->file),
+                  std::shared_ptr<wal_file_entry_file>(wf.get(), &wf->file),
                   wf->strand_,
                   std::as_const(records).bytes().size());
 
@@ -1697,100 +1387,12 @@ class wal_file_entry
     return file.get_link_offset();
   }
 
+  [[nodiscard]]
   auto records(move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>(variant_type)> acceptor) const
-  -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> {
-    using namespace execution;
-    using namespace execution::io;
+  -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
 
-    struct state {
-      async_records_reader<allocator_type> reader;
-      move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>(variant_type)> acceptor;
-      bool should_stop = false;
-    };
-
-    return on(
-        strand_,
-        just(
-            state{
-              .reader=async_records_reader<allocator_type>(this->shared_from_this(), this->get_allocator()),
-              .acceptor=std::move(acceptor)
-            })
-        | lazy_let_value(
-            // Read the header, since we want to skip it.
-            [](state& st) {
-              return xdr_v2::read_into<xdr_header_tuple>(std::ref(st.reader), xdr_header_invocation{})
-              | then(
-                  [&st]([[maybe_unused]] const auto& reader, [[maybe_unused]] xdr_header_tuple hdr) -> state&& {
-                    // Discard header, and return the state.
-                    return std::move(st);
-                  });
-            })
-        | lazy_repeat(
-            []([[maybe_unused]] std::size_t idx, state& st) {
-              auto do_next = [&st]() {
-                const auto read_pos = st.reader.position();
-
-                return xdr_v2::read_into<variant_type>(std::ref(st.reader))
-                | lazy_let<set_value_t, set_error_t>(
-                    overload(
-                        [&st]([[maybe_unused]] set_value_t tag, [[maybe_unused]] const auto& stream_ref, variant_type& record) {
-                          return std::invoke(st.acceptor, std::move(record));
-                        },
-                        [&st, read_pos]([[maybe_unused]] set_error_t tag, std::error_code ec) {
-                          return just(std::ref(st), ec, read_pos)
-                          | validation(
-                              [](state& st, std::error_code ec, auto read_pos) -> std::optional<std::error_code> {
-                                if (ec == execution::io::errc::eof && st.reader.position() == read_pos) {
-                                  st.should_stop = true;
-                                  return std::nullopt;
-                                }
-                                return std::make_optional(ec);
-                              });
-                        },
-                        []([[maybe_unused]] set_error_t tag, std::exception_ptr ex) {
-                          return just(std::move(ex))
-                          | validation(
-                              [](std::exception_ptr ex) {
-                                return std::make_optional(ex);
-                              });
-                        }));
-              };
-
-              using opt_type = std::optional<decltype(do_next())>;
-              if (st.should_stop)
-                return opt_type(std::nullopt);
-              else
-                return opt_type(do_next());
-            })
-        | then(
-            []([[maybe_unused]] const state& st) -> void {
-              return; // discard `st'
-            }));
-  }
-
-  auto records() const -> execution::type_erased_sender<std::variant<std::tuple<records_vector>>, std::variant<std::exception_ptr, std::error_code>> {
-    using namespace execution;
-
-    // We don't use `on(strand_, ...)` here, because the `records(acceptor)` specialization will handle that for us.
-    return just(gsl::not_null<std::shared_ptr<const wal_file_entry>>(this->shared_from_this()))
-    | lazy_then(
-        [](gsl::not_null<std::shared_ptr<const wal_file_entry>> wf) {
-          return std::make_tuple(wf, records_vector(wf->get_allocator()));
-        })
-    | explode_tuple()
-    | lazy_let_value(
-        [](const gsl::not_null<std::shared_ptr<const wal_file_entry>>& wf, records_vector& records) {
-          return wf->records(
-              [&records](variant_type record) {
-                records.push_back(std::move(record));
-                return just();
-              })
-          | then(
-              [&records]() -> records_vector&& {
-                return std::move(records);
-              });
-        });
-  }
+  [[nodiscard]]
+  auto records() const -> execution::type_erased_sender<std::variant<std::tuple<records_vector>>, std::variant<std::exception_ptr, std::error_code>>;
 
   private:
   // Adapter class.
@@ -1808,11 +1410,11 @@ class wal_file_entry
       return just(self.wf, offset, buffer)
       | lazy_let_value(
           [](gsl::not_null<std::shared_ptr<const wal_file_entry>> wf, offset_type offset, std::span<std::byte> buffer) {
-            auto wff = std::shared_ptr<const wal_file_entry_file<Allocator>>(wf.get(), &wf->file);
+            auto wff = std::shared_ptr<const wal_file_entry_file>(wf.get(), &wf->file);
             return wf->unwritten_data.read_some_at(
                 offset, buffer,
                 [wff](offset_type offset, std::span<std::byte> buffer) {
-                  return wal_file_entry_file<Allocator>::read_some_at(wff, offset, buffer);
+                  return wal_file_entry_file::read_some_at(wff, offset, buffer);
                 });
           });
     }
@@ -1846,16 +1448,15 @@ class wal_file_entry
   private:
   [[no_unique_address]] allocator_type alloc_;
   wal_file_entry_state state_ = wal_file_entry_state::uninitialized;
-  wal_file_entry_file<Allocator> file;
-  wal_file_entry_unwritten_data<Allocator> unwritten_data;
+  wal_file_entry_file file;
+  wal_file_entry_unwritten_data unwritten_data;
   link_sender fake_link;
   mutable execution::strand<allocator_type> strand_;
 
   const gsl::not_null<std::shared_ptr<spdlog::logger>> logger;
 };
 
-template<typename Allocator>
-struct wal_file_entry<Allocator>::xdr_header_invocation {
+struct wal_file_entry::xdr_header_invocation {
   private:
   static constexpr auto magic() noexcept -> std::array<char, 13> {
     return std::array<char, 13>{ '\013', '\013', 'e', 'a', 'r', 'n', 'e', 's', 't', '.', 'w', 'a', 'l' };

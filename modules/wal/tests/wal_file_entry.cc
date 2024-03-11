@@ -41,7 +41,7 @@ TEST(read_empty_wal_file_entry) {
   auto test_function = [&]() -> std::error_code {
     try {
       earnest::execution::sync_wait(
-          earnest::detail::wal_file_entry<std::allocator<std::byte>>::open(
+          earnest::detail::wal_file_entry::open(
               source_files, "empty",
               std::allocator<std::byte>())).value();
     } catch (const std::error_code& ec) {
@@ -57,7 +57,7 @@ TEST(read_non_existant_wal_file_entry) {
   auto test_function = [&]() -> std::error_code {
     try {
       earnest::execution::sync_wait(
-          earnest::detail::wal_file_entry<std::allocator<std::byte>>::open(
+          earnest::detail::wal_file_entry::open(
               source_files, "non_existant_file",
               std::allocator<std::byte>())).value();
     } catch (const std::error_code& ec) {
@@ -71,7 +71,7 @@ TEST(read_non_existant_wal_file_entry) {
 
 TEST(read_wal_file_entry) {
   auto [f] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::open(
+      earnest::detail::wal_file_entry::open(
           source_files, "version_0",
           std::allocator<std::byte>())).value();
 
@@ -88,7 +88,7 @@ TEST(read_wal_file_entry) {
 
 TEST(read_sealed_wal_file_entry) {
   auto [f] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::open(
+      earnest::detail::wal_file_entry::open(
           source_files, "sealed_0",
           std::allocator<std::byte>())).value();
 
@@ -112,13 +112,13 @@ TEST(write_wal_file_entry) {
   ensure_file_is_gone("wal_19");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "wal_19", 19,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
 
   CHECK_EQUAL(
-      (earnest::detail::wal_file_entry<std::allocator<std::byte>>::max_version),
+      (earnest::detail::wal_file_entry::max_version),
       f->version);
   CHECK_EQUAL(19u, f->sequence);
   CHECK_EQUAL(32u, f->end_offset());
@@ -140,7 +140,7 @@ TEST(write_wal_file_entry) {
 
 TEST(durable_append_wal_file_entry) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -148,7 +148,7 @@ TEST(durable_append_wal_file_entry) {
   ensure_file_is_gone("durable_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -193,7 +193,7 @@ TEST(durable_append_wal_file_entry) {
 
 TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -201,7 +201,7 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
   ensure_file_is_gone("durable_txvalidating_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -262,7 +262,7 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
 TEST(durable_append_wal_file_entry_with_failing_txvalidation) {
   struct error {};
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -270,7 +270,7 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation) {
   ensure_file_is_gone("durable_failing_txvalidating_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_failing_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -318,7 +318,7 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation) {
 
 TEST(durable_append_wal_file_entry_callback) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -326,7 +326,7 @@ TEST(durable_append_wal_file_entry_callback) {
   ensure_file_is_gone("durable_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -382,7 +382,7 @@ TEST(durable_append_wal_file_entry_callback) {
 
 TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -390,7 +390,7 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
   ensure_file_is_gone("durable_txvalidating_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -460,7 +460,7 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
 TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
   struct error {};
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -468,7 +468,7 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
   ensure_file_is_gone("durable_failing_txvalidating_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_failing_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -522,7 +522,7 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
 
 TEST(non_durable_append_wal_file_entry) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -530,7 +530,7 @@ TEST(non_durable_append_wal_file_entry) {
   ensure_file_is_gone("durable_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -564,7 +564,7 @@ TEST(non_durable_append_wal_file_entry) {
 
 TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -572,7 +572,7 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
   ensure_file_is_gone("durable_txvalidating_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -632,7 +632,7 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
 TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
   struct error {};
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -640,7 +640,7 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
   ensure_file_is_gone("durable_failing_txvalidating_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_failing_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -688,7 +688,7 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
 
 TEST(non_durable_append_wal_file_entry_callback) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -696,7 +696,7 @@ TEST(non_durable_append_wal_file_entry_callback) {
   ensure_file_is_gone("durable_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -753,7 +753,7 @@ TEST(non_durable_append_wal_file_entry_callback) {
 
 TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -761,7 +761,7 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
   ensure_file_is_gone("durable_txvalidating_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -844,7 +844,7 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
 TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
   struct error {};
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 
@@ -852,7 +852,7 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
   ensure_file_is_gone("durable_failing_txvalidating_append_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "durable_failing_txvalidating_append_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -905,7 +905,7 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
 
 TEST(seal_wal_file_entry) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
   using ::earnest::detail::wal_record_seal;
@@ -914,7 +914,7 @@ TEST(seal_wal_file_entry) {
   ensure_file_is_gone("seal_log");
 
   auto [f, acceptor] = earnest::execution::sync_wait(
-      earnest::detail::wal_file_entry<std::allocator<std::byte>>::create(
+      earnest::detail::wal_file_entry::create(
           write_dir, "seal_log", 17,
           std::allocator<std::byte>())).value();
   acceptor.assign_values();
@@ -967,7 +967,7 @@ TEST(seal_wal_file_entry) {
 #if 0
 TEST(discard_all) {
   using namespace std::string_literals;
-  using wal_file_entry_t = earnest::detail::wal_file_entry<std::allocator<std::byte>>;
+  using wal_file_entry_t = earnest::detail::wal_file_entry;
   using ::earnest::detail::wal_record_noop;
   using ::earnest::detail::wal_record_skip32;
 

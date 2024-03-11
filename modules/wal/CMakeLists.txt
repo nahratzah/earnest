@@ -7,25 +7,27 @@ mark_as_advanced(WAL_VERSION_MAJOR)
 mark_as_advanced(WAL_VERSION_MINOR)
 mark_as_advanced(WAL_VERSION)
 
-add_library(wal INTERFACE)
+add_library(wal)
 set_property(TARGET wal PROPERTY VERSION ${WAL_VERSION})
-target_compile_features(wal INTERFACE cxx_std_20)
+target_compile_features(wal PUBLIC cxx_std_20)
 target_sources(wal
-    INTERFACE
+    PUBLIC
     FILE_SET HEADERS
     BASE_DIRS include
     FILES
     include/earnest/detail/replacement_map.h
     include/earnest/detail/wal_file_entry.h
-    include/earnest/detail/wal_file_entry.ii
     include/earnest/detail/wal_flusher.h
     include/earnest/detail/wal_records.h
     include/earnest/file_id.h
     include/earnest/wal_error.h)
+target_sources(wal
+    PRIVATE
+    src/wal_file_entry.cc)
 
 find_package(Boost REQUIRED)
-target_include_directories(wal INTERFACE ${Boost_INCLUDE_DIR})
-target_link_libraries(wal INTERFACE asio asio_util xdr io util spdlog::spdlog xdr_v2)
+target_include_directories(wal PUBLIC ${Boost_INCLUDE_DIR})
+target_link_libraries(wal PUBLIC asio asio_util xdr io util spdlog::spdlog xdr_v2)
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wal_file_entry_test_tmpdir")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/wal_file_test_tmpdir")
