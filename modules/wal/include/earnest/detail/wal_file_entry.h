@@ -20,6 +20,7 @@
 #include <earnest/detail/move_only_function.h>
 #include <earnest/detail/overload.h>
 #include <earnest/detail/positional_stream_adapter.h>
+#include <earnest/detail/prom_allocator.h>
 #include <earnest/detail/wal_flusher.h>
 #include <earnest/detail/wal_logger.h>
 #include <earnest/detail/wal_records.h>
@@ -67,7 +68,7 @@ inline auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::os
 
 struct no_transaction_validation {};
 
-using wal_allocator_type = std::allocator<std::byte>;
+using wal_allocator_type = prom_allocator<std::allocator<std::byte>>;
 
 
 // Buffers both records and their on-disk representation.
@@ -381,7 +382,7 @@ class wal_file_entry_unwritten_data {
   private:
   template<typename T> using allocator_for = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
   using byte_span = std::span<const std::byte>;
-  using byte_vector = std::vector<std::byte, allocator_for<std::byte>>;
+  using byte_vector = std::vector<std::byte>;
 
   struct record {
     record() = default;
@@ -404,7 +405,7 @@ class wal_file_entry_unwritten_data {
     offset_type offset;
     byte_vector bytes;
   };
-  using record_vector = std::vector<record, allocator_for<record>>;
+  using record_vector = std::vector<record>;
 
   // Less-compare that checks offsets.
   struct offset_compare {
@@ -610,8 +611,8 @@ class wal_file_entry
   public:
   using variant_type = wal_record_variant;
   using write_variant_type = record_write_type_t<variant_type>;
-  using records_vector = std::vector<variant_type, rebind_alloc<variant_type>>;
-  using write_records_vector = std::vector<write_variant_type, std::scoped_allocator_adaptor<rebind_alloc<write_variant_type>>>;
+  using records_vector = std::vector<variant_type>;
+  using write_records_vector = std::vector<write_variant_type>;
   using fd_type = fd;
 
   private:
@@ -687,6 +688,26 @@ class wal_file_entry
           execution::late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>::acceptor>>,
       std::variant<std::exception_ptr, std::error_code>,
       false>;
+
+  [[nodiscard]]
+  static auto open(dir d, std::filesystem::path name)
+  -> execution::type_erased_sender<
+      std::variant<std::tuple<gsl::not_null<std::shared_ptr<wal_file_entry>>>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false> {
+    return open(std::move(d), name, allocator_type(nullptr, "", prometheus::Labels{}));
+  }
+
+  [[nodiscard]]
+  static auto create(dir d, const std::filesystem::path& name, std::uint_fast64_t sequence)
+  -> execution::type_erased_sender<
+      std::variant<std::tuple<
+          gsl::not_null<std::shared_ptr<wal_file_entry>>,
+          execution::late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>::acceptor>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false> {
+    return create(std::move(d), name, sequence, allocator_type(nullptr, "", prometheus::Labels{}));
+  }
 
   private:
   // We only implement this in the .cc file, because that's the only place it's used.
