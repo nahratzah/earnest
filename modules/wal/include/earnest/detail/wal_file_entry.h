@@ -35,8 +35,6 @@ namespace earnest::detail {
 
 
 enum class wal_file_entry_state {
-  uninitialized,
-  opening,
   ready,
   sealing,
   sealed,
@@ -49,12 +47,6 @@ inline auto operator<<(std::ostream& out, wal_file_entry_state state) -> std::os
   switch (state) {
     default:
       out << "wal_file_entry_state{"sv << static_cast<std::underlying_type_t<wal_file_entry_state>>(state) << "}"sv;
-      break;
-    case wal_file_entry_state::uninitialized:
-      out << "wal_file_entry_state{uninitialized}"sv;
-      break;
-    case wal_file_entry_state::opening:
-      out << "wal_file_entry_state{opening}"sv;
       break;
     case wal_file_entry_state::ready:
       out << "wal_file_entry_state{ready}"sv;
@@ -809,7 +801,7 @@ class wal_file_entry
 
   private:
   [[no_unique_address]] allocator_type alloc_;
-  wal_file_entry_state state_ = wal_file_entry_state::uninitialized;
+  wal_file_entry_state state_ = wal_file_entry_state::failed; // Must be initialized.
   wal_file_entry_file file;
   wal_file_entry_unwritten_data unwritten_data;
   link_sender fake_link;
@@ -868,10 +860,6 @@ struct formatter<earnest::detail::wal_file_entry_state>
     switch (state) {
       default:
         return fmt::format_to(ctx.out(), "wal_file_entry_state({})", static_cast<std::underlying_type_t<earnest::detail::wal_file_entry_state>>(state));
-      case earnest::detail::wal_file_entry_state::uninitialized:
-        return fmt::format_to(ctx.out(), "uninitialized");
-      case earnest::detail::wal_file_entry_state::opening:
-        return fmt::format_to(ctx.out(), "opening");
       case earnest::detail::wal_file_entry_state::ready:
         return fmt::format_to(ctx.out(), "ready");
       case earnest::detail::wal_file_entry_state::sealing:
