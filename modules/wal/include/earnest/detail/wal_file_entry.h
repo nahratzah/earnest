@@ -720,15 +720,8 @@ class wal_file_entry
   auto seal()
   -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
 
-  private:
-  template<typename OnSpaceAssigned, typename TransactionValidator>
-  auto async_append_impl_(write_records_vector records, move_only_function<void(std::error_code)>&& completion_handler, OnSpaceAssigned&& on_space_assigned, TransactionValidator&& transaction_validator, move_only_function<void(records_vector)> on_successful_write_callback, bool delay_flush = false) -> void;
-
-  public:
   template<typename CompletionToken>
-  auto async_seal(CompletionToken&& token);
-
-  template<typename CompletionToken>
+  [[deprecated]] // XXX reimplement in terms of sender/receiver.
   auto async_discard_all(CompletionToken&& token);
 
   auto end_offset() const noexcept {
