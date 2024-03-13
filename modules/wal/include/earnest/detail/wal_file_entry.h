@@ -13,6 +13,7 @@
 #include <type_traits>
 #include <vector>
 
+#include <gsl/gsl>
 #include <spdlog/spdlog.h>
 
 #include <earnest/detail/buffered_readstream_adapter.h>
@@ -144,7 +145,7 @@ class write_records_buffer {
     return std::move(records_);
   }
 
-  auto converted_records(gsl::not_null<std::shared_ptr<const earnest::fd>> fd, execution::io::offset_type offset) const
+  auto converted_records(gsl::not_null<std::shared_ptr<execution::io::type_erased_at_readable>> fd, execution::io::offset_type offset) const
   -> std::vector<variant_type, allocator_for<variant_type>> {
     std::vector<variant_type, allocator_for<variant_type>> converted_records(get_allocator());
     converted_records.reserve(write_records_with_offset().size());
@@ -153,7 +154,7 @@ class write_records_buffer {
         write_records_with_offset()
         | std::ranges::views::transform(
             [&](const auto& r) {
-              wal_record_write_to_read_converter<earnest::fd, variant_type> convert(fd, offset + r.offset);
+              wal_record_write_to_read_converter<variant_type> convert(fd, offset + r.offset);
               return convert(r.record);
             }),
         std::back_inserter(converted_records));
@@ -778,6 +779,8 @@ class wal_file_entry
       return just(self.wf, offset, buffer)
       | lazy_let_value(
           [](gsl::not_null<std::shared_ptr<const wal_file_entry>> wf, offset_type offset, std::span<std::byte> buffer) {
+            assert(wf->strand_.running_in_this_thread());
+
             auto wff = std::shared_ptr<const wal_file_entry_file>(wf.get(), &wf->file);
             return wf->unwritten_data.read_some_at(
                 offset, buffer,
@@ -787,8 +790,34 @@ class wal_file_entry
           });
     }
 
+    auto get_strand() { return wf->strand_; }
+
     private:
     gsl::not_null<std::shared_ptr<const wal_file_entry>> wf;
+  };
+
+  // Reader that we pass to records.
+  // It ensures the read starts on the strand, to ensure the file descriptor won't be invalidated while the call is set up.
+  class record_reader {
+    public:
+    explicit record_reader(gsl::not_null<std::shared_ptr<const wal_file_entry>> wf)
+    : impl(wf),
+      strand(wf->strand_)
+    {}
+
+    template<execution::io::mutable_buffers Buffer>
+    friend auto tag_invoke(execution::io::lazy_read_some_at_ec_t tag, const record_reader& self, execution::io::offset_type offset, Buffer&& buffer) {
+      return execution::on(self.strand, tag(self.impl, offset, std::forward<Buffer>(buffer)));
+    }
+
+    template<execution::io::mutable_buffers Buffer>
+    friend auto tag_invoke(execution::io::lazy_read_at_ec_t tag, const record_reader& self, execution::io::offset_type offset, Buffer&& buffer, std::optional<std::size_t> minbytes) {
+      return execution::on(self.strand, tag(self.impl, offset, std::forward<Buffer>(buffer), minbytes));
+    }
+
+    private:
+    reader_impl_ impl;
+    execution::strand<allocator_type> strand;
   };
 
   template<typename StreamAllocator>

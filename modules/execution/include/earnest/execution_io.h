@@ -2735,4 +2735,447 @@ struct sync_t {
 inline constexpr sync_t sync{};
 
 
+template<typename FD>
+concept at_readable = requires(std::remove_cvref_t<FD> fd, offset_type offset,
+                               std::span<std::byte> buf, std::vector<std::span<std::byte>> buf_sequence, std::size_t minbytes) {
+  { lazy_read_some_at_ec(fd, offset, buf) } -> sender_of<std::size_t>;
+  { lazy_read_some_at_ec(fd, offset, buf_sequence) } -> sender_of<std::size_t>;
+  { lazy_read_at_ec(fd, offset, buf) } -> sender_of<std::size_t>;
+  { lazy_read_at_ec(fd, offset, buf_sequence) } -> sender_of<std::size_t>;
+  { lazy_read_at_ec(fd, offset, buf, minbytes) } -> sender_of<std::size_t>;
+  { lazy_read_at_ec(fd, offset, buf_sequence, minbytes) } -> sender_of<std::size_t>;
+};
+
+template<typename FD>
+concept readable = requires(std::remove_cvref_t<FD> fd,
+                            std::span<std::byte> buf, std::vector<std::span<std::byte>> buf_sequence, std::size_t minbytes) {
+  { lazy_read_some_ec(fd, buf) } -> sender_of<std::size_t>;
+  { lazy_read_some_ec(fd, buf_sequence) } -> sender_of<std::size_t>;
+  { lazy_read_ec(fd, buf) } -> sender_of<std::size_t>;
+  { lazy_read_ec(fd, buf_sequence) } -> sender_of<std::size_t>;
+  { lazy_read_ec(fd, buf, minbytes) } -> sender_of<std::size_t>;
+  { lazy_read_ec(fd, buf_sequence, minbytes) } -> sender_of<std::size_t>;
+};
+
+template<typename FD>
+concept at_writeable = requires(std::remove_cvref_t<FD> fd, offset_type offset,
+                                std::span<const std::byte> buf, std::vector<std::span<const std::byte>> buf_sequence, std::size_t minbytes) {
+  { lazy_write_some_at_ec(fd, offset, buf) } -> sender_of<std::size_t>;
+  { lazy_write_some_at_ec(fd, offset, buf_sequence) } -> sender_of<std::size_t>;
+  { lazy_write_at_ec(fd, offset, buf) } -> sender_of<std::size_t>;
+  { lazy_write_at_ec(fd, offset, buf_sequence) } -> sender_of<std::size_t>;
+  { lazy_write_at_ec(fd, offset, buf, minbytes) } -> sender_of<std::size_t>;
+  { lazy_write_at_ec(fd, offset, buf_sequence, minbytes) } -> sender_of<std::size_t>;
+};
+
+template<typename FD>
+concept writeable = requires(std::remove_cvref_t<FD> fd,
+                             std::span<const std::byte> buf, std::vector<std::span<const std::byte>> buf_sequence, std::size_t minbytes) {
+  { lazy_write_some_ec(fd, buf) } -> sender_of<std::size_t>;
+  { lazy_write_some_ec(fd, buf_sequence) } -> sender_of<std::size_t>;
+  { lazy_write_ec(fd, buf) } -> sender_of<std::size_t>;
+  { lazy_write_ec(fd, buf_sequence) } -> sender_of<std::size_t>;
+  { lazy_write_ec(fd, buf, minbytes) } -> sender_of<std::size_t>;
+  { lazy_write_ec(fd, buf_sequence, minbytes) } -> sender_of<std::size_t>;
+};
+
+
+class type_erased_at_readable {
+  private:
+  using sender_t = type_erased_sender<
+      std::variant<std::tuple<std::size_t>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false>;
+
+  class interface {
+    public:
+    virtual ~interface() = default;
+
+    virtual auto read_some_at(offset_type offset, std::span<std::byte> buf) -> sender_t = 0;
+    virtual auto read_some_at(offset_type offset, std::vector<std::span<std::byte>> bufs) -> sender_t = 0;
+    virtual auto read_at(offset_type offset, std::span<std::byte> buf, std::optional<std::size_t> minbytes) -> sender_t = 0;
+    virtual auto read_at(offset_type offset, std::vector<std::span<std::byte>> bufs, std::optional<std::size_t> minbytes) -> sender_t = 0;
+  };
+
+  template<at_readable T>
+  class implementation
+  : public interface
+  {
+    public:
+    explicit implementation(T impl)
+    : impl(std::move(impl))
+    {}
+
+    ~implementation() override = default;
+
+    auto read_some_at(offset_type offset, std::span<std::byte> buf) -> sender_t override {
+      return lazy_read_some_at_ec(impl, offset, buf);
+    }
+
+    auto read_some_at(offset_type offset, std::vector<std::span<std::byte>> bufs) -> sender_t override {
+      return lazy_read_some_at_ec(impl, offset, bufs);
+    }
+
+    auto read_at(offset_type offset, std::span<std::byte> buf, std::optional<std::size_t> minbytes) -> sender_t override {
+      return lazy_read_at_ec(impl, offset, buf, minbytes);
+    }
+
+    auto read_at(offset_type offset, std::vector<std::span<std::byte>> bufs, std::optional<std::size_t> minbytes) -> sender_t override {
+      return lazy_read_at_ec(impl, offset, bufs, minbytes);
+    }
+
+    private:
+    T impl;
+  };
+
+  public:
+  type_erased_at_readable() noexcept = default;
+
+  template<at_readable T>
+  explicit type_erased_at_readable(T&& readable)
+  : intf(std::make_unique<implementation<std::remove_cvref_t<T>>>(std::forward<T>(readable)))
+  {}
+
+  explicit operator bool() const noexcept {
+    return intf != nullptr;
+  }
+
+  friend auto tag_invoke([[maybe_unused]] lazy_read_some_at_ec_t tag, type_erased_at_readable& self, offset_type offset, std::span<std::byte> buf) {
+    if (self.intf == nullptr) throw std::logic_error("cannot read null file");
+    return self.intf->read_some_at(offset, buf);
+  }
+
+  template<mutable_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] lazy_read_some_at_ec_t tag, type_erased_at_readable& self, offset_type offset, Buffers&& bufs) {
+    if (self.intf == nullptr) throw std::logic_error("cannot read null file");
+    return self.intf->read_some_at(offset, vectorize_buffers(std::forward<Buffers>(bufs)));
+  }
+
+  friend auto tag_invoke([[maybe_unused]] lazy_read_at_ec_t tag, type_erased_at_readable& self, offset_type offset, std::span<std::byte> buf, std::optional<std::size_t> minbytes) {
+    if (self.intf == nullptr) throw std::logic_error("cannot read null file");
+    return self.intf->read_at(offset, buf, minbytes);
+  }
+
+  template<mutable_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] lazy_read_at_ec_t tag, type_erased_at_readable& self, offset_type offset, Buffers&& bufs, std::optional<std::size_t> minbytes) {
+    if (self.intf == nullptr) throw std::logic_error("cannot read null file");
+    return self.intf->read_at(offset, vectorize_buffers(std::forward<Buffers>(bufs)), minbytes);
+  }
+
+  private:
+  template<mutable_buffer_sequence Buffers>
+  static auto vectorize_buffers(Buffers&& buffers)
+  -> std::conditional_t<
+      std::is_convertible_v<Buffers, std::vector<std::span<std::byte>>>,
+      Buffers&&,
+      std::vector<std::span<std::byte>>> {
+    if constexpr(std::is_convertible_v<Buffers, std::vector<std::span<std::byte>>>)
+      return std::forward<Buffers>(buffers);
+    else
+      return std::vector<std::span<std::byte>>(std::forward<Buffers>(buffers).begin(), std::forward<Buffers>(buffers).end());
+  }
+
+  std::unique_ptr<interface> intf;
+};
+
+
+class type_erased_readable {
+  private:
+  using sender_t = type_erased_sender<
+      std::variant<std::tuple<std::size_t>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false>;
+
+  class interface {
+    public:
+    virtual ~interface() = default;
+
+    virtual auto read_some_at(std::span<std::byte> buf) -> sender_t = 0;
+    virtual auto read_some_at(std::vector<std::span<std::byte>> bufs) -> sender_t = 0;
+    virtual auto read_at(std::span<std::byte> buf, std::optional<std::size_t> minbytes) -> sender_t = 0;
+    virtual auto read_at(std::vector<std::span<std::byte>> bufs, std::optional<std::size_t> minbytes) -> sender_t = 0;
+  };
+
+  template<readable T>
+  class implementation
+  : public interface
+  {
+    public:
+    explicit implementation(T impl)
+    : impl(std::move(impl))
+    {}
+
+    ~implementation() override = default;
+
+    auto read_some_at(std::span<std::byte> buf) -> sender_t override {
+      return lazy_read_some_ec(impl, buf);
+    }
+
+    auto read_some_at(std::vector<std::span<std::byte>> bufs) -> sender_t override {
+      return lazy_read_some_ec(impl, bufs);
+    }
+
+    auto read_at(std::span<std::byte> buf, std::optional<std::size_t> minbytes) -> sender_t override {
+      return lazy_read_ec(impl, buf, minbytes);
+    }
+
+    auto read_at(std::vector<std::span<std::byte>> bufs, std::optional<std::size_t> minbytes) -> sender_t override {
+      return lazy_read_ec(impl, bufs, minbytes);
+    }
+
+    private:
+    T impl;
+  };
+
+  public:
+  type_erased_readable() noexcept = default;
+
+  template<readable T>
+  explicit type_erased_readable(T&& readable)
+  : intf(std::make_unique<implementation<std::remove_cvref_t<T>>>(std::forward<T>(readable)))
+  {}
+
+  explicit operator bool() const noexcept {
+    return intf != nullptr;
+  }
+
+  friend auto tag_invoke([[maybe_unused]] lazy_read_some_ec_t tag, type_erased_readable& self, std::span<std::byte> buf) {
+    if (self.intf == nullptr) throw std::logic_error("cannot read null file");
+    return self.intf->read_some_at(buf);
+  }
+
+  template<mutable_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] lazy_read_some_ec_t tag, type_erased_readable& self, Buffers&& bufs) {
+    if (self.intf == nullptr) throw std::logic_error("cannot read null file");
+    return self.intf->read_some_at(vectorize_buffers(std::forward<Buffers>(bufs)));
+  }
+
+  friend auto tag_invoke([[maybe_unused]] lazy_read_ec_t tag, type_erased_readable& self, std::span<std::byte> buf, std::optional<std::size_t> minbytes) {
+    if (self.intf == nullptr) throw std::logic_error("cannot read null file");
+    return self.intf->read_at(buf, minbytes);
+  }
+
+  template<mutable_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] lazy_read_ec_t tag, type_erased_readable& self, Buffers&& bufs, std::optional<std::size_t> minbytes) {
+    if (self.intf == nullptr) throw std::logic_error("cannot read null file");
+    return self.intf->read_at(vectorize_buffers(std::forward<Buffers>(bufs)), minbytes);
+  }
+
+  private:
+  // We need to convert the buffers to a vector, in order to maintain ownership across the interface boundaries.
+  // This means we do a little more work when the collection is borrowed, but it should be fine.
+  template<mutable_buffer_sequence Buffers>
+  static auto vectorize_buffers(Buffers&& buffers)
+  -> std::conditional_t<
+      std::is_convertible_v<Buffers, std::vector<std::span<std::byte>>>,
+      Buffers&&,
+      std::vector<std::span<std::byte>>> {
+    if constexpr(std::is_convertible_v<Buffers, std::vector<std::span<std::byte>>>)
+      return std::forward<Buffers>(buffers);
+    else
+      return std::vector<std::span<std::byte>>(std::forward<Buffers>(buffers).begin(), std::forward<Buffers>(buffers).end());
+  }
+
+  std::unique_ptr<interface> intf;
+};
+
+
+class type_erased_at_writeable {
+  private:
+  using sender_t = type_erased_sender<
+      std::variant<std::tuple<std::size_t>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false>;
+
+  class interface {
+    public:
+    virtual ~interface() = default;
+
+    virtual auto write_some_at(offset_type offset, std::span<const std::byte> buf) -> sender_t = 0;
+    virtual auto write_some_at(offset_type offset, std::vector<std::span<const std::byte>> bufs) -> sender_t = 0;
+    virtual auto write_at(offset_type offset, std::span<const std::byte> buf, std::optional<std::size_t> minbytes) -> sender_t = 0;
+    virtual auto write_at(offset_type offset, std::vector<std::span<const std::byte>> bufs, std::optional<std::size_t> minbytes) -> sender_t = 0;
+  };
+
+  template<at_writeable T>
+  class implementation
+  : public interface
+  {
+    public:
+    explicit implementation(T impl)
+    : impl(std::move(impl))
+    {}
+
+    ~implementation() override = default;
+
+    auto write_some_at(offset_type offset, std::span<const std::byte> buf) -> sender_t override {
+      return lazy_write_some_at_ec(impl, offset, buf);
+    }
+
+    auto write_some_at(offset_type offset, std::vector<std::span<const std::byte>> bufs) -> sender_t override {
+      return lazy_write_some_at_ec(impl, offset, bufs);
+    }
+
+    auto write_at(offset_type offset, std::span<const std::byte> buf, std::optional<std::size_t> minbytes) -> sender_t override {
+      return lazy_write_at_ec(impl, offset, buf, minbytes);
+    }
+
+    auto write_at(offset_type offset, std::vector<std::span<const std::byte>> bufs, std::optional<std::size_t> minbytes) -> sender_t override {
+      return lazy_write_at_ec(impl, offset, bufs, minbytes);
+    }
+
+    private:
+    T impl;
+  };
+
+  public:
+  type_erased_at_writeable() noexcept = default;
+
+  template<at_writeable T>
+  explicit type_erased_at_writeable(T&& writeable)
+  : intf(std::make_unique<implementation<std::remove_cvref_t<T>>>(std::forward<T>(writeable)))
+  {}
+
+  explicit operator bool() const noexcept {
+    return intf != nullptr;
+  }
+
+  friend auto tag_invoke([[maybe_unused]] lazy_write_some_at_ec_t tag, type_erased_at_writeable& self, offset_type offset, std::span<const std::byte> buf) {
+    if (self.intf == nullptr) throw std::logic_error("cannot write null file");
+    return self.intf->write_some_at(offset, buf);
+  }
+
+  template<const_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] lazy_write_some_at_ec_t tag, type_erased_at_writeable& self, offset_type offset, Buffers&& bufs) {
+    if (self.intf == nullptr) throw std::logic_error("cannot write null file");
+    return self.intf->write_some_at(offset, vectorize_buffers(std::forward<Buffers>(bufs)));
+  }
+
+  friend auto tag_invoke([[maybe_unused]] lazy_write_at_ec_t tag, type_erased_at_writeable& self, offset_type offset, std::span<const std::byte> buf, std::optional<std::size_t> minbytes) {
+    if (self.intf == nullptr) throw std::logic_error("cannot write null file");
+    return self.intf->write_at(offset, buf, minbytes);
+  }
+
+  template<const_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] lazy_write_at_ec_t tag, type_erased_at_writeable& self, offset_type offset, Buffers&& bufs, std::optional<std::size_t> minbytes) {
+    if (self.intf == nullptr) throw std::logic_error("cannot write null file");
+    return self.intf->write_at(offset, vectorize_buffers(std::forward<Buffers>(bufs)), minbytes);
+  }
+
+  private:
+  template<mutable_buffer_sequence Buffers>
+  static auto vectorize_buffers(Buffers&& buffers)
+  -> std::conditional_t<
+      std::is_convertible_v<Buffers, std::vector<std::span<const std::byte>>>,
+      Buffers&&,
+      std::vector<std::span<const std::byte>>> {
+    if constexpr(std::is_convertible_v<Buffers, std::vector<std::span<const std::byte>>>)
+      return std::forward<Buffers>(buffers);
+    else
+      return std::vector<std::span<std::byte>>(std::forward<Buffers>(buffers).begin(), std::forward<Buffers>(buffers).end());
+  }
+
+  std::unique_ptr<interface> intf;
+};
+
+
+class type_erased_writeable {
+  private:
+  using sender_t = type_erased_sender<
+      std::variant<std::tuple<std::size_t>>,
+      std::variant<std::exception_ptr, std::error_code>,
+      false>;
+
+  class interface {
+    public:
+    virtual ~interface() = default;
+
+    virtual auto write_some_at(std::span<const std::byte> buf) -> sender_t = 0;
+    virtual auto write_some_at(std::vector<std::span<const std::byte>> bufs) -> sender_t = 0;
+    virtual auto write_at(std::span<const std::byte> buf, std::optional<std::size_t> minbytes) -> sender_t = 0;
+    virtual auto write_at(std::vector<std::span<const std::byte>> bufs, std::optional<std::size_t> minbytes) -> sender_t = 0;
+  };
+
+  template<writeable T>
+  class implementation
+  : public interface
+  {
+    public:
+    explicit implementation(T impl)
+    : impl(std::move(impl))
+    {}
+
+    ~implementation() override = default;
+
+    auto write_some_at(std::span<const std::byte> buf) -> sender_t override {
+      return lazy_write_some_ec(impl, buf);
+    }
+
+    auto write_some_at(std::vector<std::span<const std::byte>> bufs) -> sender_t override {
+      return lazy_write_some_ec(impl, bufs);
+    }
+
+    auto write_at(std::span<const std::byte> buf, std::optional<std::size_t> minbytes) -> sender_t override {
+      return lazy_write_ec(impl, buf, minbytes);
+    }
+
+    auto write_at(std::vector<std::span<const std::byte>> bufs, std::optional<std::size_t> minbytes) -> sender_t override {
+      return lazy_write_ec(impl, bufs, minbytes);
+    }
+
+    private:
+    T impl;
+  };
+
+  public:
+  type_erased_writeable() noexcept = default;
+
+  template<writeable T>
+  explicit type_erased_writeable(T&& writeable)
+  : intf(std::make_unique<implementation<std::remove_cvref_t<T>>>(std::forward<T>(writeable)))
+  {}
+
+  explicit operator bool() const noexcept {
+    return intf != nullptr;
+  }
+
+  friend auto tag_invoke([[maybe_unused]] lazy_write_some_ec_t tag, type_erased_writeable& self, std::span<const std::byte> buf) {
+    if (self.intf == nullptr) throw std::logic_error("cannot write null file");
+    return self.intf->write_some_at(buf);
+  }
+
+  template<const_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] lazy_write_some_ec_t tag, type_erased_writeable& self, Buffers&& bufs) {
+    if (self.intf == nullptr) throw std::logic_error("cannot write null file");
+    return self.intf->write_some_at(vectorize_buffers(std::forward<Buffers>(bufs)));
+  }
+
+  friend auto tag_invoke([[maybe_unused]] lazy_write_ec_t tag, type_erased_writeable& self, std::span<const std::byte> buf, std::optional<std::size_t> minbytes) {
+    if (self.intf == nullptr) throw std::logic_error("cannot write null file");
+    return self.intf->write_at(buf, minbytes);
+  }
+
+  template<const_buffer_sequence Buffers>
+  friend auto tag_invoke([[maybe_unused]] lazy_write_ec_t tag, type_erased_writeable& self, Buffers&& bufs, std::optional<std::size_t> minbytes) {
+    if (self.intf == nullptr) throw std::logic_error("cannot write null file");
+    return self.intf->write_at(vectorize_buffers(std::forward<Buffers>(bufs)), minbytes);
+  }
+
+  private:
+  template<mutable_buffer_sequence Buffers>
+  static auto vectorize_buffers(Buffers&& buffers)
+  -> std::conditional_t<
+      std::is_convertible_v<Buffers, std::vector<std::span<const std::byte>>>,
+      Buffers&&,
+      std::vector<std::span<const std::byte>>> {
+    if constexpr(std::is_convertible_v<Buffers, std::vector<std::span<const std::byte>>>)
+      return std::forward<Buffers>(buffers);
+    else
+      return std::vector<std::span<std::byte>>(std::forward<Buffers>(buffers).begin(), std::forward<Buffers>(buffers).end());
+  }
+
+  std::unique_ptr<interface> intf;
+};
+
+
 } /* namespace earnest::execution::io */

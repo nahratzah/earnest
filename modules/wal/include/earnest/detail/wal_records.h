@@ -9,6 +9,7 @@
 #include <earnest/xdr.h>
 #include <earnest/xdr_v2.h>
 
+#include <gsl/gsl>
 #include <spdlog/spdlog.h>
 
 namespace earnest::detail {
@@ -474,7 +475,7 @@ struct wal_record_modify_file32 {
   std::uint64_t file_offset;
   std::uint64_t wal_offset;
   std::uint32_t wal_len;
-  std::shared_ptr<const fd> wal_file;
+  std::shared_ptr<execution::io::type_erased_at_readable> wal_file; // Shared-pointer, because we need the record to be copyable.
 
   auto operator<=>(const wal_record_modify_file32& y) const noexcept = default;
 
@@ -834,17 +835,17 @@ auto make_wal_record_no_bookkeeping(WalRecordVariant&& v) -> wal_record_no_bookk
 }
 
 
-template<typename FdType, typename VariantType> struct wal_record_write_to_read_converter;
+template<typename VariantType> struct wal_record_write_to_read_converter;
 
 template<typename... T>
-struct wal_record_write_to_read_converter<fd, std::variant<T...>> {
+struct wal_record_write_to_read_converter<std::variant<T...>> {
   using variant_type = std::variant<T...>;
   using write_variant_type = record_write_type_t<variant_type>;
   static inline constexpr std::size_t variant_discriminant_bytes = 4;
 
-  wal_record_write_to_read_converter(std::shared_ptr<const fd> wal_file, std::uint64_t offset) noexcept
-  : wal_file(std::move(wal_file)),
-    offset(std::move(offset))
+  wal_record_write_to_read_converter(gsl::not_null<std::shared_ptr<execution::io::type_erased_at_readable>> wal_file, std::uint64_t offset) noexcept
+  : wal_file(wal_file),
+    offset(offset)
   {}
 
   auto operator()(const write_variant_type& wrecord) -> variant_type {
@@ -868,24 +869,24 @@ struct wal_record_write_to_read_converter<fd, std::variant<T...>> {
                 .file_offset=r.file_offset,
                 .wal_offset=this->offset + record_write_type_t<wal_record_modify_file32>::data_offset + variant_discriminant_bytes,
                 .wal_len=static_cast<std::uint32_t>(r.data.size()),
-                .wal_file=this->wal_file,
+                .wal_file=this->wal_file.get(),
               };
             }),
         wrecord);
   }
 
   private:
-  std::shared_ptr<const fd> wal_file;
+  gsl::not_null<std::shared_ptr<execution::io::type_erased_at_readable>> wal_file;
   std::uint64_t offset;
 };
 
 template<>
-struct wal_record_write_to_read_converter<fd, wal_record_variant> {
+struct wal_record_write_to_read_converter<wal_record_variant> {
   using variant_type = wal_record_variant;
   using write_variant_type = wal_record_write_variant;
 
-  wal_record_write_to_read_converter(std::shared_ptr<const fd> wal_file, std::uint64_t offset) noexcept
-  : converter_(std::move(wal_file), std::move(offset))
+  wal_record_write_to_read_converter(gsl::not_null<std::shared_ptr<execution::io::type_erased_at_readable>> wal_file, std::uint64_t offset) noexcept
+  : converter_(wal_file, offset)
   {}
 
   auto operator()(const write_variant_type& wrecord) -> variant_type {
@@ -893,7 +894,7 @@ struct wal_record_write_to_read_converter<fd, wal_record_variant> {
   }
 
   private:
-  wal_record_write_to_read_converter<fd, wal_record_variant_> converter_;
+  wal_record_write_to_read_converter<wal_record_variant_> converter_;
 };
 
 

@@ -621,15 +621,15 @@ auto wal_file_entry::durable_append_(
   }
 
   if (on_successful_write_callback != nullptr) {
-    gsl::not_null<std::shared_ptr<const fd_type>> fd = std::shared_ptr<const fd_type>(wf.get(), &std::as_const(wf->file).file_ref());
     auto write_offset = space.offset();
-    auto converted_records = records.converted_records(fd, write_offset);
+    auto converted_records = records.converted_records(
+        std::allocate_shared<io::type_erased_at_readable>(wf->get_allocator(), record_reader(wf)),
+        write_offset);
+
     space.set_update_callback(
         [ on_successful_write_callback=std::move(on_successful_write_callback),
-          write_offset=space.offset(),
           fake_link_in=wf->fake_link,
-          converted_records=std::move(converted_records),
-          fd
+          converted_records=std::move(converted_records)
         ]() mutable {
           return fake_link_in
           | let_value(
@@ -757,7 +757,9 @@ auto wal_file_entry::non_durable_append_(
                   space.set_must_succeed(true);
 
                 auto do_write_callback = [&]() {
-                  auto converted_records = records.converted_records(std::shared_ptr<const fd_type>(wf.get(), &std::as_const(wf->file).file_ref()), write_offset);
+                  auto converted_records = records.converted_records(
+                      std::allocate_shared<io::type_erased_at_readable>(wf->get_allocator(), record_reader(wf)),
+                      write_offset);
                   return not_on_strand(wf->strand_,
                       fake_link_in // Have to wait for preceding writes to complete, before we can do the write.
                       | let_value(
