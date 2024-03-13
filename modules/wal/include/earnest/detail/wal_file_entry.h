@@ -334,6 +334,10 @@ class wal_file_entry_file {
   // a skip record to skip the space when reading it back.
   static auto prepare_space(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, execution::strand<allocator_type> strand, std::size_t write_len) -> prepared_space;
 
+  // Discard all data in the file.
+  // Note that this is not an atomic operation.
+  static auto discard_all(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, execution::strand<allocator_type> strand) -> execution::sender_of<> auto;
+
   static auto read_some_at(gsl::not_null<std::shared_ptr<const wal_file_entry_file>> self, offset_type offset, std::span<std::byte> buf) -> execution::sender_of<std::size_t> auto {
     using namespace execution;
 
@@ -444,6 +448,10 @@ class wal_file_entry_unwritten_data {
   : records(alloc)
   {
     assert(invariant());
+  }
+
+  auto empty() const noexcept -> bool {
+    return records.empty();
   }
 
   auto add(offset_type offset, byte_vector bytes) -> byte_span {
@@ -593,6 +601,8 @@ class wal_file_entry_unwritten_data {
 class wal_file_entry
 : public std::enable_shared_from_this<wal_file_entry>
 {
+  friend wal_file_entry_file; // Needs access to xdr_header_tuple and related types.
+
   public:
   static inline constexpr std::uint_fast32_t max_version = 0;
   static inline constexpr std::size_t read_buffer_size = 2u * 1024u * 1024u;
@@ -732,6 +742,7 @@ class wal_file_entry
   -> execution::sender_of<> auto;
 
   public:
+  [[nodiscard]]
   auto append(
       write_records_buffer_t records,
       typename wal_file_entry_file::callback transaction_validation = nullptr,
@@ -739,12 +750,13 @@ class wal_file_entry
       bool delay_flush = false)
   -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
 
+  [[nodiscard]]
   auto seal()
   -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
 
-  template<typename CompletionToken>
-  [[deprecated]] // XXX reimplement in terms of sender/receiver.
-  auto async_discard_all(CompletionToken&& token);
+  [[nodiscard]]
+  auto discard_all(write_records_buffer_t instead = write_records_buffer_t{})
+  -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
 
   auto end_offset() const noexcept {
     std::lock_guard lck{strand_};

@@ -928,7 +928,6 @@ TEST(seal_wal_file_entry) {
   }
 }
 
-#if 0
 TEST(discard_all) {
   using namespace std::string_literals;
   using wal_file_entry_t = earnest::detail::wal_file_entry;
@@ -938,46 +937,33 @@ TEST(discard_all) {
   // We have to make sure the file doesn't exist, or the test will fail.
   ensure_file_is_gone("discard_all");
 
-  asio::io_context ioctx;
-  auto f = std::make_shared<wal_file_entry_t>(std::allocator<std::byte>());
-  // Preparation: create a file with data.
-  f->async_create(write_dir, "discard_all", 17,
-      [&f](std::error_code ec, auto link_done_event) {
-        REQUIRE CHECK_EQUAL(std::error_code(), ec);
-        std::invoke(link_done_event, std::error_code());
+  auto [f, acceptor] = earnest::execution::sync_wait(
+      earnest::detail::wal_file_entry::create(write_dir, "discard_all", 17)).value();
+  acceptor.assign_values();
+  earnest::execution::sync_wait(
+      f->append(
+          wal_file_entry_t::write_records_buffer_t(
+              std::initializer_list<wal_file_entry_t::write_variant_type>{
+                wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
+              })));
 
-        f->async_append(std::initializer_list<wal_file_entry_t::write_variant_type>{
-              wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
-            },
-            [&](std::error_code ec) {
-              REQUIRE CHECK_EQUAL(std::error_code(), ec);
-            });
-      });
-  ioctx.run();
-  ioctx.restart();
+  earnest::execution::sync_wait(f->discard_all());
 
-  bool completion_all_was_called = false;
-  f->async_discard_all(
-      [&](std::error_code ec) {
-        CHECK_EQUAL(std::error_code(), ec);
-        completion_all_was_called = true;
-      });
-  ioctx.run();
-  CHECK(completion_all_was_called);
-
-  CHECK_EQUAL(36u, f->write_offset());
+  CHECK_EQUAL(36u, f->end_offset());
   CHECK_EQUAL(32u, f->link_offset());
   CHECK_EQUAL(::earnest::detail::wal_file_entry_state::sealed, f->state());
 
-
-  CHECK_EQUAL(
-      hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
-          + "\000\000\000\004"s // wal_record_seal
-          + "\000\000\000\000"s // sentinel (std::monostate)
-          ),
-      hex_string(f->file.contents<std::string>().substr(0, 36)));
+  {
+    earnest::fd raw_file;
+    raw_file.open(write_dir, "discard_all", earnest::open_mode::READ_ONLY);
+    CHECK_EQUAL(
+        hex_string("\013\013earnest.wal\000\000\000\000\000\000\000\000\000\000\000\000\000\000\021"s
+            + "\000\000\000\004"s // wal_record_seal
+            + "\000\000\000\000"s // sentinel (wal_record_end_of_records)
+            ),
+        hex_string(raw_file.contents<std::string>().substr(0, 36)));
+  }
 }
-#endif
 
 int main(int argc, char** argv) {
   if (argc < 3) {

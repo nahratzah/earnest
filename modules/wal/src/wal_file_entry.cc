@@ -360,6 +360,37 @@ auto wal_file_entry_file::prepare_space(gsl::not_null<std::shared_ptr<wal_file_e
   return prepared_space(self, strand, write_offset, write_len, std::move(acceptor), preceding_link, new_link);
 }
 
+auto wal_file_entry_file::discard_all(gsl::not_null<std::shared_ptr<wal_file_entry_file>> self, execution::strand<allocator_type> strand) -> execution::sender_of<> auto {
+  using namespace execution;
+  using pos_stream = positional_stream_adapter<fd_type&>;
+
+  return just(self, strand)
+  | lazy_observe_value(
+      []([[maybe_unused]] const gsl::not_null<std::shared_ptr<wal_file_entry_file>>& self, const execution::strand<allocator_type>& strand) {
+        assert(strand.running_in_this_thread());
+      })
+  | lazy_let_value(
+      [](gsl::not_null<std::shared_ptr<wal_file_entry_file>>& self, execution::strand<allocator_type>& strand) {
+        assert(strand.running_in_this_thread());
+        return xdr_v2::read_into<wal_file_entry::xdr_header_tuple>(pos_stream(self->file), wal_file_entry::xdr_header_invocation{}) // Skip the header.
+        | then(
+            [](auto stream, [[maybe_unused]] auto hdr) {
+              return stream;
+            })
+        | xdr_v2::write(xdr_v2::no_fd, wal_record_end_of_records::opcode, xdr_v2::constant(xdr_v2::uint32))
+        | lazy_let_value(
+            [&](auto& stream) {
+              assert(strand.running_in_this_thread());
+              self->end_offset = stream.position();
+              self->link_offset = stream.position() - 4u;
+              self->sync_offset = stream.position() - 4u;
+
+              return io::truncate_ec(self->file, stream.position())
+              | let_value([&self]() { return self->wal_flusher_.lazy_flush(true); });
+            });
+      });
+}
+
 
 auto wal_file_entry::open(dir d, std::filesystem::path name, allocator_type alloc)
 -> execution::type_erased_sender<
@@ -988,6 +1019,61 @@ auto wal_file_entry::seal()
                     wf->state_ = wal_file_entry_state::sealed;
                   else
                     wf->state_ = wal_file_entry_state::ready;
+                })
+            | validation(
+                [wf]() -> std::optional<std::error_code> {
+                  if (wf->state_ == wal_file_entry_state::failed) return make_error_code(wal_errc::unrecoverable);
+                  return std::nullopt;
+                });
+
+            wf->state_ = wal_file_entry_state::sealing;
+            return sender_chain;
+          }));
+}
+
+auto wal_file_entry::discard_all(write_records_buffer_t instead)
+-> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> {
+  using namespace execution;
+
+  gsl::not_null<std::shared_ptr<wal_file_entry>> wf = this->shared_from_this();
+  instead.push_back(wal_record_seal{});
+  return on(
+      strand_,
+      just(wf, std::move(instead))
+      | lazy_validation(
+          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, [[maybe_unused]] const write_records_buffer_t& instead) -> std::optional<std::error_code> {
+            assert(wf->strand_.running_in_this_thread());
+
+            if (!wf->unwritten_data.empty()) throw std::logic_error("cannot call discard all on an in-use file");
+            if (wf->state_ != wal_file_entry_state::ready &&
+                wf->state_ != wal_file_entry_state::sealed)
+              return make_error_code(wal_errc::bad_state);
+            return std::nullopt;
+          })
+      | lazy_let_value(
+          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& instead) {
+            gsl::not_null<std::shared_ptr<wal_file_entry_file>> wff = std::shared_ptr<wal_file_entry_file>(wf.get(), &wf->file);
+            return wal_file_entry_file::discard_all(wff, wf->strand_)
+            | then([wf, &instead]() mutable { return std::make_tuple(wf, std::move(instead)); })
+            | explode_tuple();
+          })
+      | lazy_let_value(
+          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& instead) {
+            auto space = wf->file.prepare_space(
+                std::shared_ptr<wal_file_entry_file>(wf.get(), &wf->file),
+                wf->strand_,
+                std::as_const(instead).bytes().size());
+
+            auto sender_chain = durable_append_(wf, std::move(instead), nullptr, nullptr, std::move(space))
+            | observe<set_value_t, set_error_t, set_done_t>(
+                [wf]<typename Tag>(Tag tag, [[maybe_unused]] const auto&... args) {
+                  if (wf->state_ == wal_file_entry_state::failed) return;
+
+                  assert(wf->state_ == wal_file_entry_state::sealing);
+                  if constexpr(std::same_as<set_value_t, Tag>)
+                    wf->state_ = wal_file_entry_state::sealed;
+                  else
+                    wf->state_ = wal_file_entry_state::failed; // Because we may've zeroed out the starting bytes.
                 })
             | validation(
                 [wf]() -> std::optional<std::error_code> {
