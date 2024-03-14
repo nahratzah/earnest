@@ -7,7 +7,7 @@ mark_as_advanced(WAL_VERSION_MAJOR)
 mark_as_advanced(WAL_VERSION_MINOR)
 mark_as_advanced(WAL_VERSION)
 
-add_library(wal)
+add_library(wal OBJECT)
 set_property(TARGET wal PROPERTY VERSION ${WAL_VERSION})
 target_compile_features(wal PUBLIC cxx_std_20)
 target_sources(wal
@@ -23,7 +23,8 @@ target_sources(wal
     include/earnest/wal_error.h)
 target_sources(wal
     PRIVATE
-    src/wal_file_entry.cc)
+    src/wal_file_entry.cc
+    src/replacement_map.cc)
 
 find_package(Boost REQUIRED)
 target_include_directories(wal PUBLIC ${Boost_INCLUDE_DIR})

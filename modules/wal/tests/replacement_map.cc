@@ -2,12 +2,8 @@
 
 #include <UnitTest++/UnitTest++.h>
 
-#include <earnest/detail/byte_positional_stream.h>
-
-#include <asio/io_context.hpp>
-
 TEST(replacement_map_create) {
-  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
+  using replacement_map = earnest::detail::replacement_map<>;
 
   replacement_map map;
 
@@ -16,11 +12,10 @@ TEST(replacement_map_create) {
 }
 
 TEST(replacement_map_insert) {
-  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::execution::io::type_erased_at_readable;
+  using replacement_map = earnest::detail::replacement_map<>;
 
-  asio::io_context ioctx;
-  const auto wal = std::make_shared<const wal_file>(ioctx.get_executor());
+  const auto wal = std::make_shared<wal_file>();
   replacement_map map;
   map.insert(15, 16, 7, wal);
 
@@ -34,12 +29,11 @@ TEST(replacement_map_insert) {
 }
 
 TEST(replacement_map_insert_maintains_order) {
-  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::execution::io::type_erased_at_readable;
+  using replacement_map = earnest::detail::replacement_map<>;
 
-  asio::io_context ioctx;
-  const auto wal1 = std::make_shared<const wal_file>(ioctx.get_executor());
-  const auto wal2 = std::make_shared<const wal_file>(ioctx.get_executor());
+  const auto wal1 = std::make_shared<wal_file>();
+  const auto wal2 = std::make_shared<wal_file>();
   replacement_map map;
   map.insert(115, 0, 4, wal2); // element 1
   map.insert(15, 16, 7, wal1); // element 0
@@ -70,12 +64,11 @@ TEST(replacement_map_insert_maintains_order) {
 }
 
 TEST(replacement_map_insert_replacement) {
-  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::execution::io::type_erased_at_readable;
+  using replacement_map = earnest::detail::replacement_map<>;
 
-  asio::io_context ioctx;
-  const auto wal1 = std::make_shared<const wal_file>(ioctx.get_executor());
-  const auto wal2 = std::make_shared<const wal_file>(ioctx.get_executor());
+  const auto wal1 = std::make_shared<wal_file>();
+  const auto wal2 = std::make_shared<wal_file>();
   replacement_map map;
   map.insert(15, 16, 7, wal1); // element 0
   map.insert(15, 0, 7, wal2); // replaces first element
@@ -97,12 +90,11 @@ TEST(replacement_map_insert_replacement) {
 }
 
 TEST(replacement_map_insert_big_replacement) {
-  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::execution::io::type_erased_at_readable;
+  using replacement_map = earnest::detail::replacement_map<>;
 
-  asio::io_context ioctx;
-  const auto wal1 = std::make_shared<const wal_file>(ioctx.get_executor());
-  const auto wal2 = std::make_shared<const wal_file>(ioctx.get_executor());
+  const auto wal1 = std::make_shared<wal_file>();
+  const auto wal2 = std::make_shared<wal_file>();
   replacement_map map;
   map.insert(15, 16, 7, wal1); // element 0
   map.insert(10, 0, 17, wal2); // replaces first element
@@ -124,12 +116,11 @@ TEST(replacement_map_insert_big_replacement) {
 }
 
 TEST(replacement_map_insert_small_replacement) {
-  using wal_file = earnest::detail::byte_positional_stream<asio::io_context::executor_type>;
-  using replacement_map = earnest::detail::replacement_map<earnest::detail::byte_positional_stream<asio::io_context::executor_type>>;
+  using wal_file = earnest::execution::io::type_erased_at_readable;
+  using replacement_map = earnest::detail::replacement_map<>;
 
-  asio::io_context ioctx;
-  const auto wal1 = std::make_shared<const wal_file>(ioctx.get_executor());
-  const auto wal2 = std::make_shared<const wal_file>(ioctx.get_executor());
+  const auto wal1 = std::make_shared<wal_file>();
+  const auto wal2 = std::make_shared<wal_file>();
   replacement_map map;
   map.insert(10, 0, 17, wal1); // replaces first element
   map.insert(15, 16, 7, wal2); // overwrites the middle of the first element

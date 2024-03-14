@@ -12,17 +12,12 @@
 #include <type_traits>
 #include <utility>
 
-#include <asio/async_result.hpp>
-#include <asio/buffer.hpp>
-#include <asio/read_at.hpp>
-
 #include <earnest/detail/wal_records.h>
-#include <earnest/fd.h>
+#include <earnest/execution_io.h>
 
 namespace earnest::detail {
 
 
-template<typename FD>
 class replacement_map_value {
   public:
   using offset_type = std::uint64_t;
@@ -30,34 +25,26 @@ class replacement_map_value {
 
   replacement_map_value() noexcept = default;
 
-  template<typename Executor, typename Reactor>
-  replacement_map_value(const wal_record_modify_file32<Executor, Reactor>& record) noexcept
-  : file_offset(record.file_offset),
-    wal_offset_(record.wal_offset),
-    len(record.wal_len),
-    wal_file_(record.wal_file)
-  {}
-
-  template<typename Executor, typename Reactor>
-  replacement_map_value(wal_record_modify_file32<Executor, Reactor>&& record) noexcept
-  : file_offset(record.file_offset),
-    wal_offset_(record.wal_offset),
-    len(record.wal_len),
-    wal_file_(std::move(record.wal_file))
-  {}
-
-  replacement_map_value(offset_type file_offset, offset_type wal_offset, size_type len, std::shared_ptr<const FD> wal_file) noexcept
+  replacement_map_value(offset_type file_offset, offset_type wal_offset, size_type len, gsl::not_null<std::shared_ptr<execution::io::type_erased_at_readable>> wal_file) noexcept
   : file_offset(file_offset),
     wal_offset_(wal_offset),
     len(len),
     wal_file_(std::move(wal_file))
   {}
 
+  replacement_map_value(const wal_record_modify_file32& record) noexcept
+  : replacement_map_value(record.file_offset, record.wal_offset, record.wal_len, record.wal_file)
+  {}
+
   auto offset() const noexcept -> offset_type { return file_offset; }
   auto size() const noexcept -> size_type { return len; }
   auto end_offset() const noexcept -> offset_type { return offset() + size(); }
   auto wal_offset() const noexcept -> offset_type { return wal_offset_; }
-  auto wal_file() const noexcept -> const FD& { return *wal_file_; }
+
+  auto wal_file() const noexcept -> execution::io::type_erased_at_readable& {
+    assert(wal_file_ != nullptr);
+    return *wal_file_;
+  }
 
   void start_at(offset_type new_off) {
     if (new_off < offset() || new_off > end_offset())
@@ -76,10 +63,12 @@ class replacement_map_value {
     len = new_sz;
   }
 
+  static auto cmp_eq(std::span<const replacement_map_value> x, std::span<const replacement_map_value> y) -> bool;
+
   private:
   offset_type file_offset = 0, wal_offset_ = 0;
   size_type len = 0;
-  std::shared_ptr<const FD> wal_file_;
+  std::shared_ptr<execution::io::type_erased_at_readable> wal_file_;
 };
 
 
@@ -88,19 +77,16 @@ class replacement_map_value {
  * \details
  * A replacement map holds on to file changes in memory and allows for them to
  * be applied during reads.
- *
- * \tparam Alloc An allocator type.
  */
-template<typename FD, typename Alloc = std::allocator<std::byte>>
+template<typename Alloc = std::allocator<std::byte>>
 class replacement_map {
   public:
-  using fd_type = FD;
-  using value_type = replacement_map_value<fd_type>;
+  using value_type = replacement_map_value;
   using reference = value_type&;
   using const_reference = const value_type&;
   using pointer = value_type*;
   using const_pointer = const value_type*;
-  using allocator_type = typename std::allocator_traits<Alloc>::template rebind_alloc<value_type>;
+  using allocator_type = Alloc;
 
   using offset_type = typename value_type::offset_type;
   using size_type = typename value_type::size_type;
@@ -113,41 +99,47 @@ class replacement_map {
   using iterator = typename map_type::const_iterator;
   using const_iterator = iterator;
 
-  explicit replacement_map(allocator_type alloc = allocator_type())
-      noexcept(std::is_nothrow_move_constructible_v<allocator_type>)
-  : map_(std::move(alloc))
+  explicit replacement_map(allocator_type alloc = allocator_type{})
+  : map_(alloc)
   {}
 
-  replacement_map(const replacement_map& other)
-      noexcept(std::is_nothrow_copy_constructible_v<map_type>)
-  : map_(other.map_)
+  replacement_map(const replacement_map& y, allocator_type alloc)
+  : map_(y.map_, alloc)
   {}
 
-  replacement_map(replacement_map&& other)
-      noexcept(std::is_nothrow_move_constructible_v<map_type>)
-  : map_(std::move(other.map_))
+  replacement_map(replacement_map&& y, allocator_type alloc)
+  : map_(std::move(y.map_), alloc)
   {}
 
-  auto operator=(const replacement_map& other) -> replacement_map& {
-    map_ = other.map_;
-    return *this;
-  }
-
-  auto operator=(replacement_map&& other) noexcept -> replacement_map& {
-    map_ = std::move(other.map_);
-    return *this;
-  }
+  template<typename OtherAlloc>
+  requires (!std::same_as<Alloc, OtherAlloc>)
+  replacement_map(const replacement_map<OtherAlloc>& y, allocator_type alloc = allocator_type{})
+  : map_(y.map_.begin(), y.map_.end(), alloc)
+  {}
 
   void swap(replacement_map& other) noexcept {
     map_.swap(other.map_);
   }
 
+  template<typename OtherAlloc>
+  auto operator==(const replacement_map<OtherAlloc>& y) const -> bool {
+    return value_type::cmp_eq(map_, y.map_);
+  }
+
+  template<typename OtherAlloc>
+  auto operator!=(const replacement_map<OtherAlloc>& y) const -> bool {
+    return !(*this == y);
+  }
+
   auto get_allocator() const -> allocator_type { return map_.get_allocator(); }
   auto empty() const noexcept -> bool { return map_.empty(); }
-
   void clear() { map_.clear(); }
+
   template<typename... Args>
-  auto insert(Args&&... args) -> iterator { return insert_(value_type(std::forward<Args>(args)...)); }
+  requires std::constructible_from<value_type, Args...>
+  auto insert(Args&&... args) -> iterator {
+    return insert_(value_type(std::forward<Args>(args)...));
+  }
 
   auto erase(offset_type begin_off, offset_type end_off) -> iterator {
     if (begin_off > end_off)
@@ -164,9 +156,8 @@ class replacement_map {
   auto cbegin() const -> const_iterator { return begin(); }
   auto cend() const -> const_iterator { return end(); }
 
-  template<typename OtherAlloc>
-  auto merge(const replacement_map<fd_type, OtherAlloc>& other) -> replacement_map& {
-    std::for_each(other.begin(), other.end(),
+  auto merge(const replacement_map& other) -> replacement_map& {
+    std::for_each(other.map_.begin(), other.map_.end(),
         [this](const_reference v) {
           this->insert_(v);
         });
@@ -175,7 +166,7 @@ class replacement_map {
 
   auto merge(replacement_map&& other) noexcept -> replacement_map& {
     std::for_each(
-        std::make_move_iterator(other.begin()), std::make_move_iterator(other.end()),
+        std::make_move_iterator(other.map_.begin()), std::make_move_iterator(other.map_.end()),
         [this](value_type&& value) {
           this->insert_(std::move(value));
         });
@@ -273,69 +264,9 @@ class replacement_map {
 };
 
 
-template<typename FD, typename Alloc>
-void swap(replacement_map<FD, Alloc>& x, replacement_map<FD, Alloc>& y) noexcept {
+template<typename Alloc>
+inline void swap(replacement_map<Alloc>& x, replacement_map<Alloc>& y) noexcept {
   x.swap(y);
-}
-
-
-template<typename XFD, typename XAlloc, typename YFD, typename YAlloc>
-inline auto operator==(const replacement_map<XFD, XAlloc>& x, const replacement_map<YFD, YAlloc>& y) -> bool {
-  auto x_iter = x.begin(), y_iter = y.begin();
-  const auto x_end = x.end(), y_end = y.end();
-
-  if (x_iter == x_end || y_iter == y_end)
-    return x_iter == x_end && y_iter == y_end;
-
-  auto x_off = x_iter->offset(), y_off = y_iter->offset();
-  std::vector<std::byte> x_buf_spc(65536), y_buf_spc(65536);
-  asio::mutable_buffer x_buf = asio::buffer(x_buf_spc, 0), y_buf = asio::buffer(y_buf_spc, 0);
-
-  do {
-    bool skip = false;
-    // Fill x-buffer.
-    if (x_buf.size() == 0) {
-      if (x_off == x_iter->end_offset()) {
-        ++x_iter;
-        if (x_iter != x_end) x_off = x_iter->offset();
-        skip = true;
-      } else {
-        x_buf = asio::buffer(x_buf_spc, x_iter->end_offset() - x_off);
-        asio::read_at(*x_iter, x_off, x_buf, asio::transfer_at_least(1));
-      }
-    }
-    // Fill y-buffer.
-    if (y_buf.size() == 0) {
-      if (y_off == y_iter->end_offset()) {
-        ++y_iter;
-        if (y_iter != y_end) y_off = y_iter->offset();
-        skip = true;
-      } else {
-        y_buf = asio::buffer(y_buf_spc, y_iter->end_offset() - y_off);
-        asio::read_at(*y_iter, y_off, y_buf, asio::transfer_at_least(1));
-      }
-    }
-    // Restart the loop if we changed iterator position (and thus didn't fill the buffers).
-    if (skip) continue;
-
-    assert(x_buf.size() > 0 && y_buf.size() > 0);
-
-    const auto buflen = std::min(x_buf.size(), y_buf.size());
-    if (x_off != y_off) return false;
-    if (std::memcmp(x_buf.data(), y_buf.data(), buflen) != 0) return false;
-
-    x_off += buflen;
-    y_off += buflen;
-    x_buf += buflen;
-    y_buf += buflen;
-  } while (x_iter != x_end && y_iter != y_end);
-
-  return x_buf.size() == 0 && y_buf.size() == 0 && x_iter == x_end && y_iter == y_end;
-}
-
-template<typename XFD, typename XAlloc, typename YFD, typename YAlloc>
-inline auto operator!=(const replacement_map<XFD, XAlloc>& x, const replacement_map<YFD, YAlloc>& y) -> bool {
-  return !(x == y);
 }
 
 
