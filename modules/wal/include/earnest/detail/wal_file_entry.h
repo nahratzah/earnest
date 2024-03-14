@@ -387,15 +387,30 @@ class wal_file_entry_unwritten_data {
   private:
   template<typename T> using allocator_for = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
   using byte_span = std::span<const std::byte>;
-  using byte_vector = std::vector<std::byte>;
+  using byte_vector = std::vector<std::byte, allocator_for<std::byte>>;
 
   struct record {
+    using allocator_type = wal_file_entry_unwritten_data::allocator_type;
+
     record() = default;
 
-    record(offset_type offset, byte_vector bytes)
-    : offset(offset),
-      bytes(std::move(bytes))
+    explicit record(allocator_type alloc)
+    : bytes(alloc)
     {}
+
+    // Create a new record.
+    // Bytes are copied.
+    record(offset_type offset, std::span<const std::byte> bytes, allocator_type alloc)
+    : offset(offset),
+      bytes(bytes.begin(), bytes.end(), alloc)
+    {}
+
+    record(record&& other, allocator_type alloc)
+    : offset(other.offset),
+      bytes(std::move(other.bytes), alloc)
+    {
+      assert(other.bytes.get_allocator() == alloc); // Required, so that the move call will use a move-constructor.
+    }
 
     // Moveable only, because we require that the byte_vector data remains at a constant memory address.
     record(const record&) = delete;
@@ -407,10 +422,15 @@ class wal_file_entry_unwritten_data {
       return offset + bytes.size();
     }
 
+    auto get_allocator() const -> allocator_type {
+      return bytes.get_allocator();
+    }
+
     offset_type offset;
     byte_vector bytes;
   };
-  using record_vector = std::vector<record>;
+  static_assert(std::uses_allocator_v<record, std::scoped_allocator_adaptor<allocator_for<record>>>);
+  using record_vector = std::vector<record, std::scoped_allocator_adaptor<allocator_for<record>>>;
 
   // Less-compare that checks offsets.
   struct offset_compare {
@@ -454,10 +474,12 @@ class wal_file_entry_unwritten_data {
     return records.empty();
   }
 
-  auto add(offset_type offset, byte_vector bytes) -> byte_span {
+  // Add bytes to the unwritten-data.
+  // Bytes are copied.
+  auto add(offset_type offset, std::span<const std::byte> bytes) -> byte_span {
     if (bytes.empty()) throw std::range_error("no data to record");
 
-    typename record_vector::const_iterator insert_position;
+    record_vector::const_iterator insert_position;
     if (records.empty() || records.back().offset < offset)
       insert_position = records.end();
     else
@@ -472,7 +494,7 @@ class wal_file_entry_unwritten_data {
     if (insert_position != records.end() && !(offset + bytes.size() <= insert_position->offset))
       throw std::range_error("bug: data overlaps with successive record");
 
-    auto inserted = records.emplace(insert_position, offset, bytes);
+    record_vector::const_iterator inserted = records.emplace(insert_position, offset, bytes);
     assert(invariant());
     return inserted->bytes;
   }
