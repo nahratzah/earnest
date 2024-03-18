@@ -961,12 +961,20 @@ class _generic_adapter_t
   template<sender Sender>
   constexpr auto operator()(Sender&& s) &
   -> decltype(std::declval<_generic_adapter_t&>().invoke(std::declval<Sender>(), std::index_sequence_for<Args...>())) {
+    if constexpr(typed_sender<Sender>) {
+      static_assert(typed_sender<decltype(invoke(std::forward<Sender>(s), std::index_sequence_for<Args...>()))>,
+          "sender types cannot be computed properly");
+    }
     return invoke(std::forward<Sender>(s), std::index_sequence_for<Args...>());
   }
 
   template<sender Sender>
   constexpr auto operator()(Sender&& s) &&
   -> decltype(std::declval<_generic_adapter_t>().invoke(std::declval<Sender>(), std::index_sequence_for<Args...>())) {
+    if constexpr(typed_sender<Sender>) {
+      static_assert(typed_sender<decltype(std::move(*this).invoke(std::forward<Sender>(s), std::index_sequence_for<Args...>()))>,
+          "sender types cannot be computed properly");
+    }
     return std::move(*this).invoke(std::forward<Sender>(s), std::index_sequence_for<Args...>());
   }
 

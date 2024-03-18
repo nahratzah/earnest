@@ -5,6 +5,7 @@
 #include "execution.h"
 #include "blocking_scheduler.h"
 #include "move_only_function.h"
+#include "fixed_vector.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -3510,6 +3511,410 @@ class _just_done_sender {
 template<typename... T>
 auto just_done() -> typed_sender auto {
   return _just_done_sender<T...>();
+}
+
+
+struct discard_value_t {
+  template<typename> friend struct execution::_generic_operand_base_t;
+
+  public:
+  template<sender Sender>
+  auto operator()(Sender&& s) const
+  -> sender decltype(auto) {
+    return _generic_operand_base<set_value_t>(*this, std::forward<Sender>(s));
+  }
+
+  auto operator()() const -> decltype(auto) {
+    return _generic_adapter(*this);
+  }
+
+  private:
+  template<receiver Receiver>
+  class receiver_impl
+  : public _generic_receiver_wrapper<Receiver, set_value_t>
+  {
+    public:
+    explicit receiver_impl(Receiver&& r)
+    : _generic_receiver_wrapper<Receiver, set_value_t>(std::move(r))
+    {}
+
+    template<typename... Args>
+    friend auto tag_invoke(set_value_t set_value, receiver_impl&& self, [[maybe_unused]] Args&&... args) -> void {
+      set_value(std::move(self.r));
+    }
+  };
+
+  template<sender Sender>
+  class sender_impl
+  : public _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>
+  {
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<>>;
+
+    explicit sender_impl(Sender&& s)
+    : _generic_sender_wrapper<sender_impl<Sender>, Sender, connect_t>(std::move(s))
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke(connect_t connect, sender_impl&& self, Receiver&& r)
+    -> decltype(auto) {
+      return connect(std::move(self.s), receiver_impl<std::remove_cvref_t<Receiver>>(std::forward<Receiver>(r)));
+    }
+
+    private:
+    template<sender OtherSender>
+    auto rebind(OtherSender&& other_sender) &&
+    -> sender_impl<std::remove_cvref_t<OtherSender>> {
+      return sender_impl<std::remove_cvref_t<OtherSender>>(std::forward<OtherSender>(other_sender));
+    }
+  };
+
+  template<sender Sender>
+  auto default_impl(Sender&& s) const -> sender auto {
+    return sender_impl<std::remove_cvref_t<Sender>>(std::forward<Sender>(s));
+  }
+};
+inline constexpr discard_value_t discard_value{};
+
+
+struct gather_t {
+  private:
+  // This should be part of the STL. But it's not.
+  template<typename... T>
+  struct overload_t
+  : T...
+  {
+    explicit overload_t(T... t) : T(std::move(t))... {}
+    using T::operator()...;
+  };
+  template<typename... T>
+  static auto overload(T&&... t) -> overload_t<std::remove_cvref_t<T>...> {
+    return overload_t<std::remove_cvref_t<T>...>(std::forward<T>(t)...);
+  }
+
+  template<typename T, typename Alloc>
+  requires std::same_as<T, typename std::allocator_traits<Alloc>::value_type>
+  struct storage_deleter {
+    explicit storage_deleter(Alloc alloc, typename std::allocator_traits<Alloc>::size_type sz)
+    : alloc(alloc),
+      sz(sz)
+    {}
+
+    auto operator()(T* ptr) noexcept -> void {
+      std::allocator_traits<Alloc>::deallocate(alloc, ptr, sz);
+    }
+
+    Alloc alloc;
+    typename std::allocator_traits<Alloc>::size_type sz;
+  };
+
+  template<typename T, typename Alloc>
+  requires std::same_as<T, typename std::allocator_traits<Alloc>::value_type>
+  struct non_freeing_destructor {
+    explicit non_freeing_destructor(Alloc alloc)
+    : alloc(alloc)
+    {}
+
+    auto operator()(T* ptr) noexcept -> void {
+      std::allocator_traits<Alloc>::destroy(alloc, ptr);
+    }
+
+    Alloc alloc;
+  };
+
+  template<typename T, typename Alloc>
+  static auto allocate_raw_storage(Alloc alloc, typename std::allocator_traits<Alloc>::size_type sz)
+  -> std::unique_ptr<T, storage_deleter<T, Alloc>> {
+    std::unique_ptr<T, storage_deleter<T, Alloc>> ptr(nullptr, storage_deleter<T, Alloc>(alloc, sz));
+    if (ptr.get_deleter().sz != 0) ptr.reset(std::allocator_traits<Alloc>::allocate(ptr.get_deleter().alloc, ptr.get_deleter().sz));
+    return ptr;
+  }
+
+  template<typename T, typename Alloc, typename... Args>
+  static auto construct_element_at(std::unique_ptr<T, non_freeing_destructor<T, Alloc>>& ptr, T* raw_ptr, Args&&... args)
+  -> void {
+    assert(ptr == nullptr);
+    std::allocator_traits<Alloc>::construct(ptr.get_deleter().alloc, raw_ptr, std::forward<Args>(args)...);
+    ptr.reset(raw_ptr);
+  }
+
+  template<typename T, typename Alloc>
+  static auto assign_raw_storage(fixed_vector<T, Alloc>& vector, std::unique_ptr<T, storage_deleter<T, Alloc>> raw_storage) noexcept {
+    vector.assign_raw(raw_storage.release(), raw_storage.get_deleter().sz);
+  }
+
+  // Use an implementation of type_identity, that'll accept parameter packs.
+  template<typename... Types> requires (sizeof...(Types) == 1) struct type_identity;
+  template<typename T> struct type_identity<T> { using type = T; };
+  template<typename... Types> using type_identity_t = typename type_identity<Types...>::type;
+
+  // This type marks the case where something completed with a cancelation.
+  struct done {};
+
+  // This type marks the case where something completed with an error.
+  // It holds on to the specific error.
+  template<typename Error>
+  struct error {
+    Error error;
+  };
+
+  template<sender Sender, receiver Receiver, typename Alloc>
+  class opstate
+  : operation_state_base_
+  {
+    private:
+    template<typename T>
+    using rebind_alloc = typename std::allocator_traits<Alloc>::template rebind_alloc<T>;
+    using size_type = typename std::allocator_traits<Alloc>::size_type;
+
+    class accepting_receiver {
+      public:
+      explicit accepting_receiver(opstate& state, size_type idx)
+      : state(state),
+        idx(idx)
+      {}
+
+      accepting_receiver(accepting_receiver&&) noexcept = default;
+      accepting_receiver(const accepting_receiver&) = delete;
+
+      template<typename... Args>
+      friend auto tag_invoke([[maybe_unused]] set_value_t tag, accepting_receiver&& self, Args&&... args) -> void {
+        construct_element_at(self.state.nested[self.idx].value, self.state.raw_storage.get() + self.idx, std::forward<Args>(args)...);
+        self.state.mark_done();
+      }
+
+      friend auto tag_invoke([[maybe_unused]] set_done_t tag, accepting_receiver&& self) noexcept -> void {
+        { // If there hasn't been any marking of the completion, then mark as done.
+          std::lock_guard lck{self.state.completion_mtx};
+          if (std::holds_alternative<std::monostate>(self.state.completion))
+            self.state.completion.template emplace<done>();
+        }
+        self.state.cancelation.request_stop();
+        self.state.mark_done();
+      }
+
+      template<typename Error>
+      friend auto tag_invoke([[maybe_unused]] set_error_t tag, accepting_receiver&& self, Error&& err) noexcept -> void {
+        { // If there hasn't been any marking of the completion, then mark as errored.
+          std::lock_guard lck{self.state.completion_mtx};
+          if (std::holds_alternative<std::monostate>(self.state.completion))
+            self.state.completion.template emplace<error<std::remove_cvref_t<Error>>>(std::forward<Error>(err));
+        }
+        self.state.cancelation.request_stop();
+        self.state.mark_done();
+      }
+
+      friend auto tag_invoke([[maybe_unused]] get_stop_token_t tag, const accepting_receiver& self) noexcept {
+        return self.state.cancelation.get_token();
+      }
+
+      template<typename Tag, typename... Args>
+      requires (!(std::same_as<Tag, set_value_t> || std::same_as<Tag, set_error_t> || std::same_as<Tag, set_done_t> || std::same_as<Tag, get_stop_token_t>))
+      friend auto tag_invoke(Tag tag, const accepting_receiver& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, const Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, const Receiver&, Args...> {
+        return tag_invoke(tag, self.get_receiver(), std::forward<Args>(args)...);
+      }
+
+      template<typename Tag, typename... Args>
+      requires (!(std::same_as<Tag, set_value_t> || std::same_as<Tag, set_error_t> || std::same_as<Tag, set_done_t> || std::same_as<Tag, get_stop_token_t>))
+      friend auto tag_invoke(Tag tag, accepting_receiver& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver&, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver&, Args...> {
+        return tag_invoke(tag, self.get_receiver(), std::forward<Args>(args)...);
+      }
+
+      template<typename Tag, typename... Args>
+      requires (!(std::same_as<Tag, set_value_t> || std::same_as<Tag, set_error_t> || std::same_as<Tag, set_done_t> || std::same_as<Tag, get_stop_token_t>))
+      friend auto tag_invoke(Tag tag, accepting_receiver&& self, Args&&... args)
+      noexcept(nothrow_tag_invocable<Tag, Receiver&&, Args...>)
+      -> tag_invoke_result_t<Tag, Receiver&&, Args...> {
+        return tag_invoke(tag, std::move(self).get_receiver(), std::forward<Args>(args)...);
+      }
+
+      private:
+      auto get_receiver() const & noexcept -> const Receiver&;
+      auto get_receiver() & noexcept -> Receiver&;
+      auto get_receiver() && noexcept -> Receiver&&;
+
+      opstate& state;
+      size_type idx;
+    };
+
+    static auto receiver_stoptoken_cascade_fn(gsl::not_null<in_place_stop_source*> cancelation) {
+      return [cancelation]() noexcept -> void { cancelation->request_stop(); };
+    }
+
+    using element_type = typename sender_traits<Sender>::template value_types<type_identity_t, type_identity_t>;
+    using receiver_stoptoken_callback_type = std::remove_cvref_t<std::invoke_result_t<get_stop_token_t, const Receiver&>>::template callback_type<decltype(receiver_stoptoken_cascade_fn(std::declval<in_place_stop_source*>()))>;
+    using nested_opstate = std::invoke_result_t<connect_t, Sender, accepting_receiver>;
+
+    struct nested_state_with_value {
+      explicit nested_state_with_value(Alloc alloc)
+      : value(nullptr, non_freeing_destructor<element_type, rebind_alloc<element_type>>(alloc))
+      {}
+
+      optional_operation_state_<nested_opstate> state;
+      std::unique_ptr<element_type, non_freeing_destructor<element_type, rebind_alloc<element_type>>> value;
+    };
+
+    public:
+    opstate(std::vector<Sender>&& sr, Receiver&& r, Alloc alloc)
+    : raw_storage(allocate_raw_storage<element_type, rebind_alloc<element_type>>(alloc, sr.size())),
+      r(std::move(r)),
+      waiting(sr.size()),
+      cancelation(),
+      nested(alloc),
+      stop_cascader(get_stop_token(this->r), receiver_stoptoken_cascade_fn(&this->cancelation))
+    {
+      // Allocate space for nested operation-states.
+      nested.assign_emplace_n(sr.size(), alloc);
+
+      // Fill in the operation states.
+      auto sr_iter = sr.begin();
+      auto sr_end = sr.end();
+      auto nested_iter = nested.begin();
+      typename std::allocator_traits<Alloc>::size_type idx = 0;
+      while (sr_iter != sr_end) {
+        assert(nested_iter != nested.end());
+        nested_iter->state.emplace(std::move(*sr_iter), accepting_receiver(*this, idx));
+
+        ++sr_iter;
+        ++nested_iter;
+        ++idx;
+      }
+      assert(nested_iter == nested.end());
+    }
+
+    friend auto tag_invoke([[maybe_unused]] start_t start, opstate& self) noexcept -> void {
+      if (self.nested.empty()) {
+        self.cascade();
+      } else {
+        std::for_each(
+            self.nested.begin(), self.nested.end(),
+            [](auto& sn) {
+              execution::start(*sn.state);
+            });
+      }
+    }
+
+    private:
+    auto mark_done() noexcept -> void {
+      const auto old_waiting = waiting.fetch_sub(1u);
+      assert(old_waiting > 0u);
+      if (old_waiting == 1u) cascade();
+    }
+
+    // Fill in the accumulated values into an outcome.
+    auto populate_outcome(fixed_vector<element_type, rebind_alloc<element_type>>& outcome) noexcept -> void {
+      assert(std::holds_alternative<std::monostate>(completion));
+      assert(waiting == 0u);
+
+      // This must never throw.
+      // Because if it does, we would end up in a state where lifetime of objects is managed by both outcome and the unique-pointers.
+      assign_raw_storage(outcome, std::move(raw_storage));
+      std::ranges::for_each(nested, [](nested_state_with_value& state) { state.value.release(); });
+    }
+
+    auto cascade() noexcept -> void {
+      // We have to decide based on the completion variant.
+      // Note that we don't require to lock the mutex, because all receivers have completed.
+      std::visit(
+          overload(
+              [this]([[maybe_unused]] std::monostate x) -> void {
+                try {
+                  fixed_vector<element_type, rebind_alloc<element_type>> outcome(this->raw_storage.get_deleter().alloc); // May throw.
+                  this->populate_outcome(outcome);
+                  execution::set_value(std::move(this->r), std::move(outcome));
+                } catch (...) {
+                  execution::set_error(std::move(this->r), std::current_exception());
+                }
+              },
+              [this]([[maybe_unused]] done x) -> void {
+                execution::set_done(std::move(this->r));
+              },
+              [this]<typename Error>([[maybe_unused]] error<Error> x) -> void {
+                execution::set_error(std::move(this->r), std::move(x.error));
+              }),
+          std::move(this->completion));
+    }
+
+    std::unique_ptr<element_type, storage_deleter<element_type, rebind_alloc<element_type>>> raw_storage;
+    Receiver r;
+    std::atomic<std::size_t> waiting;
+    in_place_stop_source cancelation;
+
+    // For errors and cancelation, we record the first occurance.
+    using completion_variant = _type_appender<std::monostate, done>
+        ::merge<typename sender_traits<Sender>::template error_types<_type_appender>::template transform<error>> // One `error<xxx>` for each error type.
+        ::template type<std::variant>;
+    std::mutex completion_mtx;
+    completion_variant completion;
+
+    fixed_vector<nested_state_with_value, rebind_alloc<nested_state_with_value>> nested;
+
+    // Stop tokens are cascaded.
+    receiver_stoptoken_callback_type stop_cascader;
+  };
+
+  template<sender Sender, typename Alloc>
+  class sender_impl {
+    private:
+    template<typename T>
+    using rebind_alloc = typename std::allocator_traits<Alloc>::template rebind_alloc<T>;
+    using element_type = typename sender_traits<Sender>::template value_types<type_identity_t, type_identity_t>;
+
+    public:
+    template<template<typename...> class Tuple, template<typename...> class Variant>
+    using value_types = Variant<Tuple<fixed_vector<element_type, rebind_alloc<element_type>>>>;
+    template<template<typename...> class Variant>
+    using error_types = typename sender_traits<Sender>::template error_types<Variant>;
+    static inline constexpr bool sends_done = sender_traits<Sender>::sends_done;
+
+    template<std::ranges::range SenderRange>
+    explicit sender_impl(SenderRange&& sr, Alloc alloc)
+    : senders(alloc)
+    {
+      std::ranges::copy(std::forward<SenderRange>(sr), std::back_inserter(senders));
+    }
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t connect, sender_impl&& self, Receiver&& r) -> operation_state auto {
+      Alloc alloc = self.senders.get_allocator();
+      return opstate<Sender, std::remove_cvref_t<Receiver>, Alloc>(std::move(self.senders), std::forward<Receiver>(r), alloc);
+    }
+
+    private:
+    std::vector<Sender, rebind_alloc<Sender>> senders;
+  };
+
+  public:
+  template<std::ranges::range SenderRange, typename Alloc = std::allocator<std::byte>>
+  requires typed_sender<std::ranges::range_value_t<SenderRange>> &&
+      // Must have 1 value type.
+      (std::variant_size_v<typename sender_traits<std::ranges::range_value_t<SenderRange>>::template value_types<std::tuple, std::variant>> == 1) &&
+      // Value-type must have a single value.
+      (std::tuple_size_v<typename sender_traits<std::ranges::range_value_t<SenderRange>>::template value_types<std::tuple, std::type_identity_t>> == 1)
+  auto operator()(SenderRange&& sr, Alloc alloc = Alloc{}) const -> typed_sender auto {
+    return sender_impl<std::ranges::range_value_t<SenderRange>, Alloc>(std::forward<SenderRange>(sr), alloc);
+  }
+};
+inline constexpr gather_t gather{};
+
+template<sender Sender, receiver Receiver, typename Alloc>
+inline auto gather_t::opstate<Sender, Receiver, Alloc>::accepting_receiver::get_receiver() const & noexcept -> const Receiver& {
+  return state.r;
+}
+
+template<sender Sender, receiver Receiver, typename Alloc>
+inline auto gather_t::opstate<Sender, Receiver, Alloc>::accepting_receiver::get_receiver() & noexcept -> Receiver& {
+  return state.r;
+}
+
+template<sender Sender, receiver Receiver, typename Alloc>
+inline auto gather_t::opstate<Sender, Receiver, Alloc>::accepting_receiver::get_receiver() && noexcept -> Receiver&& {
+  return std::move(state.r);
 }
 
 

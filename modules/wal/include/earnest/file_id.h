@@ -26,9 +26,24 @@ struct file_id {
     filename(alloc)
   {}
 
+  file_id(const file_id& y, allocator_type alloc)
+  : ns(y.ns, alloc),
+    filename(y.filename, alloc)
+  {}
+
+  file_id(file_id&& y, allocator_type alloc) noexcept(std::is_nothrow_constructible_v<std::string, std::string, allocator_type>)
+  : ns(std::move(y.ns), alloc),
+    filename(std::move(y.filename), alloc)
+  {}
+
   file_id(std::string ns, std::string filename) noexcept
   : ns(std::move(ns)),
     filename(std::move(filename))
+  {}
+
+  file_id(std::string ns, std::string filename, allocator_type alloc) noexcept
+  : ns(std::move(ns), alloc),
+    filename(std::move(filename), alloc)
   {}
 
   auto get_allocator() const -> allocator_type { return ns.get_allocator(); }

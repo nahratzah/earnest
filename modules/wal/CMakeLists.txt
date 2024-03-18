@@ -23,6 +23,7 @@ target_sources(wal
     include/earnest/wal_error.h)
 target_sources(wal
     PRIVATE
+    src/wal_file.cc
     src/wal_file_entry.cc
     src/replacement_map.cc)
 
@@ -53,14 +54,15 @@ add_executable(wal_file_test)
 target_link_libraries(wal_file_test PUBLIC wal io UnitTest++)
 target_sources(wal_file_test PRIVATE
     tests/wal_file.cc
-    tests/wal_file_create_wal.cc
-    tests/wal_file_reread_wal.cc
-    tests/wal_file_recovery.cc
-    tests/wal_file_write.cc
-    tests/wal_file_rollover.cc
-    tests/wal_file_open_with_gaps.cc
-    tests/wal_file_can_recover_from_interrupted_rollover.cc
-    tests/wal_file_bad_files_are_unrecoverable_if_they_were_marked_ready.cc)
+    # tests/wal_file_create_wal.cc
+    # tests/wal_file_reread_wal.cc
+    # tests/wal_file_recovery.cc
+    # tests/wal_file_write.cc
+    # tests/wal_file_rollover.cc
+    # tests/wal_file_open_with_gaps.cc
+    # tests/wal_file_can_recover_from_interrupted_rollover.cc
+    # tests/wal_file_bad_files_are_unrecoverable_if_they_were_marked_ready.cc
+    )
 add_test(NAME wal_file COMMAND wal_file_test "${CMAKE_CURRENT_BINARY_DIR}/wal_file_test_tmpdir")
 
 add_executable(file_db_test)

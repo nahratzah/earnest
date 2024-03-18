@@ -104,7 +104,8 @@ class strand {
       }
     }
 
-    auto lock() -> void {
+    private:
+    auto block_(std::unique_lock<std::mutex>& lck) -> void {
       struct lock_state_t {
         std::mutex& mtx;
         std::condition_variable cond_var;
@@ -121,7 +122,6 @@ class strand {
         }
       };
 
-      std::unique_lock lck{mtx};
       if (!engaged) {
         engaged = true;
         active_thread_ = std::this_thread::get_id();
@@ -142,6 +142,17 @@ class strand {
 
       lock_state.wait(lck);
       assert(engaged);
+    }
+
+    public:
+    auto block() -> void {
+      std::unique_lock lck{mtx};
+      block_(lck);
+    }
+
+    auto lock() -> void {
+      std::unique_lock lck{mtx};
+      block_(lck);
       active_thread_ = std::this_thread::get_id();
     }
 
@@ -485,6 +496,126 @@ class strand {
     s->unlock();
   }
 
+  private:
+  template<typed_sender Sender, receiver Receiver>
+  class wrap_opstate
+  : operation_state_base_
+  {
+    private:
+    // This receiver is responsible for releasing the strand.
+    class release_receiver
+    : public _generic_receiver_wrapper<_generic_rawptr_receiver<Receiver>, set_value_t, set_error_t, set_done_t>
+    {
+      public:
+      release_receiver(_generic_rawptr_receiver<Receiver>&& r, state_ptr sptr)
+      : _generic_receiver_wrapper<_generic_rawptr_receiver<Receiver>, set_value_t, set_error_t, set_done_t>(std::move(r)),
+        sptr(sptr)
+      {}
+
+      template<typename... Args>
+      friend auto tag_invoke(set_value_t set_value, release_receiver&& self, Args&&... args) noexcept -> void {
+        self.sptr->release();
+        try {
+          set_value(std::move(self.r), std::forward<Args>(args)...);
+        } catch (...) { // We must handle the exception here, otherwise we would double-release the strand.
+          execution::set_error(std::move(self.r), std::current_exception());
+        }
+      }
+
+      template<typename Error>
+      friend auto tag_invoke(set_error_t set_error, release_receiver&& self, Error&& error) noexcept -> void {
+        self.sptr->release();
+        set_error(std::move(self.r), std::forward<Error>(error));
+      }
+
+      friend auto tag_invoke(set_done_t set_done, release_receiver&& self) noexcept -> void {
+        self.sptr->release();
+        set_done(std::move(self.r));
+      }
+
+      private:
+      state_ptr sptr;
+    };
+
+    static auto create_nested_opstate(Sender&& s, Receiver& r, state_ptr sptr) {
+      return execution::connect(
+          // We need to call mark_running, before letting sender `s` take over.
+          just(sptr, std::move(s))
+          | lazy_let_value(
+              [](const state_ptr& sptr, Sender& s) -> Sender {
+                sptr->mark_running(); // Never throws.
+                return std::move(s);
+              }),
+          // And once sender `s` completes, we need to release the strand, prior to handing control to the real receiver.
+          release_receiver(_generic_rawptr_receiver(&r), sptr));
+    }
+    using nested_opstate_type = decltype(create_nested_opstate(std::declval<Sender>(), std::declval<Receiver&>(), std::declval<state_ptr>()));
+
+    public:
+    wrap_opstate(Sender&& s, Receiver&& r, state_ptr sptr)
+    : r(std::move(r)),
+      sptr(sptr),
+      nested_opstate(create_nested_opstate(std::move(s), this->r, sptr))
+    {}
+
+    friend auto tag_invoke([[maybe_unused]] start_t start, wrap_opstate& self) noexcept -> void {
+      try {
+        if (self.scheduler_may_block()) {
+          self.sptr->block();
+          start(self.nested_opstate); // Never throws.
+        } else {
+          self.sptr->run_or_enqueue(
+              entry{
+                .cb=[](void* self_vptr) noexcept -> void {
+                  const auto self_ptr = static_cast<wrap_opstate*>(self_vptr);
+                  execution::start(self_ptr->nested_opstate);
+                },
+                .ptr=&self,
+              });
+        }
+      } catch (...) { // If we fail to start the nested receiver, we'll propagate the exception.
+        execution::set_error(std::move(self.r), std::current_exception()); // Never throws.
+      }
+    }
+
+    private:
+    auto scheduler_may_block() const -> bool {
+      if constexpr(requires { execution::get_scheduler(r); })
+        return execution::execute_may_block_caller(execution::get_scheduler(r));
+      else // If there's no scheduler, start(nested_opstate) will always block.
+        return true;
+    }
+
+    Receiver r;
+    state_ptr sptr;
+    nested_opstate_type nested_opstate;
+  };
+
+  template<typed_sender Sender>
+  class wrap_sender_impl
+  : public _generic_sender_wrapper<wrap_sender_impl<Sender>, Sender, connect_t>
+  {
+    public:
+    wrap_sender_impl(Sender&& s, state_ptr sptr)
+    : _generic_sender_wrapper<wrap_sender_impl<Sender>, Sender, connect_t>(std::move(s)),
+      sptr(sptr)
+    {}
+
+    template<receiver Receiver>
+    friend auto tag_invoke([[maybe_unused]] connect_t connect, wrap_sender_impl&& self, Receiver&& r) -> operation_state auto {
+      return wrap_opstate<Sender, std::remove_cvref_t<Receiver>>(std::move(self.s), std::forward<Receiver>(r), self.sptr);
+    }
+
+    private:
+    state_ptr sptr;
+  };
+
+  public:
+  template<typed_sender Sender>
+  auto wrap(Sender&& s) const -> typed_sender auto {
+    return wrap_sender_impl<std::remove_cvref_t<Sender>>(std::forward<Sender>(s), this->s);
+  }
+
   // Adapt an existing scheduler, so that its scheduled tasks run on this strand.
   template<execution::scheduler UnderlyingSched>
   auto scheduler(UnderlyingSched&& underlying_sched) const
@@ -601,6 +732,9 @@ struct not_on_strand_t {
     {}
 
     template<receiver Receiver>
+    requires (
+        is_strand_<tag_invoke_result_t<get_scheduler_t, const std::remove_cvref_t<Receiver>&>>::value ||
+        is_strand_bound_scheduler_<tag_invoke_result_t<get_scheduler_t, const std::remove_cvref_t<Receiver>&>>::value)
     friend auto tag_invoke(connect_t connect, sender_impl&& self, Receiver&& r) {
       static_assert(std::invocable<get_scheduler_t, std::remove_reference_t<Receiver>&>,
           "receiver must have a scheduler");

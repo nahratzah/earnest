@@ -1,5 +1,7 @@
 #include <earnest/detail/wal_file_entry.h>
 
+#include <earnest/detail/overload.h>
+
 namespace earnest::detail {
 
 
@@ -40,6 +42,10 @@ class wal_file_entry_file::prepared_space {
 
   auto size() const noexcept -> std::size_t {
     return write_len;
+  }
+
+  auto end_offset() const noexcept -> offset_type {
+    return offset() + size() + 4u;
   }
 
   auto get_new_link() const -> link_sender {
@@ -400,7 +406,7 @@ auto wal_file_entry::open(dir d, std::filesystem::path name, allocator_type allo
   using namespace execution;
   using pos_stream = positional_stream_adapter<fd_type&>;
 
-  return just(get_wal_logger(), d, name, alloc)
+  return just(get_wal_entry_logger(), d, name, alloc)
   | lazy_observe_value(
       [](
           const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
@@ -532,7 +538,7 @@ auto wal_file_entry::create(dir d, const std::filesystem::path& name, std::uint_
   using namespace execution;
   using pos_stream = positional_stream_adapter<fd_type&>;
 
-  return just(get_wal_logger(), d, name, sequence, alloc)
+  return just(get_wal_entry_logger(), d, name, sequence, alloc)
   | lazy_observe_value(
       [](
           const gsl::not_null<std::shared_ptr<spdlog::logger>>& logger,
@@ -916,7 +922,7 @@ auto wal_file_entry::append(
     typename wal_file_entry_file::callback transaction_validation,
     earnest::move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>, false>(records_vector)> on_successful_write_callback,
     bool delay_flush)
--> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> {
+-> execution::type_erased_sender<std::variant<std::tuple<append_operation>>, std::variant<std::exception_ptr, std::error_code>> {
   using namespace execution;
 
   gsl::not_null<std::shared_ptr<wal_file_entry>> wf = this->shared_from_this();
@@ -938,37 +944,44 @@ auto wal_file_entry::append(
             std::unreachable();
 #endif
           })
-      | let_variant(
-          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& records,
-              bool delay_flush, auto& transaction_validation, auto& on_successful_write_callback) {
+      | lazy_then(
+          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t&& records,
+              bool delay_flush, auto&& transaction_validation, auto&& on_successful_write_callback) -> append_operation {
             auto space = wf->file.prepare_space(
                 std::shared_ptr<wal_file_entry_file>(wf.get(), &wf->file),
                 wf->strand_,
                 std::as_const(records).bytes().size());
+            auto file_size = space.end_offset();
 
-            // Durable writes are "immediate", meaning the sender-chain is linked to the write-to-disk operation completing.
-            //
-            // Note that durable-append takes the records by reference, since it yields only a single chain, and thus can be guaranteed
-            // the records remain valid for the duration of the chain.
-            auto immediate = [&]() {
-              assert(delay_flush == false);
-              return durable_append_(wf, std::move(records), std::move(transaction_validation), std::move(on_successful_write_callback), std::move(space));
-            };
-
-            // Non-durable writes are "deferred", meaning the sender-chain only writes the operation to memory,
-            // deferring the write-to-disk operation.
-            // Deferred operations are a lot faster, because they don't require flush-to-disk.
-            // But they can be lost during failure.
-            auto deferred = [&]() {
-              assert(delay_flush == true);
-              return non_durable_append_(wf, std::move(records), std::move(transaction_validation), std::move(on_successful_write_callback), std::move(space));
-            };
-
-            using variant_type = std::variant<decltype(immediate()), decltype(deferred())>;
-            if (delay_flush)
-              return variant_type(deferred());
-            else
-              return variant_type(immediate());
+            if (delay_flush) {
+              // Non-durable writes are "deferred", meaning the sender-chain only writes the operation to memory,
+              // deferring the write-to-disk operation.
+              // Deferred operations are a lot faster, because they don't require flush-to-disk.
+              // But they can be lost during failure.
+              return append_operation(
+                  on(
+                      wf->strand_,
+                      non_durable_append_(
+                          wf, std::move(records),
+                          std::move(transaction_validation),
+                          std::move(on_successful_write_callback),
+                          std::move(space))),
+                  file_size);
+            } else {
+              // Durable writes are "immediate", meaning the sender-chain is linked to the write-to-disk operation completing.
+              //
+              // Note that durable-append takes the records by reference, since it yields only a single chain, and thus can be guaranteed
+              // the records remain valid for the duration of the chain.
+              return append_operation(
+                  on(
+                      wf->strand_,
+                      durable_append_(
+                          wf, std::move(records),
+                          std::move(transaction_validation),
+                          std::move(on_successful_write_callback),
+                          std::move(space))),
+                  file_size);
+            }
           }));
 }
 
@@ -1031,17 +1044,18 @@ auto wal_file_entry::seal()
           }));
 }
 
-auto wal_file_entry::discard_all(write_records_buffer_t instead)
+auto wal_file_entry::discard_all(write_records_buffer_t instead, bool seal)
 -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> {
   using namespace execution;
 
   gsl::not_null<std::shared_ptr<wal_file_entry>> wf = this->shared_from_this();
-  instead.push_back(wal_record_seal{});
+  if (seal) instead.push_back(wal_record_seal{});
+  if (instead.empty()) instead.push_back(wal_record_noop{});
   return on(
       strand_,
-      just(wf, std::move(instead))
+      just(wf, std::move(instead), seal)
       | lazy_validation(
-          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, [[maybe_unused]] const write_records_buffer_t& instead) -> std::optional<std::error_code> {
+          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, [[maybe_unused]] const write_records_buffer_t& instead, [[maybe_unused]] bool seal) -> std::optional<std::error_code> {
             assert(wf->strand_.running_in_this_thread());
 
             if (!wf->unwritten_data.empty()) throw std::logic_error("cannot call discard all on an in-use file");
@@ -1051,14 +1065,14 @@ auto wal_file_entry::discard_all(write_records_buffer_t instead)
             return std::nullopt;
           })
       | lazy_let_value(
-          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& instead) {
+          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& instead, bool seal) {
             gsl::not_null<std::shared_ptr<wal_file_entry_file>> wff = std::shared_ptr<wal_file_entry_file>(wf.get(), &wf->file);
             return wal_file_entry_file::discard_all(wff, wf->strand_)
-            | then([wf, &instead]() mutable { return std::make_tuple(wf, std::move(instead)); })
+            | then([wf, &instead, seal]() mutable { return std::make_tuple(wf, std::move(instead), seal); })
             | explode_tuple();
           })
       | lazy_let_value(
-          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& instead) {
+          [](gsl::not_null<std::shared_ptr<wal_file_entry>> wf, write_records_buffer_t& instead, bool seal) {
             auto space = wf->file.prepare_space(
                 std::shared_ptr<wal_file_entry_file>(wf.get(), &wf->file),
                 wf->strand_,
@@ -1081,7 +1095,7 @@ auto wal_file_entry::discard_all(write_records_buffer_t instead)
                   return std::nullopt;
                 });
 
-            wf->state_ = wal_file_entry_state::sealing;
+            if (seal) wf->state_ = wal_file_entry_state::sealing;
             return sender_chain;
           }));
 }

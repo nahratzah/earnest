@@ -18,17 +18,16 @@
 
 #include <earnest/detail/buffered_readstream_adapter.h>
 #include <earnest/detail/byte_stream.h>
-#include <earnest/detail/move_only_function.h>
-#include <earnest/detail/overload.h>
+#include <earnest/detail/logger.h>
 #include <earnest/detail/positional_stream_adapter.h>
 #include <earnest/detail/prom_allocator.h>
 #include <earnest/detail/wal_flusher.h>
-#include <earnest/detail/wal_logger.h>
 #include <earnest/detail/wal_records.h>
 #include <earnest/dir.h>
 #include <earnest/execution.h>
 #include <earnest/execution_util.h>
 #include <earnest/fd.h>
+#include <earnest/move_only_function.h>
 #include <earnest/strand.h>
 #include <earnest/wal_error.h>
 #include <earnest/xdr_v2.h>
@@ -120,6 +119,10 @@ class write_records_buffer {
   auto push_back(const Record& v) -> void;
   template<std::ranges::input_range Range>
   auto push_back_range(Range&& range) -> void;
+
+  auto empty() const noexcept -> bool {
+    return records_.empty();
+  }
 
   auto bytes() const & noexcept -> const byte_vector& {
     return bytes_.data();
@@ -621,7 +624,8 @@ class wal_file_entry_unwritten_data {
 
 
 class wal_file_entry
-: public std::enable_shared_from_this<wal_file_entry>
+: public std::enable_shared_from_this<wal_file_entry>,
+  with_logger
 {
   friend wal_file_entry_file; // Needs access to xdr_header_tuple and related types.
 
@@ -677,7 +681,8 @@ class wal_file_entry
 
   public:
   wal_file_entry(fd_type fd, std::filesystem::path name, xdr_header_tuple hdr, execution::io::offset_type end_offset, link_sender link, bool sealed, gsl::not_null<std::shared_ptr<spdlog::logger>> logger, allocator_type alloc)
-  : name(name),
+  : with_logger(logger),
+    name(name),
     version(std::get<0>(hdr)),
     sequence(std::get<1>(hdr)),
     alloc_(alloc),
@@ -685,8 +690,7 @@ class wal_file_entry
     file(std::move(fd), end_offset, link, alloc),
     unwritten_data(alloc),
     fake_link(link),
-    strand_(alloc),
-    logger(logger)
+    strand_(alloc)
   {}
 
   wal_file_entry(const wal_file_entry&) = delete;
@@ -695,6 +699,11 @@ class wal_file_entry
   wal_file_entry& operator=(wal_file_entry&&) = delete;
 
   auto get_allocator() const -> allocator_type { return alloc_; }
+
+  auto close() -> void {
+    std::lock_guard lck{strand_};
+    file.close();
+  }
 
   auto state() const noexcept -> wal_file_entry_state {
     std::lock_guard lck{strand_};
@@ -764,20 +773,43 @@ class wal_file_entry
   -> execution::sender_of<> auto;
 
   public:
+  class append_operation {
+    public:
+    explicit append_operation(
+        execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> sender_impl,
+        execution::io::offset_type file_size)
+    : sender_impl(std::move(sender_impl)),
+      file_size(file_size)
+    {}
+
+    append_operation(const append_operation&) = delete;
+    append_operation(append_operation&&) noexcept = default;
+
+    auto operator()() && -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>&& {
+      return std::move(sender_impl);
+    }
+
+    private:
+    execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>> sender_impl;
+
+    public:
+    execution::io::offset_type file_size;
+  };
+
   [[nodiscard]]
   auto append(
       write_records_buffer_t records,
       typename wal_file_entry_file::callback transaction_validation = nullptr,
       earnest::move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>, false>(records_vector)> on_successful_write_callback = nullptr,
       bool delay_flush = false)
-  -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
+  -> execution::type_erased_sender<std::variant<std::tuple<append_operation>>, std::variant<std::exception_ptr, std::error_code>>;
 
   [[nodiscard]]
   auto seal()
   -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
 
   [[nodiscard]]
-  auto discard_all(write_records_buffer_t instead = write_records_buffer_t{})
+  auto discard_all(write_records_buffer_t instead = write_records_buffer_t{}, bool seal = true)
   -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
 
   auto end_offset() const noexcept {
@@ -884,7 +916,27 @@ class wal_file_entry
   link_sender fake_link;
   mutable execution::strand<allocator_type> strand_;
 
-  const gsl::not_null<std::shared_ptr<spdlog::logger>> logger;
+  // Wal-file needs some data.
+  // In order to not require two allocations, we embed it here.
+  // But we only provide it, we don't manage it.
+  struct wal_file_data_ {
+    std::size_t locks = 0; // Number of transactions depending on this file.
+    std::size_t read_locks = 0; // Number of transactions depending on being able to read this file.
+    bool rollover_running = false; // If set, a rollover task is running on this file.
+    bool post_processing_done = false; // If set, the file has had its post-processing done.
+
+    // Successor data.
+    // Used half-way a rollover operation.
+    std::optional<
+        std::tuple<
+            gsl::not_null<std::shared_ptr<wal_file_entry>>,
+            execution::late_binding_t<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>::acceptor
+            >
+        > successor;
+  };
+
+  public:
+  wal_file_data_ wal_file_data;
 };
 
 struct wal_file_entry::xdr_header_invocation {

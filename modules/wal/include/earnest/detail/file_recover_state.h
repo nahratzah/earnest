@@ -3,14 +3,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string_view>
 #include <system_error>
 #include <utility>
 
-#include <spdlog/spdlog.h>
-
-#include <earnest/detail/fdb_logger.h>
+#include <earnest/detail/logger.h>
 #include <earnest/detail/replacement_map.h>
 #include <earnest/detail/wal_records.h>
 #include <earnest/file_db_error.h>
@@ -18,13 +17,31 @@
 namespace earnest::detail {
 
 
-template<typename FD, typename Allocator>
-struct file_recover_state {
-  using fd_type = FD;
+template<typename Allocator = std::allocator<std::byte>>
+struct file_recover_state
+: private with_logger
+{
   using allocator_type = Allocator;
 
   explicit file_recover_state(allocator_type alloc = allocator_type())
-  : replacements(std::move(alloc))
+  : with_logger(get_file_recover_state_logger()),
+    replacements(alloc)
+  {}
+
+  file_recover_state(const file_recover_state& y, allocator_type alloc)
+  : with_logger(y),
+    replacements(y.replacements, alloc),
+    exists(y.exists),
+    file_size(y.file_size),
+    omit_reads(y.omit_reads)
+  {}
+
+  file_recover_state(file_recover_state&& y, allocator_type alloc)
+  : with_logger(y.logger),
+    replacements(std::move(y.replacements), alloc),
+    exists(std::move(y.exists)),
+    file_size(std::move(y.file_size)),
+    omit_reads(std::move(y.omit_reads))
   {}
 
   auto apply(const wal_record_create_file& record) -> std::error_code {
@@ -63,8 +80,7 @@ struct file_recover_state {
     return {};
   }
 
-  template<typename E, typename R>
-  auto apply(const wal_record_modify_file32<E, R>& record) -> std::error_code {
+  auto apply(const wal_record_modify_file32& record) -> std::error_code {
     if (!exists.has_value()) exists = true;
     if (!exists.value()) [[unlikely]] {
       logger->error("{}: file doesn't exist, but has logs of written data", record.file);
@@ -83,13 +99,10 @@ struct file_recover_state {
     return {};
   }
 
-  replacement_map<fd_type, allocator_type> replacements;
+  replacement_map<allocator_type> replacements;
   std::optional<bool> exists = std::nullopt;
   std::optional<std::uint64_t> file_size = std::nullopt;
   bool omit_reads = false;
-
-  private:
-  const std::shared_ptr<spdlog::logger> logger = get_file_recover_state_logger();
 };
 
 

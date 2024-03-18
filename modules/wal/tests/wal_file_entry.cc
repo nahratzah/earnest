@@ -147,7 +147,8 @@ TEST(durable_append_wal_file_entry) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK_EQUAL(60u, f->end_offset());
   CHECK_EQUAL(56u, f->link_offset());
@@ -204,7 +205,8 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
             CHECK(!tx_validator_called);
             tx_validator_called = true;
             return earnest::execution::just();
-          }));
+          })
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
   // Confirm we can do another write after.
   earnest::execution::sync_wait(
       f->append(
@@ -212,7 +214,8 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK(tx_validator_called);
   CHECK_EQUAL(60u, f->end_offset());
@@ -272,7 +275,8 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation) {
                 CHECK(!tx_validator_called);
                 tx_validator_called = true;
                 throw error{};
-              })),
+              })
+          | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); })),
       error);
   // Confirm we can do another write after.
   earnest::execution::sync_wait(
@@ -281,7 +285,8 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK(tx_validator_called);
   CHECK_EQUAL(60u, f->end_offset());
@@ -329,7 +334,8 @@ TEST(durable_append_wal_file_entry_callback) {
             CHECK(wal_record_skip32{0} == std::get<wal_record_skip32>(records.at(2)));
             callback_called = true;
             return earnest::execution::just();
-          }));
+          })
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK(callback_called);
   CHECK_EQUAL(60u, f->end_offset());
@@ -395,7 +401,8 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
             CHECK(wal_record_skip32{8} == std::get<wal_record_skip32>(records.at(1)));
             callback_called = true;
             return earnest::execution::just();
-          }));
+          })
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
   // Confirm we can do another write after.
   earnest::execution::sync_wait(
       f->append(
@@ -403,7 +410,8 @@ TEST(durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK(tx_validator_called);
   CHECK(callback_called);
@@ -469,7 +477,8 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
               [&callback_called]([[maybe_unused]] const auto& records) {
                 callback_called = true;
                 return earnest::execution::just();
-              })),
+              })
+          | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); })),
       error);
   // Confirm we can do another write after.
   earnest::execution::sync_wait(
@@ -478,7 +487,8 @@ TEST(durable_append_wal_file_entry_with_failing_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK(tx_validator_called);
   CHECK(!callback_called);
@@ -521,6 +531,7 @@ TEST(non_durable_append_wal_file_entry) {
           nullptr,
           nullptr,
           true)
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); })
       | earnest::execution::let_value([f]() { return f->records(); })
       | earnest::execution::observe_value(
           [](const auto& records) {
@@ -566,6 +577,7 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
           },
           nullptr,
           true)
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); })
       | earnest::execution::let_value([f]() { return f->records(); })
       | earnest::execution::observe_value(
           [](const auto& records) {
@@ -585,7 +597,8 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK(tx_validator_called);
 
@@ -632,7 +645,8 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
                 throw error{};
               },
               nullptr,
-              true)),
+              true)
+          | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); })),
       error);
   // Confirm we can do another write after.
   earnest::execution::sync_wait(
@@ -641,7 +655,8 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK(tx_validator_called);
 
@@ -689,6 +704,7 @@ TEST(non_durable_append_wal_file_entry_callback) {
             return earnest::execution::just();
           },
           true)
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); })
       | earnest::execution::let_value([f]() { return f->records(); })
       | earnest::execution::observe_value(
           [](const auto& records) {
@@ -756,6 +772,7 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
             return earnest::execution::just();
           },
           true)
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); })
       | earnest::execution::let_value([f]() { return f->records(); })
       | earnest::execution::observe_value(
           [](const auto& records) {
@@ -775,7 +792,8 @@ TEST(non_durable_append_wal_file_entry_with_succeeding_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK(tx_validator_called);
   CHECK(callback_called);
@@ -842,7 +860,8 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
                 callback_called = true;
                 return earnest::execution::just();
               },
-              true)),
+              true)
+          | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); })),
       error);
   // Confirm we can do another write after.
   earnest::execution::sync_wait(
@@ -851,7 +870,8 @@ TEST(non_durable_append_wal_file_entry_with_failing_txvalidation_callback) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   CHECK(tx_validator_called);
   CHECK(!callback_called);
@@ -889,7 +909,8 @@ TEST(seal_wal_file_entry) {
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
               },
-              f->get_allocator())));
+              f->get_allocator()))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   earnest::execution::sync_wait(f->seal());
 
@@ -945,7 +966,8 @@ TEST(discard_all) {
           wal_file_entry_t::write_records_buffer_t(
               std::initializer_list<wal_file_entry_t::write_variant_type>{
                 wal_record_noop{}, wal_record_skip32{ .bytes = 8 }, wal_record_skip32{ .bytes = 0 }
-              })));
+              }))
+      | earnest::execution::lazy_let_value([](auto& append_op) { return std::invoke(std::move(append_op)); }));
 
   earnest::execution::sync_wait(f->discard_all());
 
