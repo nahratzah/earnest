@@ -54,10 +54,10 @@ add_executable(wal_file_test)
 target_link_libraries(wal_file_test PUBLIC wal io UnitTest++)
 target_sources(wal_file_test PRIVATE
     tests/wal_file.cc
-    # tests/wal_file_create_wal.cc
+    tests/wal_file_create_wal.cc
     # tests/wal_file_reread_wal.cc
     # tests/wal_file_recovery.cc
-    # tests/wal_file_write.cc
+    tests/wal_file_write.cc
     # tests/wal_file_rollover.cc
     # tests/wal_file_open_with_gaps.cc
     # tests/wal_file_can_recover_from_interrupted_rollover.cc

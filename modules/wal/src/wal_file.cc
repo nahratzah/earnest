@@ -1,6 +1,7 @@
 #include <earnest/detail/wal_file.h>
 
 #include <stdexcept>
+#include <unordered_set>
 
 namespace earnest::detail {
 
@@ -515,7 +516,7 @@ auto wal_file::open(dir d, allocator_type alloc)
                     return std::allocate_shared<wal_file>(alloc,
                         std::move(d),
                         std::ranges::subrange(good_files.begin(), entries_start) // old entries (never been applied)
-                        | std::views::transform([](const auto& x) { return x.file->name; }),
+                        | std::views::transform([](const auto& x) { return x.file; }),
                         std::ranges::subrange(entries_start, entries_end) // new entries (to be applied)
                         | std::views::transform([](const auto& x) { return x.file; }),
                         entries_end->file, // active
@@ -590,6 +591,30 @@ auto wal_file::records(move_only_function<execution::type_erased_sender<std::var
           return optional_type(do_the_thing());
       })
   | discard_value();
+}
+
+auto wal_file::records() const -> execution::type_erased_sender<std::variant<std::tuple<records_vector>>, std::variant<std::exception_ptr, std::error_code>> {
+  using namespace execution;
+
+  // We don't use `on(strand_, ...)` here, because the `records(acceptor)` specialization will handle that for us.
+  return just(gsl::not_null<std::shared_ptr<const wal_file>>(this->shared_from_this()))
+  | lazy_then(
+      [](gsl::not_null<std::shared_ptr<const wal_file>> wf) {
+        return std::make_tuple(wf, records_vector(wf->get_allocator()));
+      })
+  | explode_tuple()
+  | lazy_let_value(
+      [](const gsl::not_null<std::shared_ptr<const wal_file>>& wf, records_vector& records) {
+        return wf->records(
+            [&records](record_type record) {
+              records.push_back(std::move(record));
+              return just();
+            })
+        | then(
+            [&records]() -> records_vector&& {
+              return std::move(records);
+            });
+      });
 }
 
 auto wal_file::raw_records(move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>(wal_file_entry::variant_type)> acceptor) const
@@ -699,6 +724,24 @@ auto wal_file::maybe_run_apply_() const noexcept -> void {
     logger->error("unable to start apply loop due to exception: {}", ex.what());
   } catch (...) {
     logger->error("unable to start apply loop due to exception"); // We don't know what...
+  }
+}
+
+auto wal_file::maybe_release_entries_() const noexcept -> void {
+  using namespace execution;
+
+  assert(strand_.running_in_this_thread());
+
+  wal_file& mutable_this = const_cast<wal_file&>(*this);
+  while (!old_entries.empty() && old_entries.front()->wal_file_data.read_locks == 0u) {
+    try {
+      mutable_this.very_old_entries.push_back(old_entries.front());
+    } catch (const std::bad_alloc&) {
+      logger->warn("memory allocation failure (during entries release)");
+      return;
+    }
+    mutable_this.old_entries.erase(old_entries.begin());
+    very_old_entries.back()->close(); // Close the file we just added.
   }
 }
 

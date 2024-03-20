@@ -1,52 +1,31 @@
 #pragma once
 
 #include <algorithm>
-#include <concepts>
 #include <cstddef>
-#include <deque>
+#include <exception>
 #include <filesystem>
 #include <functional>
-#include <iomanip>
-#include <ios>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
-#include <queue>
+#include <optional>
 #include <ranges>
 #include <scoped_allocator>
-#include <shared_mutex>
-#include <sstream>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
-#include <asio/append.hpp>
-#include <asio/associated_allocator.hpp>
-#include <asio/associated_executor.hpp>
-#include <asio/async_result.hpp>
-#include <asio/bind_allocator.hpp>
-#include <asio/bind_executor.hpp>
-#include <asio/deferred.hpp>
-#include <asio/executor_work_guard.hpp>
-#include <asio/strand.hpp>
-#include <asio/defer.hpp>
-#include <boost/iterator/filter_iterator.hpp>
-#include <boost/iterator/indirect_iterator.hpp>
-#include <boost/iterator/transform_iterator.hpp>
-
-#include <earnest/detail/adjecent_find_last.h>
-#include <earnest/detail/completion_barrier.h>
-#include <earnest/detail/completion_handler_fun.h>
-#include <earnest/detail/deferred_on_executor.h>
-#include <earnest/detail/err_deferred.h>
 #include <earnest/detail/file_recover_state.h>
 #include <earnest/detail/logger.h>
 #include <earnest/detail/wal_file_entry.h>
 #include <earnest/dir.h>
 #include <earnest/file_id.h>
+#include <earnest/move_only_function.h>
 
 namespace earnest::detail {
 
@@ -85,7 +64,7 @@ class wal_file
   using variant_type = typename entry_type::variant_type;
   using write_variant_type = typename entry_type::write_variant_type;
   using record_type = nb_variant_type;
-  using records_vector = typename entry_type::records_vector;
+  using records_vector = std::vector<record_type>;
   using write_records_vector = typename entry_type::write_records_vector;
   using fd_type = typename entry_type::fd_type;
 
@@ -185,7 +164,7 @@ class wal_file
     entries(alloc),
     cached_file_replacements_(cached_file_replacements)
   {
-    std::ranges::copy(std::forward<VeryOldEntries>(very_old_entries), std::inserter(this->very_old_entries, this->very_old_entries.end()));
+    std::ranges::copy(std::forward<VeryOldEntries>(very_old_entries), std::back_inserter(this->very_old_entries));
     std::ranges::copy(std::forward<Entries>(entries), std::back_inserter(this->entries));
   }
 
@@ -260,6 +239,10 @@ class wal_file
   -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
 
   [[nodiscard]]
+  auto records() const
+  -> execution::type_erased_sender<std::variant<std::tuple<records_vector>>, std::variant<std::exception_ptr, std::error_code>>;
+
+  [[nodiscard]]
   auto raw_records(move_only_function<execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>(wal_file_entry::variant_type)> acceptor) const
   -> execution::type_erased_sender<std::variant<std::tuple<>>, std::variant<std::exception_ptr, std::error_code>>;
 
@@ -284,9 +267,54 @@ class wal_file
     return std::exchange(auto_rollover_size_, new_size);
   }
 
+  auto entries_empty() const -> bool {
+    std::lock_guard lck{strand_};
+    return entries.empty();
+  }
+
+  auto entries_size() const -> entries_list::size_type {
+    std::lock_guard lck{strand_};
+    return entries.size();
+  }
+
+  auto old_entries_empty() const -> bool {
+    std::lock_guard lck{strand_};
+    return old_entries.empty();
+  }
+
+  auto old_entries_size() const -> entries_list::size_type {
+    std::lock_guard lck{strand_};
+    return old_entries.size();
+  }
+
+  auto very_old_entries_empty() const -> bool {
+    std::lock_guard lck{strand_};
+    return very_old_entries.empty();
+  }
+
+  auto very_old_entries_size() const -> entries_list::size_type {
+    std::lock_guard lck{strand_};
+    return very_old_entries.size();
+  }
+
+  auto active_filename() const -> std::filesystem::path {
+    std::lock_guard lck{strand_};
+    return active->name;
+  }
+
+  auto active_state() const -> wal_file_entry_state {
+    std::lock_guard lck{strand_};
+    return active->state();
+  }
+
+  auto active_sequence() const -> std::uint_fast64_t {
+    std::lock_guard lck{strand_};
+    return active->sequence;
+  }
+
   private:
   auto maybe_run_apply_() const noexcept -> void;
-  auto maybe_release_entries_() const noexcept -> void; // XXX implement
+  auto maybe_release_entries_() const noexcept -> void;
 
   template<std::ranges::range FileRange>
   static auto compute_cached_file_replacements_(FileRange&& file_range, allocator_type alloc)
@@ -413,7 +441,8 @@ class wal_file
   // These have been applied, but haven't yet been cleaned up.
   // Once they're processed, they should be deleted.
   // These may have gaps.
-  std::unordered_set<std::filesystem::path, fs_path_hash> very_old_entries;
+  // These are usually closed.
+  entries_list very_old_entries;
   // Old entries.
   // These entries have been applied, but might still have readers using them.
   entries_list old_entries;

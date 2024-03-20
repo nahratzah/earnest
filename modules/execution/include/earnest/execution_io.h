@@ -568,7 +568,7 @@ struct lazy_read_some_at_ec_t {
 
     friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
       auto rlen = ::pread(self.fd, self.buf.data(), self.buf.size(), self.offset);
-      bool eof = true;
+      bool eof = !self.buf.empty();
       if (rlen == -1) {
         auto ec = std::error_code(errno, std::generic_category());
         if (ec == std::make_error_code(std::errc::interrupted)) {
@@ -621,7 +621,7 @@ struct lazy_read_some_at_ec_t {
 
     friend auto tag_invoke([[maybe_unused]] start_t, vectored_opstate& self) noexcept -> void {
       auto rlen = ::preadv(self.fd, self.iov.data(), self.iov.size(), self.offset);
-      bool eof = true;
+      bool eof = std::any_of(self.iov.begin(), self.iov.end(), [](const auto& span) { return span.iov_len != 0; });
       if (rlen == -1) {
         auto ec = std::error_code(errno, std::generic_category());
         if (ec == std::make_error_code(std::errc::interrupted)) {
@@ -836,7 +836,7 @@ struct lazy_read_some_ec_t {
 
     friend auto tag_invoke([[maybe_unused]] start_t, opstate& self) noexcept -> void {
       auto rlen = ::read(self.fd, self.buf.data(), self.buf.size());
-      bool eof = true;
+      bool eof = !self.buf.empty();
       if (rlen == -1) {
         auto ec = std::error_code(errno, std::generic_category());
         if (ec == std::make_error_code(std::errc::interrupted)) {
@@ -887,7 +887,7 @@ struct lazy_read_some_ec_t {
 
     friend auto tag_invoke([[maybe_unused]] start_t, vectored_opstate& self) noexcept -> void {
       auto rlen = ::readv(self.fd, self.iov.data(), self.iov.size());
-      bool eof = true;
+      bool eof = std::any_of(self.iov.begin(), self.iov.end(), [](const auto& span) { return span.iov_len != 0; });
       if (rlen == -1) {
         auto ec = std::error_code(errno, std::generic_category());
         if (ec == std::make_error_code(std::errc::interrupted)) {

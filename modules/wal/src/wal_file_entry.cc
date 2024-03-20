@@ -1140,22 +1140,19 @@ auto wal_file_entry::records(move_only_function<execution::type_erased_sender<st
                         return std::invoke(st.acceptor, std::move(record));
                       },
                       [&st, read_pos]([[maybe_unused]] set_error_t tag, std::error_code ec) {
-                        return just(std::ref(st), ec, read_pos)
+                        if (ec == execution::io::errc::eof && st.reader.position() == read_pos) {
+                          st.should_stop = true;
+                          ec.clear();
+                        }
+                        return just(ec)
                         | validation(
-                            [](state& st, std::error_code ec, auto read_pos) -> std::optional<std::error_code> {
-                              if (ec == execution::io::errc::eof && st.reader.position() == read_pos) {
-                                st.should_stop = true;
-                                return std::nullopt;
-                              }
-                              return std::make_optional(ec);
+                            [](std::error_code ec) -> std::optional<std::error_code> {
+                              if (ec) return ec;
+                              return std::nullopt;
                             });
                       },
                       []([[maybe_unused]] set_error_t tag, std::exception_ptr ex) {
-                        return just(std::move(ex))
-                        | validation(
-                            [](std::exception_ptr ex) {
-                              return std::make_optional(ex);
-                            });
+                        return just_error<>(std::move(ex));
                       }));
             };
 

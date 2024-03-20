@@ -2,36 +2,23 @@
 
 #include "wal_file.h"
 #include <UnitTest++/UnitTest++.h>
-
-#include <iostream>
-#include <algorithm>
-
-#include <asio/io_context.hpp>
+#include <earnest/execution.h>
 
 TEST(create_wal) {
   const earnest::dir testdir = ensure_dir_exists_and_is_empty("create_wal");
 
-  asio::io_context ioctx;
-  auto w = std::make_shared<earnest::detail::wal_file<asio::io_context::executor_type, std::allocator<std::byte>>>(ioctx.get_executor(), std::allocator<std::byte>());
-
   /*
    * Test: create a new wal.
    */
-  bool handler_was_called = false;
-  w->async_create(testdir,
-      [&](std::error_code ec) {
-        CHECK_EQUAL(std::error_code(), ec);
-        handler_was_called = true;
-      });
-  ioctx.run();
-
-  CHECK(handler_was_called);
+  auto [w] = earnest::execution::sync_wait(earnest::detail::wal_file::create(testdir)).value();
 
   /*
    * Validation.
    */
-  CHECK(w->entries.empty());
-  CHECK_EQUAL(0u, w->active->file->sequence);
-  CHECK_EQUAL("0000000000000000.wal", w->active->file->name);
-  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active->file->state());
+  CHECK(w->entries_empty());
+  CHECK(w->old_entries_empty());
+  CHECK(w->very_old_entries_empty());
+  CHECK_EQUAL(0u, w->active_sequence());
+  CHECK_EQUAL("earnest-wal-0000000000000000.wal", w->active_filename());
+  CHECK_EQUAL(::earnest::detail::wal_file_entry_state::ready, w->active_state());
 }

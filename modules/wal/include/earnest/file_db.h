@@ -37,7 +37,7 @@
 #include <earnest/detail/forward_deferred.h>
 #include <earnest/detail/handler_traits.h>
 #include <earnest/detail/monitor.h>
-#include <earnest/detail/move_only_function.h>
+#include <earnest/move_only_function.h>
 #include <earnest/detail/namespace_map.h>
 #include <earnest/detail/positional_stream_adapter.h>
 #include <earnest/detail/replacement_map.h>

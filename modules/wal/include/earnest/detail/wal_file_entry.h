@@ -354,7 +354,7 @@ class wal_file_entry_file {
         })
     | lazy_let_value(
         [](gsl::not_null<std::shared_ptr<const wal_file_entry_file>> self, offset_type offset, std::span<std::byte> buf) {
-          if (buf.size() > self->end_offset - offset) buf = buf.subspan(0, self->end_offset - offset);
+          if (buf.size() > self->link_offset - offset) buf = buf.subspan(0, self->link_offset - offset);
           return io::read_some_at_ec(self->file, offset, buf);
         });
   }
